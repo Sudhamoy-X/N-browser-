@@ -1,0 +1,220 @@
+{
+  "entities": {
+    "BookmarkItem": {
+      "title": "BookmarkItem",
+      "description": "A user-saved browser bookmark synchronized across devices.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "The UID of the authenticated owner."
+        },
+        "title": {
+          "type": "string",
+          "description": "Display title of the bookmarked page."
+        },
+        "url": {
+          "type": "string",
+          "description": "Normalized URL of the bookmarked page."
+        },
+        "folder": {
+          "type": "string",
+          "description": "Bookmark folder name (e.g. General, Work, Reading)."
+        },
+        "isShortcut": {
+          "type": "boolean",
+          "description": "Whether this bookmark is pinned to the homepage shortcuts."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when created (FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when last updated (FieldValue.serverTimestamp())."
+        }
+      },
+      "required": ["userId", "title", "url", "folder", "isShortcut", "createdAt", "updatedAt"]
+    },
+    "HistoryItem": {
+      "title": "HistoryItem",
+      "description": "A normal-browsing history entry synchronized for the user.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "The UID of the authenticated owner."
+        },
+        "title": {
+          "type": "string",
+          "description": "Page title at time of visit."
+        },
+        "url": {
+          "type": "string",
+          "description": "Visited URL."
+        },
+        "visitedAt": {
+          "type": "integer",
+          "description": "Epoch milliseconds of visit."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when created (FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when updated (FieldValue.serverTimestamp())."
+        }
+      },
+      "required": ["userId", "title", "url", "visitedAt", "createdAt", "updatedAt"]
+    },
+    "SyncedTabItem": {
+      "title": "SyncedTabItem",
+      "description": "A normal browser tab persisted for session restore and cross-device tab sync.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "The UID of the authenticated owner."
+        },
+        "title": {
+          "type": "string",
+          "description": "Current tab title."
+        },
+        "url": {
+          "type": "string",
+          "description": "Current tab URL."
+        },
+        "groupName": {
+          "type": "string",
+          "description": "Tab group label (e.g. Default, Research, Media)."
+        },
+        "isActive": {
+          "type": "boolean",
+          "description": "Whether this tab is currently selected."
+        },
+        "desktopMode": {
+          "type": "boolean",
+          "description": "Whether desktop user-agent is enabled for this tab."
+        },
+        "textZoom": {
+          "type": "integer",
+          "description": "Text zoom percentage (50 to 250)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when created (FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when updated (FieldValue.serverTimestamp())."
+        }
+      },
+      "required": ["userId", "title", "url", "groupName", "isActive", "desktopMode", "textZoom", "createdAt", "updatedAt"]
+    },
+    "SiteSettingItem": {
+      "title": "SiteSettingItem",
+      "description": "Per-site permissions and content-blocking exceptions.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "The UID of the authenticated owner."
+        },
+        "host": {
+          "type": "string",
+          "description": "Normalized domain host (e.g. example.com)."
+        },
+        "allowAds": {
+          "type": "boolean",
+          "description": "If true, ad/tracker blocking is disabled on this host."
+        },
+        "allowPopups": {
+          "type": "boolean",
+          "description": "If true, pop-up blocking is disabled on this host."
+        },
+        "allowRedirects": {
+          "type": "boolean",
+          "description": "If true, auto-redirect blocking is disabled on this host."
+        },
+        "desktopMode": {
+          "type": "boolean",
+          "description": "If true, always request desktop site for this host."
+        },
+        "textZoom": {
+          "type": "integer",
+          "description": "Custom text zoom percentage (50 to 250) for this host."
+        },
+        "cameraPermission": {
+          "type": "string",
+          "enum": ["ASK", "ALLOW", "DENY"],
+          "description": "Site camera permission state."
+        },
+        "micPermission": {
+          "type": "string",
+          "enum": ["ASK", "ALLOW", "DENY"],
+          "description": "Site microphone permission state."
+        },
+        "locationPermission": {
+          "type": "string",
+          "enum": ["ASK", "ALLOW", "DENY"],
+          "description": "Site geolocation permission state."
+        },
+        "notificationPermission": {
+          "type": "string",
+          "enum": ["ASK", "ALLOW", "DENY"],
+          "description": "Site notification permission state."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when created (FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when updated (FieldValue.serverTimestamp())."
+        }
+      },
+      "required": [
+        "userId",
+        "host",
+        "allowAds",
+        "allowPopups",
+        "allowRedirects",
+        "desktopMode",
+        "textZoom",
+        "cameraPermission",
+        "micPermission",
+        "locationPermission",
+        "notificationPermission",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/bookmarks/{bookmarkId}": {
+      "schema": "BookmarkItem",
+      "description": "User bookmarks synced across devices."
+    },
+    "/users/{userId}/history/{historyId}": {
+      "schema": "HistoryItem",
+      "description": "User browsing history entries."
+    },
+    "/users/{userId}/tabs/{tabId}": {
+      "schema": "SyncedTabItem",
+      "description": "User normal tabs persisted for session restoration and sync."
+    },
+    "/users/{userId}/site_settings/{hostId}": {
+      "schema": "SiteSettingItem",
+      "description": "Per-site permissions and blocking overrides."
+    }
+  }
+}

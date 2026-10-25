@@ -1,0 +1,195 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Global Hardened Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidPermissionState(val) {
+      return val is string && (val == 'ASK' || val == 'ALLOW' || val == 'DENY');
+    }
+
+    // 3. Entity Validation Blueprints
+    function isValidBookmarkItem(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.userId == request.auth.uid &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 300 &&
+             data.url is string && data.url.size() >= 1 && data.url.size() <= 2048 &&
+             data.folder is string && data.folder.size() >= 1 && data.folder.size() <= 100 &&
+             data.isShortcut is bool &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidHistoryItem(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.userId == request.auth.uid &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 300 &&
+             data.url is string && data.url.size() >= 1 && data.url.size() <= 2048 &&
+             data.visitedAt is int && data.visitedAt >= 0 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidSyncedTabItem(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.userId == request.auth.uid &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 300 &&
+             data.url is string && data.url.size() >= 1 && data.url.size() <= 2048 &&
+             data.groupName is string && data.groupName.size() >= 1 && data.groupName.size() <= 100 &&
+             data.isActive is bool &&
+             data.desktopMode is bool &&
+             data.textZoom is int && data.textZoom >= 50 && data.textZoom <= 250 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidSiteSettingItem(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.userId == request.auth.uid &&
+             data.host is string && data.host.size() >= 1 && data.host.size() <= 255 &&
+             data.allowAds is bool &&
+             data.allowPopups is bool &&
+             data.allowRedirects is bool &&
+             data.desktopMode is bool &&
+             data.textZoom is int && data.textZoom >= 50 && data.textZoom <= 250 &&
+             isValidPermissionState(data.cameraPermission) &&
+             isValidPermissionState(data.micPermission) &&
+             isValidPermissionState(data.locationPermission) &&
+             isValidPermissionState(data.notificationPermission) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    // 4. Collection Rules under /users/{userId}
+    match /users/{userId}/bookmarks/{bookmarkId} {
+      allow get: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidId(bookmarkId);
+      allow list: if isSignedIn() && request.auth.uid == userId && existing().userId == request.auth.uid;
+
+      allow create: if isSignedIn() &&
+                       request.auth.uid == userId &&
+                       isValidId(userId) &&
+                       isValidId(bookmarkId) &&
+                       incoming().keys().hasAll(['userId', 'title', 'url', 'folder', 'isShortcut', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'title', 'url', 'folder', 'isShortcut', 'createdAt', 'updatedAt']) &&
+                       isValidBookmarkItem(incoming());
+
+      allow update: if isValidBookmarkItem(incoming()) &&
+                       isSignedIn() &&
+                       request.auth.uid == userId &&
+                       isValidId(userId) &&
+                       isValidId(bookmarkId) &&
+                       existing().userId == request.auth.uid &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['title', 'url', 'folder', 'isShortcut', 'updatedAt']);
+
+      allow delete: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidId(bookmarkId);
+    }
+
+    match /users/{userId}/history/{historyId} {
+      allow get: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidId(historyId);
+      allow list: if isSignedIn() && request.auth.uid == userId && existing().userId == request.auth.uid;
+
+      allow create: if isSignedIn() &&
+                       request.auth.uid == userId &&
+                       isValidId(userId) &&
+                       isValidId(historyId) &&
+                       incoming().keys().hasAll(['userId', 'title', 'url', 'visitedAt', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'title', 'url', 'visitedAt', 'createdAt', 'updatedAt']) &&
+                       isValidHistoryItem(incoming());
+
+      allow update: if isValidHistoryItem(incoming()) &&
+                       isSignedIn() &&
+                       request.auth.uid == userId &&
+                       isValidId(userId) &&
+                       isValidId(historyId) &&
+                       existing().userId == request.auth.uid &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['title', 'url', 'visitedAt', 'updatedAt']);
+
+      allow delete: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidId(historyId);
+    }
+
+    match /users/{userId}/tabs/{tabId} {
+      allow get: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidId(tabId);
+      allow list: if isSignedIn() && request.auth.uid == userId && existing().userId == request.auth.uid;
+
+      allow create: if isSignedIn() &&
+                       request.auth.uid == userId &&
+                       isValidId(userId) &&
+                       isValidId(tabId) &&
+                       incoming().keys().hasAll(['userId', 'title', 'url', 'groupName', 'isActive', 'desktopMode', 'textZoom', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'title', 'url', 'groupName', 'isActive', 'desktopMode', 'textZoom', 'createdAt', 'updatedAt']) &&
+                       isValidSyncedTabItem(incoming());
+
+      allow update: if isValidSyncedTabItem(incoming()) &&
+                       isSignedIn() &&
+                       request.auth.uid == userId &&
+                       isValidId(userId) &&
+                       isValidId(tabId) &&
+                       existing().userId == request.auth.uid &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['title', 'url', 'groupName', 'isActive', 'desktopMode', 'textZoom', 'updatedAt']);
+
+      allow delete: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidId(tabId);
+    }
+
+    match /users/{userId}/site_settings/{hostId} {
+      allow get: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidId(hostId);
+      allow list: if isSignedIn() && request.auth.uid == userId && existing().userId == request.auth.uid;
+
+      allow create: if isSignedIn() &&
+                       request.auth.uid == userId &&
+                       isValidId(userId) &&
+                       isValidId(hostId) &&
+                       incoming().keys().hasAll([
+                         'userId', 'host', 'allowAds', 'allowPopups', 'allowRedirects',
+                         'desktopMode', 'textZoom', 'cameraPermission', 'micPermission',
+                         'locationPermission', 'notificationPermission', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'host', 'allowAds', 'allowPopups', 'allowRedirects',
+                         'desktopMode', 'textZoom', 'cameraPermission', 'micPermission',
+                         'locationPermission', 'notificationPermission', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidSiteSettingItem(incoming());
+
+      allow update: if isValidSiteSettingItem(incoming()) &&
+                       isSignedIn() &&
+                       request.auth.uid == userId &&
+                       isValidId(userId) &&
+                       isValidId(hostId) &&
+                       existing().userId == request.auth.uid &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'host', 'allowAds', 'allowPopups', 'allowRedirects',
+                         'desktopMode', 'textZoom', 'cameraPermission', 'micPermission',
+                         'locationPermission', 'notificationPermission', 'updatedAt'
+                       ]);
+
+      allow delete: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidId(hostId);
+    }
+  }
+}

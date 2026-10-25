@@ -1,0 +1,29 @@
+<resources>
+    <string name="app_name">NYXORA Browser</string>
+    <string name="tagline">Browse Beyond Ordinary.</string>
+    <string name="search_or_enter_address">Search or enter address</string>
+    <string name="private_browsing_mode">Private Browsing</string>
+    <string name="normal_browsing_mode">Normal Tabs</string>
+    <string name="new_tab">New Tab</string>
+    <string name="new_private_tab">New Private Tab</string>
+    <string name="close_all_tabs">Close All Tabs</string>
+    <string name="reopen_closed_tab">Reopen Closed Tab</string>
+    <string name="bookmarks_title">Bookmarks</string>
+    <string name="history_title">History</string>
+    <string name="downloads_title">Downloads</string>
+    <string name="settings_title">Settings</string>
+    <string name="site_settings_title">Site Settings</string>
+    <string name="reader_mode_title">Reader View</string>
+    <string name="split_view_title">Split View</string>
+    <string name="find_in_page_hint">Find in page…</string>
+    <string name="allow_once">Allow once</string>
+    <string name="sign_in_with_google">Sign in with Google</string>
+    <string name="nav_back">Back</string>
+    <string name="nav_forward">Forward</string>
+    <string name="nav_home">Home</string>
+    <string name="nav_tabs">Tabs</string>
+    <string name="nav_menu">Menu</string>
+    <string name="reload_page">Reload page</string>
+    <string name="stop_loading">Stop loading</string>
+    <string name="clear_input">Clear input</string>
+</resources>

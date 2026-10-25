@@ -1,0 +1,6 @@
+{
+  "name": "NYXORA Browser",
+  "description": "A fast, private, next-generation Android browser with ad, pop-up, and redirect blocking, custom tabs, and cross-device sync.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
