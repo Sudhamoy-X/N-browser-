@@ -1,6 +1,6 @@
 package com.example.ui.screens
 
-import androidx.compose.foundation.background
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Close
@@ -35,7 +36,6 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -77,24 +77,28 @@ fun NyxoraTabSwitcherSheet(
     onOpenInSplitView: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
+    BackHandler(onBack = onDismiss)
+
     var selectedGroup by remember { mutableStateOf("All") }
     var showCloseAllConfirm by remember { mutableStateOf(false) }
     var pinInput by remember { mutableStateOf("") }
     var pinError by remember { mutableStateOf(false) }
 
     val displayedTabs = remember(isPrivateMode, normalTabs, privateTabs, selectedGroup) {
-        val base = if (isPrivateMode) privateTabs else normalTabs
+        val base = (if (isPrivateMode) privateTabs else normalTabs).distinctBy { it.id }
         if (selectedGroup == "All") base else base.filter { it.groupName.equals(selectedGroup, ignoreCase = true) }
     }
 
     Surface(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("nyxora_tab_switcher_sheet"),
         color = MaterialTheme.colorScheme.background
     ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 16.dp, vertical = 14.dp)
+                .padding(horizontal = 16.dp, vertical = 12.dp)
         ) {
             // Top Switcher Bar
             Row(
@@ -106,7 +110,7 @@ fun NyxoraTabSwitcherSheet(
                     FilterChip(
                         selected = !isPrivateMode,
                         onClick = { onSwitchMode(false) },
-                        label = { Text("Normal (${normalTabs.size})") },
+                        label = { Text("Tabs (${normalTabs.size})") },
                         modifier = Modifier.testTag("tab_switcher_normal_mode")
                     )
                     FilterChip(
@@ -119,7 +123,7 @@ fun NyxoraTabSwitcherSheet(
                                 modifier = Modifier.size(16.dp)
                             )
                         },
-                        label = { Text("Private (${privateTabs.size})") },
+                        label = { Text("Incognito (${privateTabs.size})") },
                         modifier = Modifier.testTag("tab_switcher_private_mode")
                     )
                 }
@@ -157,9 +161,36 @@ fun NyxoraTabSwitcherSheet(
                 }
             }
 
+            if (isPrivateMode) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.VisibilityOff,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Incognito tabs do not save browsing history, cookies, or site data after closing.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Tier 3 Signature Feature: Tab Group Filter Bar
+            // Tab Group Filter Bar
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -175,10 +206,9 @@ fun NyxoraTabSwitcherSheet(
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             if (isPrivateMode && !isPrivateUnlocked) {
-                // Tier 3 Private Tabs PIN / Security Lock Screen
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -186,10 +216,11 @@ fun NyxoraTabSwitcherSheet(
                     contentAlignment = Alignment.Center
                 ) {
                     Surface(
-                        shape = MaterialTheme.shapes.large,
+                        shape = RoundedCornerShape(16.dp),
                         color = MaterialTheme.colorScheme.surface,
-                        tonalElevation = 3.dp,
-                        modifier = Modifier.padding(24.dp)
+                        modifier = Modifier
+                            .padding(24.dp)
+                            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(16.dp))
                     ) {
                         Column(
                             modifier = Modifier.padding(24.dp),
@@ -199,11 +230,11 @@ fun NyxoraTabSwitcherSheet(
                             Icon(
                                 imageVector = Icons.Outlined.Lock,
                                 contentDescription = null,
-                                tint = MaterialTheme.colorScheme.secondary,
-                                modifier = Modifier.size(36.dp)
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(32.dp)
                             )
                             Text(
-                                text = "Private Tabs Locked",
+                                text = "Incognito Tabs Locked",
                                 style = MaterialTheme.typography.titleLarge
                             )
                             OutlinedTextField(
@@ -233,18 +264,31 @@ fun NyxoraTabSwitcherSheet(
                                     }
                                 }
                             ) {
-                                Text("Unlock Private Session")
+                                Text("Unlock Incognito")
                             }
                         }
                     }
                 }
+            } else if (displayedTabs.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = if (isPrivateMode) "No open incognito tabs." else "No tabs in this group.",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             } else {
                 LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = 165.dp),
+                    columns = GridCells.Adaptive(minSize = 160.dp),
                     modifier = Modifier.weight(1f),
                     contentPadding = PaddingValues(vertical = 6.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     items(displayedTabs, key = { it.id }) { tab ->
                         val isSelected = if (isPrivateMode) {
@@ -292,11 +336,11 @@ fun NyxoraTabSwitcherSheet(
                         .weight(1f)
                         .height(48.dp)
                         .testTag("new_tab_button"),
-                    shape = MaterialTheme.shapes.medium
+                    shape = RoundedCornerShape(12.dp)
                 ) {
                     Icon(imageVector = Icons.Outlined.Add, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text(if (isPrivateMode) "New Private Tab" else "New Tab")
+                    Text(if (isPrivateMode) "New Incognito Tab" else "New Tab")
                 }
             }
         }
@@ -305,13 +349,13 @@ fun NyxoraTabSwitcherSheet(
     if (showCloseAllConfirm) {
         AlertDialog(
             onDismissRequest = { showCloseAllConfirm = false },
-            title = { Text(if (isPrivateMode) "Wipe All Private Tabs?" else "Close All Normal Tabs?") },
+            title = { Text(if (isPrivateMode) "Close All Incognito Tabs?" else "Close All Tabs?") },
             text = {
                 Text(
                     if (isPrivateMode) {
-                        "This will immediately close all private tabs and wipe session cookies and DOM storage."
+                        "This will immediately close all incognito tabs and clear private session data."
                     } else {
-                        "All open normal tabs will be closed. You can reopen recently closed tabs from the tab switcher."
+                        "All open tabs will be closed. You can reopen recently closed tabs from the tab switcher."
                     }
                 )
             },
@@ -320,7 +364,8 @@ fun NyxoraTabSwitcherSheet(
                     onClick = {
                         showCloseAllConfirm = false
                         onCloseAllTabs(isPrivateMode)
-                    }
+                    },
+                    modifier = Modifier.testTag("confirm_close_all_tabs_button")
                 ) {
                     Text("Close All")
                 }
@@ -345,7 +390,6 @@ private fun TabCompactCard(
     onSplitView: () -> Unit
 ) {
     val borderColor = when {
-        isSelected && tab.isPrivate -> MaterialTheme.colorScheme.secondary
         isSelected -> MaterialTheme.colorScheme.primary
         else -> MaterialTheme.colorScheme.outline
     }
@@ -353,16 +397,16 @@ private fun TabCompactCard(
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .height(148.dp)
+            .height(144.dp)
             .border(
-                width = if (isSelected) 2.dp else 1.dp,
+                width = if (isSelected) 1.5.dp else 1.dp,
                 color = borderColor,
-                shape = MaterialTheme.shapes.medium
+                shape = RoundedCornerShape(14.dp)
             )
-            .clickable(onClick = onSelect),
-        shape = MaterialTheme.shapes.medium,
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = if (isSelected) 4.dp else 1.dp
+            .clickable(onClick = onSelect)
+            .testTag("tab_card_${tab.id}"),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surface
     ) {
         Column(
             modifier = Modifier
@@ -376,21 +420,34 @@ private fun TabCompactCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Surface(
-                    shape = MaterialTheme.shapes.extraSmall,
-                    color = if (tab.isPrivate) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.primaryContainer,
+                    shape = RoundedCornerShape(6.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
                     modifier = Modifier.size(24.dp)
                 ) {
                     Box(contentAlignment = Alignment.Center) {
-                        Text(
-                            text = tab.title.firstOrNull()?.uppercaseChar()?.toString() ?: "N",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold
-                        )
+                        if (tab.isPrivate) {
+                            Icon(
+                                imageVector = Icons.Outlined.VisibilityOff,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        } else {
+                            val badgeChar = tab.host.firstOrNull()?.uppercaseChar()
+                                ?: tab.title.firstOrNull()?.uppercaseChar()
+                                ?: 'N'
+                            Text(
+                                text = badgeChar.toString(),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
                     }
                 }
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = tab.title,
+                    text = tab.title.ifBlank { "New Tab" },
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
@@ -399,12 +456,15 @@ private fun TabCompactCard(
                 )
                 IconButton(
                     onClick = onClose,
-                    modifier = Modifier.size(28.dp)
+                    modifier = Modifier
+                        .size(28.dp)
+                        .testTag("close_tab_${tab.id}")
                 ) {
                     Icon(
                         imageVector = Icons.Outlined.Close,
                         contentDescription = "Close tab ${tab.title}",
-                        modifier = Modifier.size(16.dp)
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
@@ -415,45 +475,67 @@ private fun TabCompactCard(
                     .fillMaxWidth()
                     .weight(1f)
                     .padding(vertical = 6.dp),
-                shape = MaterialTheme.shapes.small,
-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                shape = RoundedCornerShape(8.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
             ) {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(8.dp),
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
                     verticalArrangement = Arrangement.Center
                 ) {
                     Text(
-                        text = if (tab.isHomePage) "nyxora://home" else tab.url,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 2,
+                        text = if (tab.isHomePage) "Homepage" else tab.host.ifBlank { tab.url },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
+                    if (!tab.isHomePage) {
+                        Text(
+                            text = tab.url,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
 
-            // Footer: Group Tag + Duplicate + Split View
+            // Footer: Group Tag + Active Indicator + Split View + Duplicate
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Surface(
-                    shape = MaterialTheme.shapes.extraSmall,
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    modifier = Modifier.clickable(onClick = onCycleGroup)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Text(
-                        text = tab.groupName,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                    )
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        modifier = Modifier.clickable(onClick = onCycleGroup)
+                    ) {
+                        Text(
+                            text = tab.groupName,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                    if (isSelected) {
+                        Text(
+                            text = "Active",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                     if (!tab.isPrivate) {
                         IconButton(
                             onClick = onSplitView,

@@ -3,12 +3,12 @@ package com.example.ui.screens
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.webkit.WebView
+import android.content.Intent
+import android.provider.Settings
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,25 +24,29 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.BookmarkBorder
+import androidx.compose.material.icons.outlined.CastConnected
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.Download
-import androidx.compose.material.icons.outlined.ExpandLess
-import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Language
+import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
-import androidx.compose.material.icons.outlined.Security
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Tune
@@ -66,10 +70,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -79,6 +83,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.local.FullscreenOrientationMode
 import com.example.data.local.NyxoraSettingsState
+import com.example.domain.browser.InputClassification
+import com.example.domain.browser.UrlAndSearchHandler
 import com.example.data.local.SearchEngine
 import com.example.data.local.ThemeMode
 import com.example.data.local.VideoAspectMode
@@ -166,7 +172,7 @@ fun NyxoraBookmarksSheet(
             if (filtered.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
-                        text = "No bookmarks match your filter.",
+                        text = "No bookmarks saved yet.",
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -177,11 +183,12 @@ fun NyxoraBookmarksSheet(
                         Surface(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp))
                                 .clickable {
                                     onSelectUrl(bm.url)
                                     onDismiss()
                                 },
-                            shape = MaterialTheme.shapes.medium,
+                            shape = RoundedCornerShape(12.dp),
                             color = MaterialTheme.colorScheme.surface
                         ) {
                             Row(
@@ -303,7 +310,12 @@ fun NyxoraHistorySheet(
         }
     }
 
-    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+    Surface(
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("nyxora_history_sheet"),
+        color = MaterialTheme.colorScheme.background
+    ) {
         Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -311,10 +323,13 @@ fun NyxoraHistorySheet(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onDismiss) {
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.testTag("history_back_button")
+                    ) {
                         Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "Back")
                     }
-                    Text("Browsing History", style = MaterialTheme.typography.titleLarge)
+                    Text("History", style = MaterialTheme.typography.titleLarge)
                 }
                 OutlinedButton(onClick = { showClearDialog = true }) {
                     Icon(Icons.Outlined.DeleteSweep, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -348,11 +363,12 @@ fun NyxoraHistorySheet(
                         Surface(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp))
                                 .clickable {
                                     onSelectUrl(item.url)
                                     onDismiss()
                                 },
-                            shape = MaterialTheme.shapes.medium,
+                            shape = RoundedCornerShape(12.dp),
                             color = MaterialTheme.colorScheme.surface
                         ) {
                             Row(
@@ -362,7 +378,7 @@ fun NyxoraHistorySheet(
                                 Icon(
                                     imageVector = Icons.Outlined.History,
                                     contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                                 Spacer(Modifier.width(12.dp))
                                 Column(modifier = Modifier.weight(1f)) {
@@ -487,18 +503,27 @@ fun NyxoraDownloadsSheet(
                             onResumeOrRetry = { downloadEngine.resumeOrRetryDownload(dl.id) },
                             onCancelOrDelete = { downloadEngine.deleteDownloadRecord(dl.id, true) },
                             onOpen = {
-                                val intent = downloadEngine.buildOpenFileIntent(dl)
-                                if (intent != null) {
-                                    runCatching { context.startActivity(intent) }
-                                        .onFailure { onToast("No app installed to open ${dl.mimeType}") }
-                                } else {
-                                    onToast("File no longer exists on disk")
+                                runCatching {
+                                    val intent = downloadEngine.buildOpenFileIntent(dl)
+                                    if (intent != null) {
+                                        context.startActivity(intent)
+                                    } else {
+                                        onToast("File no longer exists on disk")
+                                    }
+                                }.onFailure {
+                                    onToast("No app installed to open ${dl.fileName}")
                                 }
                             },
                             onShare = {
-                                val intent = downloadEngine.buildShareFileIntent(dl)
-                                if (intent != null) {
-                                    runCatching { context.startActivity(intent) }
+                                runCatching {
+                                    val intent = downloadEngine.buildShareFileIntent(dl)
+                                    if (intent != null) {
+                                        context.startActivity(intent)
+                                    } else {
+                                        onToast("File no longer exists on disk")
+                                    }
+                                }.onFailure {
+                                    onToast("Unable to share ${dl.fileName}")
                                 }
                             }
                         )
@@ -519,8 +544,10 @@ private fun DownloadItemCard(
     onShare: () -> Unit
 ) {
     Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.medium,
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp)),
+        shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.surface
     ) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -600,144 +627,254 @@ private fun formatBytes(bytes: Long): String {
     return String.format("%.2f MB", mb)
 }
 
-// --- PER-SITE SETTINGS SHEET ---
+// --- GENERAL -> SITE SETTINGS SHEET (CONTENT, PERMISSIONS, SITE MANAGEMENT) ---
 
 @Composable
 fun NyxoraSiteSettingsSheet(
     currentHost: String,
     siteSettings: List<SiteSettingItem>,
     currentUserId: String,
+    settings: NyxoraSettingsState = NyxoraSettingsState(),
+    onUpdateSettings: ((NyxoraSettingsState) -> NyxoraSettingsState) -> Unit = {},
     onSaveSiteSetting: (SiteSettingItem) -> Unit,
     onDeleteSiteSetting: (String) -> Unit,
+    onClearAllSiteData: () -> Unit = {},
+    onResetSitePermissions: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
     BackHandler(onBack = onDismiss)
-    val activeHost = currentHost.takeIf { it.isNotBlank() && it != "nyxora.home" } ?: "example.com"
+    val activeHost = currentHost
+        .trim()
+        .lowercase()
+        .removePrefix("www.")
+        .removePrefix("m.")
+        .removePrefix("mobile.")
+        .takeIf { it.isNotBlank() && it != "nyxora.home" }
+        ?: "example.com"
     var selectedHost by remember(activeHost) { mutableStateOf(activeHost) }
 
     val currentSetting = remember(selectedHost, siteSettings) {
-        siteSettings.firstOrNull { it.host.equals(selectedHost, ignoreCase = true) }
+        findSiteSettingForHost(siteSettings, selectedHost)
             ?: SiteSettingItem(userId = currentUserId, host = selectedHost)
     }
 
-    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(16.dp),
+    Surface(
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("nyxora_site_settings_sheet"),
+        color = MaterialTheme.colorScheme.background
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .widthIn(max = 700.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            item {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onDismiss) {
-                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "Back")
-                    }
-                    Column {
-                        Text("Site Settings & Exceptions", style = MaterialTheme.typography.titleLarge)
-                        Text(
-                            text = "Host: $selectedHost",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.testTag("site_settings_back_button")
+                ) {
+                    Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "Back")
+                }
+                Column {
+                    Text("Site Settings", style = MaterialTheme.typography.titleLarge)
+                    Text(
+                        text = "Global defaults & overrides for $selectedHost",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
 
-            item {
-                Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surface) {
-                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Text("Content Blocking Exceptions for $selectedHost", style = MaterialTheme.typography.titleMedium)
-
-                        SettingToggleItem(
-                            title = "Allow Ads & Trackers on this site",
-                            subtitle = "Disable subresource ad filtering for $selectedHost",
-                            checked = currentSetting.allowAds,
-                            onCheckedChange = { onSaveSiteSetting(currentSetting.copy(allowAds = it)) }
-                        )
-                        SettingToggleItem(
-                            title = "Allow Pop-ups on this site",
-                            subtitle = "Permit window.open() without gesture check on $selectedHost",
-                            checked = currentSetting.allowPopups,
-                            onCheckedChange = { onSaveSiteSetting(currentSetting.copy(allowPopups = it)) }
-                        )
-                        SettingToggleItem(
-                            title = "Allow Auto-Redirects on this site",
-                            subtitle = "Permit cross-domain script redirects on $selectedHost",
-                            checked = currentSetting.allowRedirects,
-                            onCheckedChange = { onSaveSiteSetting(currentSetting.copy(allowRedirects = it)) }
-                        )
-                    }
+            // 1. CONTENT
+            SettingsSectionCard(title = "Content") {
+                Column {
+                    Text(
+                        text = "Default Text Size: ${settings.globalTextZoom}%",
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Slider(
+                        value = settings.globalTextZoom.toFloat(),
+                        onValueChange = { v ->
+                            val stepped = ((v / 5f).roundToInt() * 5).coerceIn(50, 250)
+                            onUpdateSettings { it.copy(globalTextZoom = stepped) }
+                        },
+                        valueRange = 50f..200f
+                    )
                 }
-            }
 
-            item {
-                Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surface) {
-                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Text("Display & Layout for $selectedHost", style = MaterialTheme.typography.titleMedium)
-
-                        SettingToggleItem(
-                            title = "Desktop Site Mode",
-                            subtitle = "Always request desktop layout on $selectedHost",
-                            checked = currentSetting.desktopMode,
-                            onCheckedChange = { onSaveSiteSetting(currentSetting.copy(desktopMode = it)) }
-                        )
-
-                        Column {
-                            Text(
-                                text = "Site Text Zoom: ${currentSetting.textZoom}%",
-                                style = MaterialTheme.typography.bodyLarge
-                            )
-                            Slider(
-                                value = currentSetting.textZoom.toFloat(),
-                                onValueChange = {
-                                    val stepped = ((it / 5f).roundToInt() * 5).coerceIn(50, 250)
-                                    onSaveSiteSetting(currentSetting.copy(textZoom = stepped))
-                                },
-                                valueRange = 50f..200f
-                            )
+                SettingToggleItem(
+                    title = "Desktop Site Preference",
+                    subtitle = "Request desktop websites by default",
+                    checked = settings.defaultDesktopSite,
+                    onCheckedChange = { v -> onUpdateSettings { it.copy(defaultDesktopSite = v) } }
+                )
+                SettingToggleItem(
+                    title = "JavaScript",
+                    subtitle = "Allow websites to run JavaScript",
+                    checked = settings.javascriptEnabled,
+                    onCheckedChange = { v -> onUpdateSettings { it.copy(javascriptEnabled = v) } }
+                )
+                SettingToggleItem(
+                    title = "Images",
+                    subtitle = "Load webpage images automatically",
+                    checked = !settings.dataSaverBlockImages,
+                    onCheckedChange = { loadImages -> onUpdateSettings { it.copy(dataSaverBlockImages = !loadImages) } }
+                )
+                SettingToggleItem(
+                    title = "Cookies",
+                    subtitle = "Allow websites to save and read cookie data",
+                    checked = settings.cookiesEnabled,
+                    onCheckedChange = { v -> onUpdateSettings { it.copy(cookiesEnabled = v) } }
+                )
+                SettingToggleItem(
+                    title = "Block Pop-ups and Redirects",
+                    subtitle = "Prevent sites from opening unrequested windows or cross-domain redirects",
+                    checked = settings.popupBlockingEnabled && settings.redirectBlockingEnabled,
+                    onCheckedChange = { v ->
+                        onUpdateSettings {
+                            it.copy(popupBlockingEnabled = v, redirectBlockingEnabled = v)
                         }
                     }
+                )
+            }
+
+            // 2. PERMISSIONS
+            SettingsSectionCard(title = "Permissions") {
+                PermissionStateSelector(
+                    label = "Location",
+                    currentState = currentSetting.locationPermission,
+                    onStateChange = {
+                        onSaveSiteSetting(currentSetting.copy(locationPermission = it))
+                        onUpdateSettings { s -> s.copy(defaultLocationPermission = it) }
+                    }
+                )
+                PermissionStateSelector(
+                    label = "Camera",
+                    currentState = currentSetting.cameraPermission,
+                    onStateChange = {
+                        onSaveSiteSetting(currentSetting.copy(cameraPermission = it))
+                        onUpdateSettings { s -> s.copy(defaultCameraPermission = it) }
+                    }
+                )
+                PermissionStateSelector(
+                    label = "Microphone",
+                    currentState = currentSetting.micPermission,
+                    onStateChange = {
+                        onSaveSiteSetting(currentSetting.copy(micPermission = it))
+                        onUpdateSettings { s -> s.copy(defaultMicPermission = it) }
+                    }
+                )
+                PermissionStateSelector(
+                    label = "Notifications",
+                    currentState = currentSetting.notificationPermission,
+                    onStateChange = {
+                        onSaveSiteSetting(currentSetting.copy(notificationPermission = it))
+                        onUpdateSettings { s -> s.copy(defaultNotificationPermission = it) }
+                    }
+                )
+                SettingToggleItem(
+                    title = "Clipboard Access",
+                    subtitle = "Allow websites to read or write clipboard content on user gesture",
+                    checked = settings.clipboardAccessEnabled,
+                    onCheckedChange = { v -> onUpdateSettings { it.copy(clipboardAccessEnabled = v) } }
+                )
+                Text(
+                    text = "File Access: Restricted to user-selected files via Android system document picker.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            // 3. INDIVIDUAL WEBSITE SETTINGS FOR SELECTED HOST
+            SettingsSectionCard(title = "Website Override: $selectedHost") {
+                SettingToggleItem(
+                    title = "Desktop Site for $selectedHost",
+                    subtitle = "Always load desktop version for this host",
+                    checked = currentSetting.desktopMode,
+                    onCheckedChange = { onSaveSiteSetting(currentSetting.copy(desktopMode = it)) }
+                )
+                SettingToggleItem(
+                    title = "Allow Ads on $selectedHost",
+                    subtitle = "Disable ad filtering on this website",
+                    checked = currentSetting.allowAds,
+                    onCheckedChange = { onSaveSiteSetting(currentSetting.copy(allowAds = it)) }
+                )
+                SettingToggleItem(
+                    title = "Allow Pop-ups on $selectedHost",
+                    subtitle = "Allow pop-up windows on this website",
+                    checked = currentSetting.allowPopups,
+                    onCheckedChange = { onSaveSiteSetting(currentSetting.copy(allowPopups = it)) }
+                )
+                SettingToggleItem(
+                    title = "Allow Redirects on $selectedHost",
+                    subtitle = "Allow automatic redirects on this website",
+                    checked = currentSetting.allowRedirects,
+                    onCheckedChange = { onSaveSiteSetting(currentSetting.copy(allowRedirects = it)) }
+                )
+                Column {
+                    Text(
+                        text = "Site Text Size ($selectedHost): ${currentSetting.textZoom}%",
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Slider(
+                        value = currentSetting.textZoom.toFloat(),
+                        onValueChange = {
+                            val stepped = ((it / 5f).roundToInt() * 5).coerceIn(50, 250)
+                            onSaveSiteSetting(currentSetting.copy(textZoom = stepped))
+                        },
+                        valueRange = 50f..200f
+                    )
                 }
             }
 
-            item {
-                Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surface) {
-                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Text("Hardware Permissions for $selectedHost", style = MaterialTheme.typography.titleMedium)
-
-                        PermissionStateSelector(
-                            label = "Camera",
-                            currentState = currentSetting.cameraPermission,
-                            onStateChange = { onSaveSiteSetting(currentSetting.copy(cameraPermission = it)) }
-                        )
-                        PermissionStateSelector(
-                            label = "Microphone",
-                            currentState = currentSetting.micPermission,
-                            onStateChange = { onSaveSiteSetting(currentSetting.copy(micPermission = it)) }
-                        )
-                        PermissionStateSelector(
-                            label = "Location",
-                            currentState = currentSetting.locationPermission,
-                            onStateChange = { onSaveSiteSetting(currentSetting.copy(locationPermission = it)) }
-                        )
-                        PermissionStateSelector(
-                            label = "Notifications",
-                            currentState = currentSetting.notificationPermission,
-                            onStateChange = { onSaveSiteSetting(currentSetting.copy(notificationPermission = it)) }
-                        )
+            // 4. SITE MANAGEMENT
+            SettingsSectionCard(title = "Site Management") {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = onClearAllSiteData,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("site_settings_clear_data_button")
+                    ) {
+                        Text("Clear Site Data")
                     }
+                    OutlinedButton(
+                        onClick = onResetSitePermissions,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("site_settings_reset_permissions_button")
+                    ) {
+                        Text("Reset Site Permissions")
+                    }
+                }
+
+                if (siteSettings.isEmpty()) {
+                    Text(
+                        text = "No custom per-site rules saved.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    Text(
+                        text = "All Sites (${siteSettings.size})",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
                 }
             }
 
             if (siteSettings.isNotEmpty()) {
-                item {
-                    Text("Configured Websites", style = MaterialTheme.typography.titleMedium)
-                }
-                items(siteSettings, key = { it.id.ifBlank { it.host } }) { item ->
+                for (item in siteSettings) {
                     Surface(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp))
                             .clickable { selectedHost = item.host },
-                        shape = MaterialTheme.shapes.medium,
+                        shape = RoundedCornerShape(12.dp),
                         color = MaterialTheme.colorScheme.surface
                     ) {
                         Row(
@@ -788,7 +925,7 @@ private fun PermissionStateSelector(
     }
 }
 
-// --- READER MODE SHEET (TIER 3 SIGNATURE FEATURE) ---
+// --- READER MODE SHEET ---
 
 @Composable
 fun NyxoraReaderModeSheet(
@@ -861,7 +998,40 @@ fun NyxoraReaderModeSheet(
     }
 }
 
-// --- COMPLETE SEARCHABLE SETTINGS SCREEN (SECTION 16) ---
+// --- CLEAN 5-CATEGORY SETTINGS SCREEN ---
+
+enum class SettingsCategory(val title: String, val subtitle: String) {
+    GENERAL(
+        title = "General",
+        subtitle = "Homepage, Default Search Engine, Site Settings, Downloads, Startup"
+    ),
+    CUSTOMIZATION(
+        title = "Customization",
+        subtitle = "Theme, Homepage shortcuts, Toolbar layout, Text size, Language"
+    ),
+    PRIVACY(
+        title = "Privacy",
+        subtitle = "Ad Blocking, Pop-ups, Incognito, Clear Browsing Data, Cookies, DNT"
+    ),
+    ADVANCED(
+        title = "Advanced",
+        subtitle = "Gesture Navigation, Video Preferences, Accessibility, Cache, Reset"
+    ),
+    ABOUT(
+        title = "About NYXORA",
+        subtitle = "App version, Engine capabilities, Open-source licenses"
+    )
+}
+
+private val SUPPORTED_LANGUAGES = listOf(
+    "System Default",
+    "English (United States)",
+    "Español",
+    "Français",
+    "Deutsch",
+    "हिन्दी",
+    "日本語"
+)
 
 @Composable
 fun NyxoraSettingsScreen(
@@ -872,474 +1042,786 @@ fun NyxoraSettingsScreen(
     onAddCustomFilterRule: (String, Boolean) -> Unit,
     onRemoveCustomFilterRule: (String) -> Unit,
     onOpenSiteSettings: () -> Unit,
+    onOpenDownloads: () -> Unit = {},
+    onOpenNyxoraConnect: () -> Unit = {},
     onClearBrowsingData: (Boolean, Boolean) -> Unit,
+    onClearCache: () -> Unit = {},
+    onResetBrowserSettings: () -> Unit = {},
     onSetPrivatePin: (String) -> Unit,
     onExportEncryptedBackup: (String, (Result<String>) -> Unit) -> Unit,
     onImportEncryptedBackup: (String, String, (Result<Int>) -> Unit) -> Unit,
     onToast: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
-    BackHandler(onBack = onDismiss)
     val context = LocalContext.current
+    var selectedCategory by remember { mutableStateOf<SettingsCategory?>(null) }
     var searchQuery by remember { mutableStateOf("") }
-    var advancedExpanded by remember { mutableStateOf(false) }
     var showBackupDialog by remember { mutableStateOf(false) }
     var showPinDialog by remember { mutableStateOf(false) }
     var showCustomRuleDialog by remember { mutableStateOf(false) }
     var showCapabilityMatrixDialog by remember { mutableStateOf(false) }
+    var showOpenSourceLicensesDialog by remember { mutableStateOf(false) }
+    var showResetConfirmDialog by remember { mutableStateOf(false) }
+    var showHomepageDialog by remember { mutableStateOf(false) }
 
+    BackHandler {
+        if (selectedCategory != null) {
+            selectedCategory = null
+        } else {
+            onDismiss()
+        }
+    }
+
+    val isSearching = searchQuery.isNotBlank()
     fun matchesSearch(vararg keywords: String): Boolean {
-        if (searchQuery.isBlank()) return true
+        if (!isSearching) return false
         return keywords.any { it.contains(searchQuery, ignoreCase = true) }
     }
 
-    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        LazyColumn(
+    Surface(
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("nyxora_settings_screen"),
+        color = MaterialTheme.colorScheme.background
+    ) {
+        Column(
             modifier = Modifier
                 .fillMaxSize()
-                .widthIn(max = 700.dp),
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+                .widthIn(max = 700.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            item {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(
-                        onClick = onDismiss,
-                        modifier = Modifier.testTag("settings_back_button")
-                    ) {
-                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "Back")
-                    }
-                    Text("Settings", style = MaterialTheme.typography.headlineMedium)
+            // Header
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = {
+                        if (selectedCategory != null) {
+                            selectedCategory = null
+                        } else {
+                            onDismiss()
+                        }
+                    },
+                    modifier = Modifier.testTag("settings_back_button")
+                ) {
+                    Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "Back")
                 }
+                Text(
+                    text = selectedCategory?.title ?: "Settings",
+                    style = MaterialTheme.typography.titleLarge
+                )
             }
 
-            item {
+            // Search input on Settings Home
+            if (selectedCategory == null) {
                 OutlinedTextField(
                     value = searchQuery,
                     onValueChange = { searchQuery = it },
-                    placeholder = { Text("Search settings (e.g. theme, ad block, video, zoom)…") },
+                    placeholder = { Text("Search settings…") },
                     leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
+                    trailingIcon = {
+                        if (searchQuery.isNotEmpty()) {
+                            IconButton(onClick = { searchQuery = "" }) {
+                                Icon(Icons.Outlined.Close, contentDescription = "Clear search")
+                            }
+                        }
+                    },
                     singleLine = true,
+                    shape = RoundedCornerShape(14.dp),
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("settings_search_input")
                 )
             }
 
-            // 1. APPEARANCE
-            if (matchesSearch("Appearance", "Theme", "Light", "Dark", "Homepage", "Shortcuts", "Frequently visited", "Recent activity", "Greeting", "Date", "Background", "Text size", "Toolbar", "Animation", "Reduced motion")) {
-                item {
-                    SettingsSectionCard(title = "Appearance") {
-                        Text("Theme Mode", style = MaterialTheme.typography.labelLarge)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            for (mode in ThemeMode.entries) {
-                                FilterChip(
-                                    selected = settings.themeMode == mode,
-                                    onClick = { onUpdateSettings { it.copy(themeMode = mode) } },
-                                    label = { Text(mode.name) }
-                                )
-                            }
-                        }
+            // Settings Home: 5 clean categories when not searching
+            if (selectedCategory == null && !isSearching) {
+                SettingsCategoryRow(
+                    icon = Icons.Outlined.Settings,
+                    category = SettingsCategory.GENERAL,
+                    testTag = "settings_category_general",
+                    onClick = { selectedCategory = SettingsCategory.GENERAL }
+                )
+                SettingsCategoryRow(
+                    icon = Icons.Outlined.Palette,
+                    category = SettingsCategory.CUSTOMIZATION,
+                    testTag = "settings_category_customization",
+                    onClick = { selectedCategory = SettingsCategory.CUSTOMIZATION }
+                )
+                SettingsCategoryRow(
+                    icon = Icons.Outlined.Shield,
+                    category = SettingsCategory.PRIVACY,
+                    testTag = "settings_category_privacy",
+                    onClick = { selectedCategory = SettingsCategory.PRIVACY }
+                )
+                SettingsCategoryRow(
+                    icon = Icons.Outlined.Tune,
+                    category = SettingsCategory.ADVANCED,
+                    testTag = "settings_category_advanced",
+                    onClick = { selectedCategory = SettingsCategory.ADVANCED }
+                )
+                SettingsCategoryRow(
+                    icon = Icons.Outlined.Info,
+                    category = SettingsCategory.ABOUT,
+                    testTag = "settings_category_about",
+                    onClick = { selectedCategory = SettingsCategory.ABOUT }
+                )
+            }
 
-                        Column {
-                            Text("Global Text Size: ${settings.globalTextZoom}%", style = MaterialTheme.typography.bodyLarge)
-                            Text("Default text scaling applied across websites", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Slider(
-                                value = settings.globalTextZoom.toFloat(),
-                                onValueChange = { v ->
-                                    val stepped = ((v / 5f).roundToInt() * 5).coerceIn(50, 250)
-                                    onUpdateSettings { it.copy(globalTextZoom = stepped) }
+            // 1. GENERAL
+            if (selectedCategory == SettingsCategory.GENERAL ||
+                matchesSearch("General", "Homepage", "Search", "Engine", "Google", "DuckDuckGo", "Brave", "Site Settings", "Downloads", "Restore", "Startup", "Default Browser")
+            ) {
+                SettingsSectionCard(title = "General") {
+                    // Homepage
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { showHomepageDialog = true }
+                            .padding(vertical = 4.dp)
+                            .testTag("settings_homepage_option"),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Homepage", style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                text = if (settings.homepageUrl == "nyxora://home" || settings.homepageUrl.isBlank()) {
+                                    "NYXORA Homepage"
+                                } else {
+                                    settings.homepageUrl
                                 },
-                                valueRange = 50f..200f
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-
-                        SettingToggleItem(
-                            title = "Compact Toolbar Mode",
-                            subtitle = "Use condensed toolbar padding for maximum vertical viewport",
-                            checked = settings.compactBottomToolbar,
-                            onCheckedChange = { v -> onUpdateSettings { it.copy(compactBottomToolbar = v) } }
-                        )
-                        SettingToggleItem(
-                            title = "Reduced Motion",
-                            subtitle = "Minimize splash, tab, and menu transitions for instant response",
-                            checked = settings.reducedMotion,
-                            onCheckedChange = { v -> onUpdateSettings { it.copy(reducedMotion = v) } }
-                        )
-
-                        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-                        Text(
-                            text = "Homepage",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        Text(
-                            text = "Optional homepage sections (all off by default for a clean, minimal homepage)",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        SettingToggleItem(
-                            title = "Shortcuts",
-                            subtitle = "Show pinned shortcuts on homepage",
-                            checked = settings.showHomeShortcuts,
-                            onCheckedChange = { v -> onUpdateSettings { it.copy(showHomeShortcuts = v) } }
-                        )
-                        SettingToggleItem(
-                            title = "Frequently visited",
-                            subtitle = "Show top visited domains on homepage",
-                            checked = settings.showHomeFreqVisited,
-                            onCheckedChange = { v -> onUpdateSettings { it.copy(showHomeFreqVisited = v) } }
-                        )
-                        SettingToggleItem(
-                            title = "Recent activity",
-                            subtitle = "Show recent browsing history on homepage",
-                            checked = settings.showHomeRecentActivity,
-                            onCheckedChange = { v -> onUpdateSettings { it.copy(showHomeRecentActivity = v) } }
-                        )
-                        SettingToggleItem(
-                            title = "Greeting and date",
-                            subtitle = "Show time-of-day greeting and current date on homepage",
-                            checked = settings.showHomeGreeting,
-                            onCheckedChange = { v -> onUpdateSettings { it.copy(showHomeGreeting = v) } }
-                        )
-                        SettingToggleItem(
-                            title = "Background",
-                            subtitle = "Show subtle ambient background on homepage",
-                            checked = settings.showAmbientHomeBackground,
-                            onCheckedChange = { v -> onUpdateSettings { it.copy(showAmbientHomeBackground = v) } }
-                        )
-                    }
-                }
-            }
-
-            // 2. SEARCH
-            if (matchesSearch("Search", "Engine", "DuckDuckGo", "Google", "Brave", "Startpage", "Ecosia", "Suggestions")) {
-                item {
-                    SettingsSectionCard(title = "Search") {
-                        Text("Default Search Engine", style = MaterialTheme.typography.bodyLarge)
-                        Text("Used when entering queries in the address bar", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            for (engine in SearchEngine.entries.take(3)) {
-                                FilterChip(
-                                    selected = settings.searchEngine == engine,
-                                    onClick = { onUpdateSettings { it.copy(searchEngine = engine) } },
-                                    label = { Text(engine.label) }
-                                )
-                            }
-                        }
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            for (engine in SearchEngine.entries.drop(3)) {
-                                FilterChip(
-                                    selected = settings.searchEngine == engine,
-                                    onClick = { onUpdateSettings { it.copy(searchEngine = engine) } },
-                                    label = { Text(engine.label) }
-                                )
-                            }
-                        }
-                        SettingToggleItem(
-                            title = "Address Bar Suggestions",
-                            subtitle = "Show history and bookmark autocomplete matches while typing",
-                            checked = settings.searchSuggestionsEnabled,
-                            onCheckedChange = { v -> onUpdateSettings { it.copy(searchSuggestionsEnabled = v) } }
-                        )
-                    }
-                }
-            }
-
-            // 3. PRIVACY AND SECURITY
-            if (matchesSearch("Privacy", "Security", "Ad", "Tracker", "Pop-up", "Redirect", "HTTPS", "Cookie", "Incognito", "Clear", "Backup", "Sync")) {
-                item {
-                    SettingsSectionCard(title = "Privacy and Security") {
-                        SettingToggleItem(
-                            title = "Ad & Tracker Blocking",
-                            subtitle = "Filter known ad/analytics subresources (${settings.totalAdsBlockedCount} blocked • ${settings.filterRuleCount} active rules)",
-                            checked = settings.adBlockingEnabled,
-                            onCheckedChange = { v -> onUpdateSettings { it.copy(adBlockingEnabled = v) } }
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedButton(onClick = onRefreshFilterList) {
-                                Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text("Update Filter List")
-                            }
-                            OutlinedButton(onClick = { showCustomRuleDialog = true }) {
-                                Text("Custom Rules (${customFilterRules.size})")
-                            }
-                        }
-
-                        SettingToggleItem(
-                            title = "Block Pop-ups",
-                            subtitle = "Block window.open and new-tab requests without a real user gesture (${settings.totalPopupsBlockedCount} blocked)",
-                            checked = settings.popupBlockingEnabled,
-                            onCheckedChange = { v -> onUpdateSettings { it.copy(popupBlockingEnabled = v) } }
-                        )
-                        SettingToggleItem(
-                            title = "Block Auto-Redirects",
-                            subtitle = "Block non-gesture top-level redirects and intent:// app launches (${settings.totalRedirectsBlockedCount} blocked)",
-                            checked = settings.redirectBlockingEnabled,
-                            onCheckedChange = { v -> onUpdateSettings { it.copy(redirectBlockingEnabled = v) } }
-                        )
-                        SettingToggleItem(
-                            title = "Show Blocked Action Messages",
-                            subtitle = "Display brief 'Allow once' snackbar when a pop-up or redirect is blocked",
-                            checked = settings.showBlockedMessages,
-                            onCheckedChange = { v -> onUpdateSettings { it.copy(showBlockedMessages = v) } }
-                        )
-                        SettingToggleItem(
-                            title = "HTTPS-Only Mode",
-                            subtitle = "Automatically upgrade http:// navigations to secure https://",
-                            checked = settings.httpsOnlyMode,
-                            onCheckedChange = { v -> onUpdateSettings { it.copy(httpsOnlyMode = v) } }
-                        )
-                        SettingToggleItem(
-                            title = "Restrict Third-Party Cookies",
-                            subtitle = "Block cross-site tracking cookies in WebView sessions",
-                            checked = settings.blockThirdPartyCookies,
-                            onCheckedChange = { v -> onUpdateSettings { it.copy(blockThirdPartyCookies = v) } }
-                        )
-                        SettingToggleItem(
-                            title = "Block Screenshots in Incognito",
-                            subtitle = "Apply FLAG_SECURE to hide private tabs from screenshots and Recents preview",
-                            checked = settings.incognitoBlockScreenshots,
-                            onCheckedChange = { v -> onUpdateSettings { it.copy(incognitoBlockScreenshots = v) } }
-                        )
-
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedButton(onClick = { showPinDialog = true }) {
-                                Text(if (settings.privateTabsLockEnabled) "Change Private PIN" else "Set Private Tabs PIN")
-                            }
-                            OutlinedButton(onClick = { onClearBrowsingData(true, true) }) {
-                                Text("Clear All Browsing Data")
-                            }
-                        }
-
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(onClick = { showBackupDialog = true }) {
-                                Text("Encrypted Backup Export / Import")
-                            }
+                        TextButton(onClick = { showHomepageDialog = true }) {
+                            Text("Edit")
                         }
                     }
-                }
-            }
 
-            // 4. DOWNLOADS
-            if (matchesSearch("Downloads", "Risky", "APK", "Notifications", "Location")) {
-                item {
-                    SettingsSectionCard(title = "Downloads") {
-                        Text(
-                            text = "Storage Location: App-Scoped Downloads (/files/downloads) via FileProvider",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        SettingToggleItem(
-                            title = "Confirm Risky File Types",
-                            subtitle = "Warn before downloading executable or package files (.apk, .exe, .sh, .jar)",
-                            checked = settings.downloadConfirmRiskyFiles,
-                            onCheckedChange = { v -> onUpdateSettings { it.copy(downloadConfirmRiskyFiles = v) } }
-                        )
-                        SettingToggleItem(
-                            title = "Download Status Notifications",
-                            subtitle = "Show progress and completion alerts for active downloads",
-                            checked = settings.downloadNotificationsEnabled,
-                            onCheckedChange = { v -> onUpdateSettings { it.copy(downloadNotificationsEnabled = v) } }
-                        )
-                    }
-                }
-            }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
 
-            // 5. GESTURES
-            if (matchesSearch("Gestures", "Swipe", "Back", "Forward", "Pull to refresh")) {
-                item {
-                    SettingsSectionCard(title = "Gestures") {
-                        SettingToggleItem(
-                            title = "Edge Swipe Back & Forward",
-                            subtitle = "Swipe from left or right screen edges to navigate page history",
-                            checked = settings.edgeSwipeBackForward,
-                            onCheckedChange = { v -> onUpdateSettings { it.copy(edgeSwipeBackForward = v) } }
-                        )
-                        SettingToggleItem(
-                            title = "Quick Reload Action",
-                            subtitle = "Enable one-tap reload and stop controls in the navigation bar",
-                            checked = settings.pullToRefreshEnabled,
-                            onCheckedChange = { v -> onUpdateSettings { it.copy(pullToRefreshEnabled = v) } }
-                        )
-                    }
-                }
-            }
-
-            // 6. VIDEO
-            if (matchesSearch("Video", "Fullscreen", "Orientation", "Aspect", "Picture-in-Picture", "PiP", "Audio")) {
-                item {
-                    SettingsSectionCard(title = "Video") {
-                        Text("Fullscreen Orientation", style = MaterialTheme.typography.bodyLarge)
-                        Text(
-                            text = settings.fullscreenOrientationMode.label,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            for (mode in FullscreenOrientationMode.entries) {
-                                FilterChip(
-                                    selected = settings.fullscreenOrientationMode == mode,
-                                    onClick = { onUpdateSettings { it.copy(fullscreenOrientationMode = mode) } },
-                                    label = { Text(mode.name) }
-                                )
-                            }
+                    // Site Settings
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(onClick = onOpenSiteSettings)
+                            .padding(vertical = 6.dp)
+                            .testTag("settings_open_site_settings_button"),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Site Settings", style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                text = "Content, permissions (Location, Camera, Mic), and per-site rules",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
-
-                        Text("Default Video Aspect Mode", style = MaterialTheme.typography.bodyLarge)
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            for (aspect in VideoAspectMode.entries) {
-                                FilterChip(
-                                    selected = settings.defaultVideoAspectMode == aspect,
-                                    onClick = { onUpdateSettings { it.copy(defaultVideoAspectMode = aspect) } },
-                                    label = { Text(aspect.label) }
-                                )
-                            }
-                        }
-
-                        SettingToggleItem(
-                            title = "Picture-in-Picture (PiP)",
-                            subtitle = "Enter floating PiP window when leaving the app during fullscreen video",
-                            checked = settings.pipEnabled,
-                            onCheckedChange = { v -> onUpdateSettings { it.copy(pipEnabled = v) } }
-                        )
-                        SettingToggleItem(
-                            title = "Keep Screen On While Playing",
-                            subtitle = "Prevent device screen timeout during fullscreen video playback",
-                            checked = settings.keepScreenOnWhilePlaying,
-                            onCheckedChange = { v -> onUpdateSettings { it.copy(keepScreenOnWhilePlaying = v) } }
-                        )
-                        SettingToggleItem(
-                            title = "Background Audio Playback",
-                            subtitle = "Allow web media audio to continue when switching tabs where supported",
-                            checked = settings.backgroundAudioEnabled,
-                            onCheckedChange = { v -> onUpdateSettings { it.copy(backgroundAudioEnabled = v) } }
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Outlined.KeyboardArrowRight,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                }
-            }
 
-            // 7. WEBSITES
-            if (matchesSearch("Websites", "Site settings", "Permissions", "Camera", "Microphone", "Location", "Exceptions")) {
-                item {
-                    SettingsSectionCard(title = "Websites") {
-                        Text(
-                            text = "Manage per-site permissions (Camera, Microphone, Location, Notifications) and per-site exceptions for Ads, Pop-ups, Auto-Redirects, Desktop Mode, and Zoom.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Button(onClick = onOpenSiteSettings) {
-                            Icon(Icons.Outlined.Tune, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text("Open Site Settings & Exceptions")
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+
+                    // Default Search Engine
+                    Text("Default Search Engine", style = MaterialTheme.typography.bodyLarge)
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        for (engine in SearchEngine.entries) {
+                            FilterChip(
+                                selected = settings.searchEngine == engine,
+                                onClick = { onUpdateSettings { it.copy(searchEngine = engine) } },
+                                label = { Text(engine.label) }
+                            )
                         }
                     }
-                }
-            }
+                    SettingToggleItem(
+                        title = "Search & Address Suggestions",
+                        subtitle = "Show matching bookmarks and history while typing",
+                        checked = settings.searchSuggestionsEnabled,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(searchSuggestionsEnabled = v) } }
+                    )
 
-            // 8. ADVANCED (Collapsed by default)
-            if (matchesSearch("Advanced", "Cache", "Desktop", "Data saver", "Force dark", "Cookie banner")) {
-                item {
-                    Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surface) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { advancedExpanded = !advancedExpanded },
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column {
-                                    Text("Advanced", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
-                                    Text("Cache, Desktop defaults, Data Saver, Force-Dark, Cookie banners", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+
+                    // Downloads
+                    SettingToggleItem(
+                        title = "Confirm Risky Downloads",
+                        subtitle = "Warn before downloading APK or executable files",
+                        checked = settings.downloadConfirmRiskyFiles,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(downloadConfirmRiskyFiles = v) } }
+                    )
+                    SettingToggleItem(
+                        title = "Download Notifications",
+                        subtitle = "Show progress and completion notifications",
+                        checked = settings.downloadNotificationsEnabled,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(downloadNotificationsEnabled = v) } }
+                    )
+                    OutlinedButton(
+                        onClick = onOpenDownloads,
+                        modifier = Modifier.testTag("settings_open_downloads_button")
+                    ) {
+                        Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Manage Downloads")
+                    }
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+
+                    // Restore Tabs on Startup
+                    SettingToggleItem(
+                        title = "Restore Tabs on Startup",
+                        subtitle = "Reopen your previous normal tabs when launching NYXORA",
+                        checked = settings.restoreTabsOnStartup,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(restoreTabsOnStartup = v) } }
+                    )
+
+                    // Set as Default Browser
+                    OutlinedButton(
+                        onClick = {
+                            runCatching {
+                                val intent = Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS).apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                                 }
-                                Icon(
-                                    imageVector = if (advancedExpanded || searchQuery.isNotBlank()) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
-                                    contentDescription = "Expand Advanced Settings"
+                                context.startActivity(intent)
+                            }.onFailure {
+                                runCatching {
+                                    val fallback = Intent(Settings.ACTION_SETTINGS).apply {
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                    context.startActivity(fallback)
+                                }.onFailure {
+                                    onToast("Open Android Settings > Apps > Default apps to set NYXORA as default browser")
+                                }
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("settings_default_browser_button")
+                    ) {
+                        Text("Set as Default Browser")
+                    }
+                }
+            }
+
+            // 2. CUSTOMIZATION
+            if (selectedCategory == SettingsCategory.CUSTOMIZATION ||
+                matchesSearch("Customization", "Appearance", "Theme", "Light", "Dark", "System", "Shortcuts", "Toolbar", "Text size", "Language")
+            ) {
+                SettingsSectionCard(title = "Customization") {
+                    Text("Theme", style = MaterialTheme.typography.bodyLarge)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        for (mode in ThemeMode.entries) {
+                            FilterChip(
+                                selected = settings.themeMode == mode,
+                                onClick = { onUpdateSettings { it.copy(themeMode = mode) } },
+                                label = {
+                                    Text(
+                                        when (mode) {
+                                            ThemeMode.DARK -> "Dark"
+                                            ThemeMode.LIGHT -> "Light"
+                                            ThemeMode.SYSTEM -> "System"
+                                        }
+                                    )
+                                }
+                            )
+                        }
+                    }
+
+                    SettingToggleItem(
+                        title = "Homepage Shortcuts",
+                        subtitle = "Display saved shortcuts on the homepage",
+                        checked = settings.homepageShortcutsEnabled,
+                        onCheckedChange = { v ->
+                            onUpdateSettings {
+                                it.copy(
+                                    homepageShortcutsEnabled = v,
+                                    showHomeShortcuts = v,
+                                    showHomeFreqVisited = false
                                 )
                             }
+                        }
+                    )
 
-                            AnimatedVisibility(visible = advancedExpanded || searchQuery.isNotBlank()) {
-                                Column(
-                                    modifier = Modifier.padding(top = 14.dp),
-                                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                                ) {
-                                    SettingToggleItem(
-                                        title = "Default to Desktop Site",
-                                        subtitle = "Request desktop user-agent by default for all new tabs",
-                                        checked = settings.defaultDesktopSite,
-                                        onCheckedChange = { v -> onUpdateSettings { it.copy(defaultDesktopSite = v) } }
-                                    )
-                                    SettingToggleItem(
-                                        title = "Data Saver Mode (Block Images)",
-                                        subtitle = "Prevent WebView from automatically loading network images",
-                                        checked = settings.dataSaverBlockImages,
-                                        onCheckedChange = { v -> onUpdateSettings { it.copy(dataSaverBlockImages = v) } }
-                                    )
-                                    SettingToggleItem(
-                                        title = "Force-Dark Web Pages",
-                                        subtitle = "Apply dark charcoal CSS theme overrides to bright web pages",
-                                        checked = settings.forceDarkWebPages,
-                                        onCheckedChange = { v -> onUpdateSettings { it.copy(forceDarkWebPages = v) } }
-                                    )
-                                    SettingToggleItem(
-                                        title = "Hide Cookie-Consent Banners",
-                                        subtitle = "Inject cosmetic CSS filter rules hiding OneTrust, Cookiebot, and GDPR overlays",
-                                        checked = settings.hideCookieConsentBanners,
-                                        onCheckedChange = { v -> onUpdateSettings { it.copy(hideCookieConsentBanners = v) } }
-                                    )
-                                    OutlinedButton(
-                                        onClick = {
-                                            runCatching {
-                                                context.cacheDir.listFiles()?.forEach { file ->
-                                                    if (file.name.contains("WebView", ignoreCase = true) ||
-                                                        file.name.contains("org.chromium", ignoreCase = true)
-                                                    ) {
-                                                        file.deleteRecursively()
-                                                    }
-                                                }
-                                            }
-                                            onToast("WebView disk cache cleared")
+                    SettingToggleItem(
+                        title = "Compact Toolbar Layout",
+                        subtitle = "Use compact bottom navigation bar height for more vertical screen space",
+                        checked = settings.compactBottomToolbar,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(compactBottomToolbar = v) } }
+                    )
+
+                    Column {
+                        Text(
+                            text = "Default Text Size: ${settings.globalTextZoom}%",
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                        Text(
+                            text = "Scale text size across all websites",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Slider(
+                            value = settings.globalTextZoom.toFloat(),
+                            onValueChange = { v ->
+                                val stepped = ((v / 5f).roundToInt() * 5).coerceIn(50, 250)
+                                onUpdateSettings { it.copy(globalTextZoom = stepped) }
+                            },
+                            valueRange = 50f..200f
+                        )
+                    }
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Language,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text("Language", style = MaterialTheme.typography.bodyLarge)
+                    }
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        for (lang in SUPPORTED_LANGUAGES) {
+                            FilterChip(
+                                selected = settings.preferredLanguage == lang,
+                                onClick = {
+                                    onUpdateSettings { it.copy(preferredLanguage = lang) }
+                                    onToast("Language preference: $lang")
+                                },
+                                label = { Text(lang) }
+                            )
+                        }
+                    }
+                }
+            }
+
+            // 3. PRIVACY
+            if (selectedCategory == SettingsCategory.PRIVACY ||
+                matchesSearch("Privacy", "Security", "Ad", "Pop-up", "Incognito", "Clear", "Cookie", "Do Not Track", "HTTPS", "Backup")
+            ) {
+                SettingsSectionCard(title = "Privacy") {
+                    SettingToggleItem(
+                        title = "Ad & Tracker Blocking",
+                        subtitle = "Block intrusive ads and trackers (${settings.totalAdsBlockedCount} blocked)",
+                        checked = settings.adBlockingEnabled,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(adBlockingEnabled = v) } }
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = onRefreshFilterList) {
+                            Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Update Filters")
+                        }
+                        OutlinedButton(onClick = { showCustomRuleDialog = true }) {
+                            Text("Custom Rules (${customFilterRules.size})")
+                        }
+                    }
+
+                    SettingToggleItem(
+                        title = "Pop-up Blocking",
+                        subtitle = "Block unrequested pop-up windows (${settings.totalPopupsBlockedCount} blocked)",
+                        checked = settings.popupBlockingEnabled,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(popupBlockingEnabled = v) } }
+                    )
+                    SettingToggleItem(
+                        title = "Auto-Redirect Protection",
+                        subtitle = "Block automatic cross-site redirects without user interaction",
+                        checked = settings.redirectBlockingEnabled,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(redirectBlockingEnabled = v) } }
+                    )
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+
+                    SettingToggleItem(
+                        title = "Incognito Screenshot Protection",
+                        subtitle = "Hide incognito tabs from screenshots and recent apps switcher",
+                        checked = settings.incognitoBlockScreenshots,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(incognitoBlockScreenshots = v) } }
+                    )
+                    OutlinedButton(onClick = { showPinDialog = true }) {
+                        Text(if (settings.privateTabsLockEnabled) "Change Incognito PIN" else "Set Incognito PIN Lock")
+                    }
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+
+                    SettingToggleItem(
+                        title = "Allow Cookies",
+                        subtitle = "Enable first-party website cookies for sign-in sessions",
+                        checked = settings.cookiesEnabled,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(cookiesEnabled = v) } }
+                    )
+                    SettingToggleItem(
+                        title = "Block Third-Party Cookies",
+                        subtitle = "Prevent cross-site tracking cookies across websites",
+                        checked = settings.blockThirdPartyCookies,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(blockThirdPartyCookies = v) } }
+                    )
+                    SettingToggleItem(
+                        title = "Hide Cookie Consent Banners",
+                        subtitle = "Automatically hide common cookie consent pop-ups",
+                        checked = settings.hideCookieConsentBanners,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(hideCookieConsentBanners = v) } }
+                    )
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+
+                    SettingToggleItem(
+                        title = "Send 'Do Not Track' Signal",
+                        subtitle = "Include DNT and Global Privacy Control signals with requests",
+                        checked = settings.doNotTrackEnabled,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(doNotTrackEnabled = v) } }
+                    )
+                    SettingToggleItem(
+                        title = "HTTPS-Only Mode",
+                        subtitle = "Upgrade connections to HTTPS whenever possible",
+                        checked = settings.httpsOnlyMode,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(httpsOnlyMode = v) } }
+                    )
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = {
+                                onClearBrowsingData(true, true)
+                                onToast("Browsing history, cookies, and site data cleared")
+                            },
+                            modifier = Modifier.testTag("settings_clear_browsing_data_button")
+                        ) {
+                            Text("Clear Browsing Data")
+                        }
+                        OutlinedButton(onClick = { showBackupDialog = true }) {
+                            Text("Encrypted Backup")
+                        }
+                    }
+                }
+            }
+
+            // 4. ADVANCED
+            if (selectedCategory == SettingsCategory.ADVANCED ||
+                matchesSearch("Advanced", "Gesture", "Swipe", "Video", "Fullscreen", "Orientation", "Accessibility", "Cache", "Reset", "Connect", "Room", "Sync")
+            ) {
+                SettingsSectionCard(title = "Advanced") {
+                    Text("NYXORA Connect", style = MaterialTheme.typography.labelLarge)
+                    OutlinedButton(
+                        onClick = onOpenNyxoraConnect,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("settings_open_connect_button")
+                    ) {
+                        Icon(Icons.Outlined.CastConnected, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Open NYXORA Connect (Room Sync)")
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = {
+                                runCatching {
+                                    context.cacheDir.listFiles()?.forEach { file ->
+                                        if (file.name.contains("WebView", ignoreCase = true) ||
+                                            file.name.contains("org.chromium", ignoreCase = true)
+                                        ) {
+                                            file.deleteRecursively()
                                         }
-                                    ) {
-                                        Text("Purge WebView Disk Cache")
                                     }
                                 }
-                            }
+                                onClearCache()
+                                onToast("Browser cache cleared")
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("settings_clear_cache_button")
+                        ) {
+                            Text("Clear Cache")
+                        }
+                        OutlinedButton(
+                            onClick = { showResetConfirmDialog = true },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("settings_reset_browser_button")
+                        ) {
+                            Text("Reset Settings")
                         }
                     }
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+
+                    Text("Gesture Navigation", style = MaterialTheme.typography.labelLarge)
+                    SettingToggleItem(
+                        title = "Edge Swipe Back & Forward",
+                        subtitle = "Swipe from left or right screen edges to navigate history",
+                        checked = settings.edgeSwipeBackForward,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(edgeSwipeBackForward = v) } },
+                        testTag = "setting_edge_swipe_toggle"
+                    )
+                    SettingToggleItem(
+                        title = "Pull-to-Refresh",
+                        subtitle = "Pull down from the top of a webpage to reload",
+                        checked = settings.pullToRefreshEnabled,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(pullToRefreshEnabled = v) } }
+                    )
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+
+                    Text("Video Preferences", style = MaterialTheme.typography.labelLarge)
+                    Text(
+                        text = "Fullscreen Orientation: ${settings.fullscreenOrientationMode.label}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        for (mode in FullscreenOrientationMode.entries) {
+                            FilterChip(
+                                selected = settings.fullscreenOrientationMode == mode,
+                                onClick = { onUpdateSettings { it.copy(fullscreenOrientationMode = mode) } },
+                                label = { Text(mode.name) }
+                            )
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        for (aspect in VideoAspectMode.entries) {
+                            FilterChip(
+                                selected = settings.defaultVideoAspectMode == aspect,
+                                onClick = { onUpdateSettings { it.copy(defaultVideoAspectMode = aspect) } },
+                                label = { Text(aspect.label) }
+                            )
+                        }
+                    }
+                    SettingToggleItem(
+                        title = "Keep Screen On During Video",
+                        subtitle = "Prevent screen sleep while fullscreen video is playing",
+                        checked = settings.keepScreenOnWhilePlaying,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(keepScreenOnWhilePlaying = v) } }
+                    )
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+
+                    Text("Accessibility", style = MaterialTheme.typography.labelLarge)
+                    SettingToggleItem(
+                        title = "Reduced Motion",
+                        subtitle = "Minimize UI transitions and animations",
+                        checked = settings.reducedMotion,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(reducedMotion = v) } }
+                    )
+                    SettingToggleItem(
+                        title = "Force Dark Web Pages",
+                        subtitle = "Apply dark theme styling to light websites",
+                        checked = settings.forceDarkWebPages,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(forceDarkWebPages = v) } }
+                    )
                 }
             }
 
-            // 8. ABOUT NYXORA & WEBVIEW LIMITATIONS
-            if (matchesSearch("About", "NYXORA", "Version", "Engine", "WebView", "Extensions", "Notifications", "DRM", "Capability", "Licenses")) {
-                item {
-                    SettingsSectionCard(title = "About NYXORA & Engine Scope") {
-                        Text("NYXORA Browser v1.0.0", style = MaterialTheme.typography.titleMedium)
-                        Text("Tagline: Browse Beyond Ordinary.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
-                        Text(
-                            text = "Engine: ${EngineCapabilityMatrix.ENGINE_NAME}. 100% local storage (Room + DataStore) with zero sign-in, zero account requirement, and zero telemetry.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Text(
-                            text = "What Android System WebView Cannot Do:\n" +
-                                "• Browser Extensions: WebExtension (.xpi / .crx) APIs are not supported by Android System WebView; NYXORA provides native filter-list ad blocking, Reader Mode, and cosmetic CSS rules instead.\n" +
-                                "• Background Web Push Notifications: Service Worker Push API background delivery when the app is closed is not supported by System WebView.\n" +
-                                "• DRM Depth: Hardware-backed Widevine L1 EME playback depth depends on OEM System WebView provisioning and falls back to L3 or standard playback on unsupported devices.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        OutlinedButton(onClick = { showCapabilityMatrixDialog = true }) {
+            // 5. ABOUT NYXORA
+            if (selectedCategory == SettingsCategory.ABOUT ||
+                matchesSearch("About", "NYXORA", "Sudhamoy", "Crafted", "Version", "Engine", "WebView", "Capability", "Licenses")
+            ) {
+                SettingsSectionCard(title = "About NYXORA") {
+                    Text(
+                        text = "NYXORA Browser",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                        modifier = Modifier.testTag("about_nyxora_title")
+                    )
+                    Text(
+                        text = "Browse Beyond Ordinary.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.testTag("about_nyxora_tagline")
+                    )
+                    Text(
+                        text = "Version 1.0.0 • Engine: ${EngineCapabilityMatrix.ENGINE_NAME}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = "Local-first storage (Room + DataStore) with zero account requirement, zero telemetry, and strict incognito isolation.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = { showCapabilityMatrixDialog = true },
+                            modifier = Modifier.testTag("about_engine_capabilities_button")
+                        ) {
                             Icon(Icons.Outlined.Info, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text("View Full Engine Capability Matrix")
+                            Text("Engine Capabilities")
+                        }
+                        OutlinedButton(
+                            onClick = { showOpenSourceLicensesDialog = true },
+                            modifier = Modifier.testTag("about_open_source_licenses_button")
+                        ) {
+                            Text("Open-Source Licenses")
                         }
                     }
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+
+                    Text(
+                        text = "Crafted by Sudhamoy",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag("about_nyxora_creator_credit")
+                    )
                 }
             }
         }
+    }
+
+    if (showHomepageDialog) {
+        var homepageInput by remember(settings.homepageUrl) {
+            mutableStateOf(
+                if (settings.homepageUrl == "nyxora://home") "" else settings.homepageUrl
+            )
+        }
+        AlertDialog(
+            onDismissRequest = { showHomepageDialog = false },
+            title = { Text("Homepage Preference") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Leave blank to use the default NYXORA Homepage, or enter a custom website URL.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = homepageInput,
+                        onValueChange = { homepageInput = it },
+                        placeholder = { Text("https://example.com") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val trimmed = homepageInput.trim()
+                        if (trimmed.isBlank() || trimmed.equals("nyxora://home", ignoreCase = true)) {
+                            onUpdateSettings { it.copy(homepageUrl = "nyxora://home") }
+                            showHomepageDialog = false
+                        } else {
+                            val normalized = UrlAndSearchHandler.normalizeUserInput(
+                                rawInput = trimmed,
+                                searchEngine = settings.searchEngine,
+                                httpsOnlyMode = settings.httpsOnlyMode
+                            )
+                            if (normalized.classification == InputClassification.BLOCKED_DANGEROUS_SCHEME ||
+                                normalized.classification == InputClassification.EXTERNAL_INTENT_OR_CUSTOM_SCHEME
+                            ) {
+                                onToast("Blocked unsafe homepage URL scheme")
+                                onUpdateSettings { it.copy(homepageUrl = "nyxora://home") }
+                            } else {
+                                onUpdateSettings { it.copy(homepageUrl = normalized.finalUrl) }
+                            }
+                            showHomepageDialog = false
+                        }
+                    }
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        onUpdateSettings { it.copy(homepageUrl = "nyxora://home") }
+                        showHomepageDialog = false
+                    }
+                ) {
+                    Text("Use Default")
+                }
+            }
+        )
+    }
+
+    if (showResetConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showResetConfirmDialog = false },
+            title = { Text("Reset Browser Settings?") },
+            text = {
+                Text("This will restore all NYXORA settings and site permissions to their clean defaults without deleting your bookmarks.")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showResetConfirmDialog = false
+                        onResetBrowserSettings()
+                    }
+                ) {
+                    Text("Reset")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showResetConfirmDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showOpenSourceLicensesDialog) {
+        AlertDialog(
+            onDismissRequest = { showOpenSourceLicensesDialog = false },
+            title = { Text("Open-Source Licenses") },
+            text = {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    item {
+                        Text(
+                            text = "NYXORA Browser is built with the following open-source libraries under the Apache License 2.0:",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    items(
+                        listOf(
+                            "Android Jetpack Compose & Material 3 — Apache License 2.0",
+                            "AndroidX Room & DataStore — Apache License 2.0",
+                            "AndroidX WebKit & Core KTX — Apache License 2.0",
+                            "Kotlin Coroutines & Serialization — Apache License 2.0",
+                            "OkHttp — Apache License 2.0"
+                        )
+                    ) { entry ->
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = entry,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(10.dp)
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showOpenSourceLicensesDialog = false }) {
+                    Text("Close")
+                }
+            }
+        )
     }
 
     if (showCapabilityMatrixDialog) {
@@ -1381,10 +1863,10 @@ fun NyxoraSettingsScreen(
         var newPin by remember { mutableStateOf("") }
         AlertDialog(
             onDismissRequest = { showPinDialog = false },
-            title = { Text("Private Tabs PIN Lock") },
+            title = { Text("Incognito Tabs PIN Lock") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Enter a PIN to lock access to Private Tabs (leave empty to disable lock):")
+                    Text("Enter a PIN to lock access to Incognito Tabs (leave empty to disable lock):")
                     OutlinedTextField(
                         value = newPin,
                         onValueChange = { newPin = it },
@@ -1544,13 +2026,69 @@ fun NyxoraSettingsScreen(
 }
 
 @Composable
+private fun SettingsCategoryRow(
+    icon: ImageVector,
+    category: SettingsCategory,
+    testTag: String,
+    onClick: () -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .testTag(testTag),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surface
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = category.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = category.subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Icon(
+                imageVector = Icons.AutoMirrored.Outlined.KeyboardArrowRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
 private fun SettingsSectionCard(
     title: String,
     content: @Composable () -> Unit
 ) {
     Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.medium,
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(14.dp)),
+        shape = RoundedCornerShape(14.dp),
         color = MaterialTheme.colorScheme.surface
     ) {
         Column(
@@ -1572,7 +2110,8 @@ private fun SettingToggleItem(
     title: String,
     subtitle: String,
     checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
+    onCheckedChange: (Boolean) -> Unit,
+    testTag: String? = null
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -1583,6 +2122,10 @@ private fun SettingToggleItem(
             Text(title, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface)
             Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            modifier = if (testTag != null) Modifier.testTag(testTag) else Modifier
+        )
     }
 }

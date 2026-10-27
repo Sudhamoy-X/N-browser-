@@ -14,12 +14,12 @@ import com.example.data.local.ThemeMode
 private val NyxoraDarkScheme = darkColorScheme(
     primary = NyxoraElectricBlue,
     onPrimary = Color.White,
-    primaryContainer = Color(0xFF1E3A8A),
-    onPrimaryContainer = Color(0xFFDBEAFE),
-    secondary = NyxoraVibrantViolet,
-    onSecondary = Color.White,
-    secondaryContainer = Color(0xFF2E1065),
-    onSecondaryContainer = Color(0xFFEDE9FE),
+    primaryContainer = Color(0xFF1E293B),
+    onPrimaryContainer = Color(0xFFE2E8F0),
+    secondary = NyxoraTextSecondaryDark,
+    onSecondary = Color(0xFF0B0C0E),
+    secondaryContainer = Color(0xFF1E222B),
+    onSecondaryContainer = Color(0xFFE2E8F0),
     tertiary = NyxoraCyanHighlight,
     background = NyxoraCharcoalDeep,
     onBackground = NyxoraTextPrimaryDark,
@@ -41,7 +41,7 @@ private val NyxoraLightScheme = lightColorScheme(
     onSecondary = Color.White,
     secondaryContainer = Color(0xFFE2E8F0),
     onSecondaryContainer = Color(0xFF0F172A),
-    tertiary = Color(0xFF4F46E5),
+    tertiary = Color(0xFF3B82F6),
     background = NyxoraSoftWhite,
     onBackground = NyxoraTextPrimaryLight,
     surface = NyxoraLightSurface,
@@ -53,13 +53,12 @@ private val NyxoraLightScheme = lightColorScheme(
     onError = Color.White
 )
 
-// Moderate rounded corners (no excessive pills)
 val NyxoraShapes = Shapes(
     extraSmall = RoundedCornerShape(6.dp),
-    small = RoundedCornerShape(10.dp),
-    medium = RoundedCornerShape(12.dp),
-    large = RoundedCornerShape(16.dp),
-    extraLarge = RoundedCornerShape(20.dp)
+    small = RoundedCornerShape(8.dp),
+    medium = RoundedCornerShape(10.dp),
+    large = RoundedCornerShape(14.dp),
+    extraLarge = RoundedCornerShape(18.dp)
 )
 
 @Composable

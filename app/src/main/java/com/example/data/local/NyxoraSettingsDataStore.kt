@@ -15,9 +15,9 @@ import kotlinx.coroutines.flow.map
 private val Context.nyxoraDataStore: DataStore<Preferences> by preferencesDataStore(name = "nyxora_settings")
 
 enum class ThemeMode(val label: String) {
-    DARK("Dark (Nyxora Obsidian)"),
-    LIGHT("Light (Monochrome Daylight)"),
-    SYSTEM("Follow System")
+    DARK("Dark"),
+    LIGHT("Light"),
+    SYSTEM("System")
 }
 
 enum class SearchEngine(val label: String, val searchUrlTemplate: String, val suggestUrlTemplate: String) {
@@ -49,9 +49,10 @@ enum class SearchEngine(val label: String, val searchUrlTemplate: String, val su
 }
 
 enum class FullscreenOrientationMode(val label: String) {
-    AUTO("Auto (Portrait for vertical video, Landscape for wide)"),
+    KEEP_CURRENT("Keep Current Orientation"),
+    PORTRAIT("Portrait"),
     ALWAYS_LANDSCAPE("Always Landscape"),
-    KEEP_CURRENT("Keep Current Orientation")
+    AUTO("Auto (Preserve Current Orientation)")
 }
 
 enum class VideoAspectMode(val label: String) {
@@ -61,8 +62,11 @@ enum class VideoAspectMode(val label: String) {
 }
 
 data class NyxoraSettingsState(
-    // Appearance (All optional homepage sections are OFF by default for minimal homepage)
+    // Appearance & Customization (Optional homepage sections default to false for clean fresh start)
     val themeMode: ThemeMode = ThemeMode.DARK,
+    val homepageUrl: String = "nyxora://home",
+    val homepageShortcutsEnabled: Boolean = true,
+    val restoreTabsOnStartup: Boolean = true,
     val showHomeGreeting: Boolean = false,
     val showHomeShortcuts: Boolean = false,
     val showHomeFreqVisited: Boolean = false,
@@ -72,11 +76,21 @@ data class NyxoraSettingsState(
     val globalTextZoom: Int = 100,
     val compactBottomToolbar: Boolean = false,
     val reducedMotion: Boolean = false,
-    // Search (Google is the default search engine; other engines stay selectable in Settings > Search)
+    val preferredLanguage: String = "System Default",
+    // Search (Google is the default search engine; other engines stay selectable in Settings)
     val searchEngine: SearchEngine = SearchEngine.GOOGLE,
     val searchSuggestionsEnabled: Boolean = true,
     // Optional Account & Sync (OFF by default — never required or prompted at launch)
     val cloudSyncEnabled: Boolean = false,
+    // Site Content & Permissions Defaults
+    val javascriptEnabled: Boolean = true,
+    val cookiesEnabled: Boolean = true,
+    val doNotTrackEnabled: Boolean = true,
+    val clipboardAccessEnabled: Boolean = true,
+    val defaultLocationPermission: String = "ASK",
+    val defaultCameraPermission: String = "ASK",
+    val defaultMicPermission: String = "ASK",
+    val defaultNotificationPermission: String = "ASK",
     // Privacy & Security
     val adBlockingEnabled: Boolean = true,
     val popupBlockingEnabled: Boolean = true,
@@ -100,7 +114,7 @@ data class NyxoraSettingsState(
     val edgeSwipeBackForward: Boolean = true,
     val pullToRefreshEnabled: Boolean = true,
     // Video
-    val fullscreenOrientationMode: FullscreenOrientationMode = FullscreenOrientationMode.AUTO,
+    val fullscreenOrientationMode: FullscreenOrientationMode = FullscreenOrientationMode.KEEP_CURRENT,
     val defaultVideoAspectMode: VideoAspectMode = VideoAspectMode.FIT,
     val pipEnabled: Boolean = true,
     val keepScreenOnWhilePlaying: Boolean = true,
@@ -116,6 +130,9 @@ class NyxoraSettingsDataStore(private val context: Context) {
 
     private object Keys {
         val THEME_MODE = stringPreferencesKey("theme_mode")
+        val HOMEPAGE_URL = stringPreferencesKey("homepage_url")
+        val HOMEPAGE_SHORTCUTS_ENABLED = booleanPreferencesKey("homepage_shortcuts_enabled")
+        val RESTORE_TABS_ON_STARTUP = booleanPreferencesKey("restore_tabs_on_startup")
         val SHOW_HOME_GREETING = booleanPreferencesKey("show_home_greeting")
         val SHOW_HOME_SHORTCUTS = booleanPreferencesKey("show_home_shortcuts")
         val SHOW_HOME_FREQ = booleanPreferencesKey("show_home_freq")
@@ -125,11 +142,21 @@ class NyxoraSettingsDataStore(private val context: Context) {
         val GLOBAL_TEXT_ZOOM = intPreferencesKey("global_text_zoom")
         val COMPACT_TOOLBAR = booleanPreferencesKey("compact_toolbar")
         val REDUCED_MOTION = booleanPreferencesKey("reduced_motion")
+        val PREFERRED_LANGUAGE = stringPreferencesKey("preferred_language")
 
         val SEARCH_ENGINE = stringPreferencesKey("search_engine")
         val SEARCH_SUGGESTIONS = booleanPreferencesKey("search_suggestions")
 
         val CLOUD_SYNC_ENABLED = booleanPreferencesKey("cloud_sync_enabled")
+
+        val JAVASCRIPT_ENABLED = booleanPreferencesKey("javascript_enabled")
+        val COOKIES_ENABLED = booleanPreferencesKey("cookies_enabled")
+        val DO_NOT_TRACK_ENABLED = booleanPreferencesKey("do_not_track_enabled")
+        val CLIPBOARD_ACCESS_ENABLED = booleanPreferencesKey("clipboard_access_enabled")
+        val DEFAULT_LOCATION_PERMISSION = stringPreferencesKey("default_location_permission")
+        val DEFAULT_CAMERA_PERMISSION = stringPreferencesKey("default_camera_permission")
+        val DEFAULT_MIC_PERMISSION = stringPreferencesKey("default_mic_permission")
+        val DEFAULT_NOTIFICATION_PERMISSION = stringPreferencesKey("default_notification_permission")
 
         val AD_BLOCKING = booleanPreferencesKey("ad_blocking")
         val POPUP_BLOCKING = booleanPreferencesKey("popup_blocking")
@@ -172,6 +199,9 @@ class NyxoraSettingsDataStore(private val context: Context) {
     private fun mapPreferencesToState(prefs: Preferences): NyxoraSettingsState {
         return NyxoraSettingsState(
             themeMode = runCatching { ThemeMode.valueOf(prefs[Keys.THEME_MODE] ?: ThemeMode.DARK.name) }.getOrDefault(ThemeMode.DARK),
+            homepageUrl = (prefs[Keys.HOMEPAGE_URL] ?: "nyxora://home").ifBlank { "nyxora://home" },
+            homepageShortcutsEnabled = prefs[Keys.HOMEPAGE_SHORTCUTS_ENABLED] ?: true,
+            restoreTabsOnStartup = prefs[Keys.RESTORE_TABS_ON_STARTUP] ?: true,
             showHomeGreeting = prefs[Keys.SHOW_HOME_GREETING] ?: false,
             showHomeShortcuts = prefs[Keys.SHOW_HOME_SHORTCUTS] ?: false,
             showHomeFreqVisited = prefs[Keys.SHOW_HOME_FREQ] ?: false,
@@ -181,9 +211,18 @@ class NyxoraSettingsDataStore(private val context: Context) {
             globalTextZoom = (prefs[Keys.GLOBAL_TEXT_ZOOM] ?: 100).coerceIn(50, 250),
             compactBottomToolbar = prefs[Keys.COMPACT_TOOLBAR] ?: false,
             reducedMotion = prefs[Keys.REDUCED_MOTION] ?: false,
+            preferredLanguage = (prefs[Keys.PREFERRED_LANGUAGE] ?: "System Default").ifBlank { "System Default" },
             searchEngine = runCatching { SearchEngine.valueOf(prefs[Keys.SEARCH_ENGINE] ?: SearchEngine.GOOGLE.name) }.getOrDefault(SearchEngine.GOOGLE),
             searchSuggestionsEnabled = prefs[Keys.SEARCH_SUGGESTIONS] ?: true,
             cloudSyncEnabled = prefs[Keys.CLOUD_SYNC_ENABLED] ?: false,
+            javascriptEnabled = prefs[Keys.JAVASCRIPT_ENABLED] ?: true,
+            cookiesEnabled = prefs[Keys.COOKIES_ENABLED] ?: true,
+            doNotTrackEnabled = prefs[Keys.DO_NOT_TRACK_ENABLED] ?: true,
+            clipboardAccessEnabled = prefs[Keys.CLIPBOARD_ACCESS_ENABLED] ?: true,
+            defaultLocationPermission = prefs[Keys.DEFAULT_LOCATION_PERMISSION] ?: "ASK",
+            defaultCameraPermission = prefs[Keys.DEFAULT_CAMERA_PERMISSION] ?: "ASK",
+            defaultMicPermission = prefs[Keys.DEFAULT_MIC_PERMISSION] ?: "ASK",
+            defaultNotificationPermission = prefs[Keys.DEFAULT_NOTIFICATION_PERMISSION] ?: "ASK",
             adBlockingEnabled = prefs[Keys.AD_BLOCKING] ?: true,
             popupBlockingEnabled = prefs[Keys.POPUP_BLOCKING] ?: true,
             redirectBlockingEnabled = prefs[Keys.REDIRECT_BLOCKING] ?: true,
@@ -203,8 +242,8 @@ class NyxoraSettingsDataStore(private val context: Context) {
             edgeSwipeBackForward = prefs[Keys.EDGE_SWIPE] ?: true,
             pullToRefreshEnabled = prefs[Keys.PULL_TO_REFRESH] ?: true,
             fullscreenOrientationMode = runCatching {
-                FullscreenOrientationMode.valueOf(prefs[Keys.FULLSCREEN_ORIENTATION] ?: FullscreenOrientationMode.AUTO.name)
-            }.getOrDefault(FullscreenOrientationMode.AUTO),
+                FullscreenOrientationMode.valueOf(prefs[Keys.FULLSCREEN_ORIENTATION] ?: FullscreenOrientationMode.KEEP_CURRENT.name)
+            }.getOrDefault(FullscreenOrientationMode.KEEP_CURRENT),
             defaultVideoAspectMode = runCatching {
                 VideoAspectMode.valueOf(prefs[Keys.VIDEO_ASPECT_MODE] ?: VideoAspectMode.FIT.name)
             }.getOrDefault(VideoAspectMode.FIT),
@@ -223,6 +262,9 @@ class NyxoraSettingsDataStore(private val context: Context) {
             val current = mapPreferencesToState(prefs)
             val updated = transform(current)
             prefs[Keys.THEME_MODE] = updated.themeMode.name
+            prefs[Keys.HOMEPAGE_URL] = updated.homepageUrl.ifBlank { "nyxora://home" }
+            prefs[Keys.HOMEPAGE_SHORTCUTS_ENABLED] = updated.homepageShortcutsEnabled
+            prefs[Keys.RESTORE_TABS_ON_STARTUP] = updated.restoreTabsOnStartup
             prefs[Keys.SHOW_HOME_GREETING] = updated.showHomeGreeting
             prefs[Keys.SHOW_HOME_SHORTCUTS] = updated.showHomeShortcuts
             prefs[Keys.SHOW_HOME_FREQ] = updated.showHomeFreqVisited
@@ -232,9 +274,18 @@ class NyxoraSettingsDataStore(private val context: Context) {
             prefs[Keys.GLOBAL_TEXT_ZOOM] = updated.globalTextZoom.coerceIn(50, 250)
             prefs[Keys.COMPACT_TOOLBAR] = updated.compactBottomToolbar
             prefs[Keys.REDUCED_MOTION] = updated.reducedMotion
+            prefs[Keys.PREFERRED_LANGUAGE] = updated.preferredLanguage.ifBlank { "System Default" }
             prefs[Keys.SEARCH_ENGINE] = updated.searchEngine.name
             prefs[Keys.SEARCH_SUGGESTIONS] = updated.searchSuggestionsEnabled
             prefs[Keys.CLOUD_SYNC_ENABLED] = updated.cloudSyncEnabled
+            prefs[Keys.JAVASCRIPT_ENABLED] = updated.javascriptEnabled
+            prefs[Keys.COOKIES_ENABLED] = updated.cookiesEnabled
+            prefs[Keys.DO_NOT_TRACK_ENABLED] = updated.doNotTrackEnabled
+            prefs[Keys.CLIPBOARD_ACCESS_ENABLED] = updated.clipboardAccessEnabled
+            prefs[Keys.DEFAULT_LOCATION_PERMISSION] = updated.defaultLocationPermission
+            prefs[Keys.DEFAULT_CAMERA_PERMISSION] = updated.defaultCameraPermission
+            prefs[Keys.DEFAULT_MIC_PERMISSION] = updated.defaultMicPermission
+            prefs[Keys.DEFAULT_NOTIFICATION_PERMISSION] = updated.defaultNotificationPermission
             prefs[Keys.AD_BLOCKING] = updated.adBlockingEnabled
             prefs[Keys.POPUP_BLOCKING] = updated.popupBlockingEnabled
             prefs[Keys.REDIRECT_BLOCKING] = updated.redirectBlockingEnabled
@@ -263,6 +314,10 @@ class NyxoraSettingsDataStore(private val context: Context) {
             prefs[Keys.FORCE_DARK_WEB] = updated.forceDarkWebPages
             prefs[Keys.HIDE_COOKIE_BANNERS] = updated.hideCookieConsentBanners
         }
+    }
+
+    suspend fun resetToDefaults() {
+        updateSettings { NyxoraSettingsState() }
     }
 
     suspend fun incrementBlockedMetric(ads: Int = 0, popups: Int = 0, redirects: Int = 0) {

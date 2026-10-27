@@ -37,6 +37,8 @@ import com.example.domain.browser.EncryptedBackupManager
 import com.example.domain.browser.InputClassification
 import com.example.domain.browser.ReaderArticle
 import com.example.domain.browser.UrlAndSearchHandler
+import com.example.domain.connect.NyxoraConnectSessionManager
+import com.example.domain.connect.RealtimeEventType
 import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
@@ -47,6 +49,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -61,13 +64,17 @@ data class BrowserTab(
     val progress: Int = 0,
     val canGoBack: Boolean = false,
     val canGoForward: Boolean = false,
+    val backStack: List<String> = emptyList(),
+    val forwardStack: List<String> = emptyList(),
     val desktopMode: Boolean = false,
     val textZoom: Int = 100,
     val hasCertificateError: Boolean = false,
     val pageErrorDescription: String? = null,
     val pendingHttpFallbackUrl: String? = null,
     val isSuspended: Boolean = false,
-    val lastActiveAtMillis: Long = System.currentTimeMillis()
+    val lastActiveAtMillis: Long = System.currentTimeMillis(),
+    val parentTabId: String? = null,
+    val reloadTriggerTick: Int = 0
 ) {
     val isHomePage: Boolean
         get() = url.equals("nyxora://home", ignoreCase = true) || url.isBlank()
@@ -80,6 +87,60 @@ data class BrowserTab(
 
     val safeDisplayHost: String
         get() = UrlAndSearchHandler.formatSafeDisplayHost(url)
+}
+
+/**
+ * Immutable snapshot of the browser's multi-tab state across normal and private (incognito) modes.
+ */
+data class MultiTabState(
+    val normalTabs: List<BrowserTab> = listOf(BrowserTab(id = "tab_initial", title = "Home", url = "nyxora://home")),
+    val privateTabs: List<BrowserTab> = emptyList(),
+    val activeNormalTabId: String = "tab_initial",
+    val activePrivateTabId: String? = null,
+    val isPrivateMode: Boolean = false,
+    val recentlyClosedTabs: List<BrowserTab> = emptyList()
+) {
+    /** Tabs belonging to the currently active browsing mode. */
+    val currentModeTabs: List<BrowserTab>
+        get() = if (isPrivateMode) privateTabs else normalTabs
+
+    /** Currently active tab in the active browsing mode. */
+    val activeTab: BrowserTab
+        get() = if (isPrivateMode) {
+            privateTabs.find { it.id == activePrivateTabId }
+                ?: privateTabs.firstOrNull()
+                ?: BrowserTab(id = "priv_empty", title = "Private Home", url = "nyxora://home", isPrivate = true)
+        } else {
+            normalTabs.find { it.id == activeNormalTabId }
+                ?: normalTabs.firstOrNull()
+                ?: BrowserTab(id = "tab_initial", title = "Home", url = "nyxora://home", isPrivate = false)
+        }
+
+    /** ID of the currently active tab. */
+    val activeTabId: String
+        get() = activeTab.id
+
+    /** Zero-based index of the active tab within [currentModeTabs], or 0 when empty. */
+    val activeTabIndex: Int
+        get() = currentModeTabs.indexOfFirst { it.id == activeTab.id }.coerceAtLeast(0)
+
+    /** Number of open tabs in the currently active browsing mode. */
+    val tabCount: Int
+        get() = currentModeTabs.size
+
+    /** Total number of open tabs across both normal and private modes. */
+    val totalTabCount: Int
+        get() = normalTabs.size + privateTabs.size
+
+    fun findTabById(tabId: String): BrowserTab? =
+        normalTabs.find { it.id == tabId } ?: privateTabs.find { it.id == tabId }
+
+    fun getTabsByGroup(groupName: String): List<BrowserTab> {
+        if (groupName.isBlank() || groupName.equals("All", ignoreCase = true)) {
+            return currentModeTabs
+        }
+        return currentModeTabs.filter { it.groupName.equals(groupName, ignoreCase = true) }
+    }
 }
 
 data class BlockedEventSnackbar(
@@ -122,7 +183,8 @@ enum class OverlaySheet {
     DOWNLOADS,
     SITE_SETTINGS,
     SETTINGS,
-    READER_MODE
+    READER_MODE,
+    NYXORA_CONNECT
 }
 
 class NyxoraBrowserViewModel(
@@ -135,6 +197,13 @@ class NyxoraBrowserViewModel(
     private val settingsDataStore: NyxoraSettingsDataStore,
     val downloadEngine: DownloadEngine
 ) : ViewModel() {
+
+    val connectManager: NyxoraConnectSessionManager = NyxoraConnectSessionManager(
+        scope = viewModelScope
+    )
+
+    @Volatile
+    private var isApplyingRemoteSyncNavigation: Boolean = false
 
     @Volatile
     var hasInitializedWebViewEngine: Boolean = false
@@ -232,6 +301,11 @@ class NyxoraBrowserViewModel(
     private val _allowOnceUrls = MutableStateFlow<Set<String>>(emptySet())
     val allowOnceUrls: StateFlow<Set<String>> = _allowOnceUrls.asStateFlow()
 
+    private val _pendingRedirectWarning = MutableStateFlow<BlockedEventSnackbar?>(null)
+    val pendingRedirectWarning: StateFlow<BlockedEventSnackbar?> = _pendingRedirectWarning.asStateFlow()
+
+    private val localSiteSettingCache = java.util.concurrent.ConcurrentHashMap<String, SiteSettingItem>()
+
     private val _blockedSnackbar = MutableSharedFlow<BlockedEventSnackbar>(extraBufferCapacity = 4)
     val blockedSnackbar = _blockedSnackbar.asSharedFlow()
 
@@ -250,26 +324,24 @@ class NyxoraBrowserViewModel(
     private val _pendingSitePermissionPrompt = MutableStateFlow<PendingSitePermissionPrompt?>(null)
     val pendingSitePermissionPrompt: StateFlow<PendingSitePermissionPrompt?> = _pendingSitePermissionPrompt.asStateFlow()
 
-    // Active tab derived flow
-    val activeTab: StateFlow<BrowserTab> = combine(
-        _isPrivateMode,
-        _normalTabs,
-        _privateTabs,
-        _activeNormalTabId,
-        _activePrivateTabId
-    ) { isPriv, normList, privList, normId, privId ->
-        if (isPriv) {
-            privList.find { it.id == privId } ?: privList.firstOrNull()
-                ?: BrowserTab(id = "priv_empty", title = "Private Home", url = "nyxora://home", isPrivate = true)
-        } else {
-            normList.find { it.id == normId } ?: normList.firstOrNull()
-                ?: BrowserTab(id = "tab_initial", title = "Home", url = "nyxora://home", isPrivate = false)
-        }
-    }.stateIn(
-        scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(5000L),
-        initialValue = BrowserTab(id = "tab_initial", title = "Home", url = "nyxora://home")
-    )
+    private val _multiTabState = MutableStateFlow(MultiTabState())
+    val multiTabState: StateFlow<MultiTabState> = _multiTabState.asStateFlow()
+
+    private val _activeTab = MutableStateFlow(_multiTabState.value.activeTab)
+    val activeTab: StateFlow<BrowserTab> = _activeTab.asStateFlow()
+
+    private fun syncMultiTabState() {
+        val nextState = MultiTabState(
+            normalTabs = _normalTabs.value,
+            privateTabs = _privateTabs.value,
+            activeNormalTabId = _activeNormalTabId.value,
+            activePrivateTabId = _activePrivateTabId.value,
+            isPrivateMode = _isPrivateMode.value,
+            recentlyClosedTabs = _recentlyClosedTabs.value
+        )
+        _multiTabState.value = nextState
+        _activeTab.value = nextState.activeTab
+    }
 
     init {
         // Keep ContentBlockingEngine updated with custom rules on a background thread
@@ -279,74 +351,70 @@ class NyxoraBrowserViewModel(
             }
         }
 
-        // Restore normal tabs, seed default homepage shortcuts, and warm up top-visited host on Dispatchers.IO
+        // Restore normal tabs on Dispatchers.IO when restoreTabsOnStartup is enabled (no fake shortcuts seeded)
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                val initialSettings = runCatching { settingsDataStore.settingsFlow.first() }
+                    .getOrDefault(NyxoraSettingsState())
+                if (!initialSettings.restoreTabsOnStartup) {
+                    savedTabDao.clearAllSavedTabs()
+                    return@launch
+                }
                 val localTabs = savedTabDao.getAllSavedTabs()
                 if (localTabs.isNotEmpty()) {
-                    val restored = localTabs.map { item ->
-                        BrowserTab(
-                            id = item.id.ifBlank { UUID.randomUUID().toString() },
-                            title = item.title,
-                            url = item.url,
-                            isPrivate = false,
-                            groupName = item.groupName.ifBlank { "Default" },
-                            desktopMode = item.desktopMode,
-                            textZoom = item.textZoom.coerceIn(50, 250)
-                        )
-                    }
+                    val restored = localTabs
+                        .map { item ->
+                            BrowserTab(
+                                id = item.id.ifBlank { UUID.randomUUID().toString() },
+                                title = item.title,
+                                url = item.url,
+                                isPrivate = false,
+                                groupName = item.groupName.ifBlank { "Default" },
+                                desktopMode = item.desktopMode,
+                                textZoom = item.textZoom.coerceIn(50, 250)
+                            )
+                        }
+                        .distinctBy { it.id }
+
                     val homeTab = restored.firstOrNull { it.isHomePage }
                     if (homeTab != null) {
                         _normalTabs.value = restored
                         _activeNormalTabId.value = homeTab.id
                     } else {
+                        val homeId = if (restored.any { it.id == "tab_initial" }) {
+                            "tab_home_${UUID.randomUUID()}"
+                        } else {
+                            "tab_initial"
+                        }
                         val freshHome = BrowserTab(
-                            id = "tab_initial",
+                            id = homeId,
                             title = "Home",
                             url = "nyxora://home",
                             isPrivate = false
                         )
-                        _normalTabs.value = listOf(freshHome) + restored
+                        _normalTabs.value = (listOf(freshHome) + restored).distinctBy { it.id }
                         _activeNormalTabId.value = freshHome.id
                     }
+                    syncMultiTabState()
                 }
-                seedDefaultShortcutsIfEmpty()
             } catch (e: Exception) {
                 Log.w(TAG, "Error restoring local tabs", e)
             }
         }
     }
 
-    private suspend fun seedDefaultShortcutsIfEmpty() {
-        val currentBookmarks = bookmarkDao.getAllBookmarks()
-        if (currentBookmarks.isEmpty()) {
-            val now = System.currentTimeMillis()
-            val defaults = listOf(
-                Triple("Wikipedia", "https://www.wikipedia.org", "Reference"),
-                Triple("Hacker News", "https://news.ycombinator.com", "Tech"),
-                Triple("GitHub", "https://github.com", "Dev"),
-                Triple("MDN Web Docs", "https://developer.mozilla.org", "Dev"),
-                Triple("DuckDuckGo", "https://duckduckgo.com", "Search"),
-                Triple("Android Developers", "https://developer.android.com", "Dev")
-            )
-            val entities = defaults.mapIndexed { idx, (title, url, folder) ->
-                BookmarkItem(
-                    id = "default_shortcut_$idx",
-                    userId = "local_user",
-                    title = title,
-                    url = url,
-                    folder = folder,
-                    isShortcut = true,
-                    createdAtMillis = now - idx
-                )
-            }
-            bookmarkDao.upsertBookmarks(entities)
-        }
-    }
-
     // --- NAVIGATION & ADDRESS BAR ---
 
     fun navigateInActiveTab(rawInput: String) {
+        val trimmedInput = rawInput.trim()
+        if (trimmedInput.startsWith("nyxora://connect", ignoreCase = true)) {
+            _activeOverlay.value = OverlaySheet.NYXORA_CONNECT
+            if (trimmedInput.contains("room=", ignoreCase = true)) {
+                connectManager.joinRoom(trimmedInput)
+            }
+            return
+        }
+
         val currentSettings = settings.value
         val target = UrlAndSearchHandler.normalizeUserInput(
             rawInput = rawInput,
@@ -369,19 +437,38 @@ class NyxoraBrowserViewModel(
             InputClassification.INTERNAL_NYXORA,
             InputClassification.DIRECT_URL,
             InputClassification.SEARCH_QUERY -> {
+                val currentActive = activeTab.value
                 val siteOverride = getSiteSettingForHost(target.host)
-                val effectiveDesktop = siteOverride?.desktopMode ?: currentSettings.defaultDesktopSite
+                val effectiveDesktop = siteOverride?.desktopMode ?: currentActive.desktopMode
                 val effectiveZoom = siteOverride?.textZoom ?: currentSettings.globalTextZoom
                 val isHome = target.finalUrl.equals("nyxora://home", ignoreCase = true)
+                val finalNavUrl = if (!isHome && effectiveDesktop) {
+                    rewriteMobileSubdomainToDesktopUrl(target.finalUrl)
+                } else {
+                    target.finalUrl
+                }
+                val newTitle = if (isHome) "Home" else target.safeDisplayHost.ifBlank { finalNavUrl }
 
-                updateTab(activeTab.value.id) { tab ->
+                updateTab(currentActive.id) { tab ->
+                    val nextBackStack = if (tab.url.isNotBlank() &&
+                        !tab.url.equals(finalNavUrl, ignoreCase = true) &&
+                        !tab.backStack.lastOrNull().equals(tab.url, ignoreCase = true)
+                    ) {
+                        (tab.backStack + tab.url).takeLast(50)
+                    } else {
+                        tab.backStack
+                    }
                     tab.copy(
-                        url = target.finalUrl,
-                        title = if (isHome) "Home" else target.safeDisplayHost.ifBlank { target.finalUrl },
+                        url = finalNavUrl,
+                        title = newTitle,
                         desktopMode = effectiveDesktop,
                         textZoom = effectiveZoom,
                         isLoading = !isHome,
                         progress = if (isHome) 0 else 8,
+                        canGoBack = nextBackStack.isNotEmpty() || !isHome || tab.parentTabId != null,
+                        canGoForward = false,
+                        backStack = nextBackStack,
+                        forwardStack = emptyList(),
                         hasCertificateError = false,
                         pageErrorDescription = null,
                         pendingHttpFallbackUrl = target.fallbackHttpUrl,
@@ -389,8 +476,83 @@ class NyxoraBrowserViewModel(
                         lastActiveAtMillis = System.currentTimeMillis()
                     )
                 }
+
+                if (!isApplyingRemoteSyncNavigation && !currentActive.isPrivate && !_isPrivateMode.value) {
+                    connectManager.publishUrlNavigation(
+                        url = target.finalUrl,
+                        title = newTitle,
+                        isPrivateTab = false,
+                        isPrivateMode = false,
+                        eventType = RealtimeEventType.NAVIGATE_URL
+                    )
+                }
             }
         }
+    }
+
+    fun applyRemoteSyncUrlNavigation(url: String, title: String) {
+        // Never apply synchronized navigation into a Private/Incognito tab
+        if (_isPrivateMode.value) return
+        val targetNormalId = _activeNormalTabId.value
+        val host = UrlAndSearchHandler.extractHost(url)
+        val siteOverride = getSiteSettingForHost(host)
+        val currentSettings = settings.value
+        val isHome = url.equals("nyxora://home", ignoreCase = true)
+
+        isApplyingRemoteSyncNavigation = true
+        try {
+            updateTab(targetNormalId) { tab ->
+                if (tab.url == url) {
+                    tab
+                } else {
+                    tab.copy(
+                        url = url,
+                        title = title.ifBlank { if (isHome) "Home" else host.ifBlank { url } },
+                        desktopMode = siteOverride?.desktopMode ?: currentSettings.defaultDesktopSite,
+                        textZoom = siteOverride?.textZoom ?: currentSettings.globalTextZoom,
+                        isLoading = !isHome,
+                        progress = if (isHome) 0 else 10,
+                        hasCertificateError = false,
+                        pageErrorDescription = null,
+                        isSuspended = false,
+                        lastActiveAtMillis = System.currentTimeMillis()
+                    )
+                }
+            }
+        } finally {
+            isApplyingRemoteSyncNavigation = false
+        }
+    }
+
+    fun openNewTabFromRemoteSync(url: String, title: String) {
+        if (_isPrivateMode.value) return
+        isApplyingRemoteSyncNavigation = true
+        try {
+            val id = createNewTab(url = url, inPrivateMode = false, inBackground = false)
+            if (title.isNotBlank()) {
+                updateTab(id) { it.copy(title = title) }
+            }
+        } finally {
+            isApplyingRemoteSyncNavigation = false
+        }
+    }
+
+    fun notifyHostBackNavigation() {
+        val currentActive = activeTab.value
+        connectManager.publishBackForwardAction(
+            isBack = true,
+            isPrivateTab = currentActive.isPrivate,
+            isPrivateMode = _isPrivateMode.value
+        )
+    }
+
+    fun notifyHostForwardNavigation() {
+        val currentActive = activeTab.value
+        connectManager.publishBackForwardAction(
+            isBack = false,
+            isPrivateTab = currentActive.isPrivate,
+            isPrivateMode = _isPrivateMode.value
+        )
     }
 
     fun onWebPageStarted(tabId: String, url: String) {
@@ -420,20 +582,30 @@ class NyxoraBrowserViewModel(
 
         var updatedTabRef: BrowserTab? = null
         updateTab(tabId) { tab ->
+            val isHome = url.equals("nyxora://home", ignoreCase = true)
             val next = tab.copy(
                 url = url,
-                title = if (url == "nyxora://home") "Home" else cleanTitle,
+                title = if (isHome) "Home" else cleanTitle,
                 isLoading = false,
                 progress = 100,
                 pendingHttpFallbackUrl = null,
-                canGoBack = canGoBack,
-                canGoForward = canGoForward
+                canGoBack = canGoBack || tab.backStack.isNotEmpty() || !isHome || !tab.parentTabId.isNullOrBlank(),
+                canGoForward = canGoForward || tab.forwardStack.isNotEmpty()
             )
             updatedTabRef = next
             next
         }
 
         val tab = updatedTabRef ?: return
+        if (!tab.isPrivate && !_isPrivateMode.value && tab.id == _activeNormalTabId.value && !isApplyingRemoteSyncNavigation) {
+            connectManager.publishUrlNavigation(
+                url = url,
+                title = cleanTitle,
+                isPrivateTab = false,
+                isPrivateMode = false,
+                eventType = RealtimeEventType.NAVIGATE_URL
+            )
+        }
         if (!tab.isPrivate && !tab.isHomePage && url.startsWith("http")) {
             viewModelScope.launch(Dispatchers.IO) {
                 val now = System.currentTimeMillis()
@@ -468,6 +640,18 @@ class NyxoraBrowserViewModel(
             tab.copy(
                 progress = progress.coerceIn(0, 100),
                 isLoading = progress in 1..99 && tab.pageErrorDescription == null
+            )
+        }
+    }
+
+    fun onWebHistoryUpdated(tabId: String, url: String, canGoBack: Boolean, canGoForward: Boolean) {
+        updateTab(tabId) { tab ->
+            val nextUrl = if (url.isNotBlank() && url != "about:blank") url else tab.url
+            val isHome = nextUrl.equals("nyxora://home", ignoreCase = true)
+            tab.copy(
+                url = nextUrl,
+                canGoBack = canGoBack || tab.backStack.isNotEmpty() || !isHome || !tab.parentTabId.isNullOrBlank(),
+                canGoForward = canGoForward || tab.forwardStack.isNotEmpty()
             )
         }
     }
@@ -538,16 +722,286 @@ class NyxoraBrowserViewModel(
     }
 
     fun navigateHome() {
+        val configuredHome = settings.value.homepageUrl.trim()
+        if (configuredHome.isNotEmpty() && !configuredHome.equals("nyxora://home", ignoreCase = true)) {
+            navigateInActiveTab(configuredHome)
+            return
+        }
         updateTab(activeTab.value.id) { tab ->
+            val nextForward = if (!tab.isHomePage && tab.url.isNotBlank()) {
+                (listOf(tab.url) + tab.forwardStack).distinct().take(50)
+            } else {
+                tab.forwardStack
+            }
+            val nextBack = if (tab.backStack.lastOrNull()?.equals("nyxora://home", ignoreCase = true) == true) {
+                tab.backStack.dropLast(1)
+            } else {
+                tab.backStack
+            }
             tab.copy(
                 url = "nyxora://home",
                 title = if (tab.isPrivate) "Private Home" else "Home",
                 isLoading = false,
                 progress = 0,
+                canGoBack = nextBack.isNotEmpty(),
+                canGoForward = nextForward.isNotEmpty(),
+                backStack = nextBack,
+                forwardStack = nextForward,
                 pageErrorDescription = null,
                 hasCertificateError = false
             )
         }
+    }
+
+    fun navigateBackInActiveTab(webViewWentBack: Boolean = false): Boolean {
+        val currentActive = activeTab.value
+        if (webViewWentBack) {
+            updateTab(currentActive.id) { tab ->
+                // Only pop the top of backStack if it is NOT "nyxora://home" while WebView is still on a web page
+                val topBack = tab.backStack.lastOrNull()
+                val shouldPopBackStack = topBack != null && !topBack.equals("nyxora://home", ignoreCase = true)
+                val remainingBack = if (shouldPopBackStack) tab.backStack.dropLast(1) else tab.backStack
+                val nextForward = if (tab.url.isNotBlank() && !tab.isHomePage) {
+                    (listOf(tab.url) + tab.forwardStack).distinct().take(50)
+                } else {
+                    tab.forwardStack
+                }
+                tab.copy(
+                    backStack = remainingBack,
+                    forwardStack = nextForward,
+                    canGoBack = true,
+                    canGoForward = true
+                )
+            }
+            return true
+        }
+
+        // Deduplicate any trailing entries in backStack that match the current URL (e.g., redirect loops)
+        val cleanedBackStack = currentActive.backStack.dropLastWhile {
+            it.equals(currentActive.url, ignoreCase = true)
+        }
+
+        if (cleanedBackStack.isNotEmpty()) {
+            var navigatedUrl: String? = null
+            updateTab(currentActive.id) { tab ->
+                val cleanStack = tab.backStack.dropLastWhile { it.equals(tab.url, ignoreCase = true) }
+                val targetUrl = cleanStack.lastOrNull() ?: return@updateTab tab
+                navigatedUrl = targetUrl
+                val remainingBack = cleanStack.dropLast(1)
+                val nextForward = if (tab.url.isNotBlank() && !tab.url.equals(targetUrl, ignoreCase = true)) {
+                    (listOf(tab.url) + tab.forwardStack).distinct().take(50)
+                } else {
+                    tab.forwardStack
+                }
+                val isHome = targetUrl.equals("nyxora://home", ignoreCase = true)
+                val nextTitle = if (isHome) {
+                    if (tab.isPrivate) "Private Home" else "Home"
+                } else {
+                    UrlAndSearchHandler.formatSafeDisplayHost(targetUrl).ifBlank { targetUrl }
+                }
+                tab.copy(
+                    url = targetUrl,
+                    title = nextTitle,
+                    isLoading = !isHome,
+                    progress = if (isHome) 0 else 8,
+                    canGoBack = remainingBack.isNotEmpty() || !isHome || tab.parentTabId != null,
+                    canGoForward = nextForward.isNotEmpty(),
+                    backStack = remainingBack,
+                    forwardStack = nextForward,
+                    hasCertificateError = false,
+                    pageErrorDescription = null,
+                    lastActiveAtMillis = System.currentTimeMillis()
+                )
+            }
+            return navigatedUrl != null
+        }
+
+        // If this tab was opened from a previous tab (e.g. popup or target="_blank" link), return to that tab
+        val parentId = currentActive.parentTabId
+        if (!parentId.isNullOrBlank()) {
+            val modeTabs = if (_isPrivateMode.value) _privateTabs.value else _normalTabs.value
+            if (modeTabs.any { it.id == parentId && it.id != currentActive.id }) {
+                closeTab(currentActive.id)
+                selectTab(parentId, _isPrivateMode.value)
+                return true
+            }
+        }
+
+        // Otherwise, if not already on Homepage, return to Homepage instead of exiting the app
+        if (!currentActive.isHomePage) {
+            navigateHome()
+            return true
+        }
+        return false
+    }
+
+    /**
+     * Checks whether the browser has any active state that should intercept Android System Back
+     * instead of allowing the Activity to finish.
+     */
+    fun canInterceptSystemBack(
+        isFullscreenVideo: Boolean = false,
+        isEditingAddress: Boolean = false,
+        isOverflowMenuOpen: Boolean = false,
+        webViewCanGoBack: Boolean = false
+    ): Boolean {
+        if (isFullscreenVideo) return true
+        if (_pendingRedirectWarning.value != null ||
+            _pendingExternalSchemePrompt.value != null ||
+            _pendingRiskyDownload.value != null ||
+            _pendingSslErrorPrompt.value != null ||
+            _pendingSitePermissionPrompt.value != null ||
+            isOverflowMenuOpen ||
+            _activeOverlay.value != OverlaySheet.NONE ||
+            _findInPageVisible.value ||
+            isEditingAddress
+        ) {
+            return true
+        }
+        val tab = activeTab.value
+        val hasParentTab = !tab.parentTabId.isNullOrBlank() &&
+            (if (_isPrivateMode.value) _privateTabs.value else _normalTabs.value)
+                .any { it.id == tab.parentTabId && it.id != tab.id }
+        return webViewCanGoBack ||
+            tab.canGoBack ||
+            tab.backStack.isNotEmpty() ||
+            hasParentTab ||
+            !tab.isHomePage
+    }
+
+    /**
+     * Executes the strict 5-step Back Button priority chain:
+     * 1. If a video is in fullscreen, exit fullscreen first.
+     * 2. If a redirect warning or temporary overlay is open, dismiss it first.
+     * 3. If the current webpage has browser history, navigate Back within that page.
+     * 4. Otherwise, return to the previous browser tab or homepage according to navigation design.
+     * 5. Return false only when already at the root homepage with nothing to dismiss, allowing app exit.
+     */
+    fun handleSystemBack(
+        isFullscreenVideo: Boolean = false,
+        onExitFullscreen: () -> Unit = {},
+        isEditingAddress: Boolean = false,
+        onDismissAddressEdit: () -> Unit = {},
+        isOverflowMenuOpen: Boolean = false,
+        onDismissOverflowMenu: () -> Unit = {},
+        onExecuteWebViewBack: () -> Boolean = { false }
+    ): Boolean {
+        // Priority 1: Exit fullscreen video first
+        if (isFullscreenVideo) {
+            onExitFullscreen()
+            return true
+        }
+
+        // Priority 2: Dismiss redirect warning, security prompt, or temporary overlay first
+        if (_pendingRedirectWarning.value != null) {
+            _pendingRedirectWarning.value = null
+            return true
+        }
+        if (_pendingExternalSchemePrompt.value != null) {
+            _pendingExternalSchemePrompt.value = null
+            return true
+        }
+        if (_pendingRiskyDownload.value != null) {
+            _pendingRiskyDownload.value = null
+            return true
+        }
+        if (_pendingSslErrorPrompt.value != null) {
+            resolveSslErrorPrompt(false)
+            return true
+        }
+        if (_pendingSitePermissionPrompt.value != null) {
+            resolveSitePermissionPrompt(allow = false, rememberForSite = false)
+            return true
+        }
+        if (isOverflowMenuOpen) {
+            onDismissOverflowMenu()
+            return true
+        }
+        if (_activeOverlay.value != OverlaySheet.NONE) {
+            if (_activeOverlay.value == OverlaySheet.READER_MODE) {
+                showReaderArticle(null)
+            }
+            _activeOverlay.value = OverlaySheet.NONE
+            return true
+        }
+        if (_findInPageVisible.value) {
+            setFindInPageVisible(false)
+            return true
+        }
+        if (isEditingAddress) {
+            onDismissAddressEdit()
+            return true
+        }
+
+        // Priority 3 & 4: Webpage history -> Previous tab -> Homepage
+        val currentActive = activeTab.value
+        val wvWentBack = !currentActive.isHomePage && onExecuteWebViewBack()
+        if (wvWentBack) {
+            notifyHostBackNavigation()
+            navigateBackInActiveTab(webViewWentBack = true)
+            return true
+        }
+        if (currentActive.backStack.isNotEmpty() || !currentActive.isHomePage || !currentActive.parentTabId.isNullOrBlank()) {
+            notifyHostBackNavigation()
+            return navigateBackInActiveTab(webViewWentBack = false)
+        }
+
+        // Priority 5: Allow normal app exit when already at root homepage
+        return false
+    }
+
+    fun navigateForwardInActiveTab(webViewWentForward: Boolean = false): Boolean {
+        val currentActive = activeTab.value
+        if (webViewWentForward) {
+            if (currentActive.forwardStack.isNotEmpty()) {
+                updateTab(currentActive.id) { tab ->
+                    val remainingForward = tab.forwardStack.drop(1)
+                    val nextBack = (tab.backStack + tab.url).takeLast(50)
+                    tab.copy(
+                        backStack = nextBack,
+                        forwardStack = remainingForward,
+                        canGoBack = true,
+                        canGoForward = remainingForward.isNotEmpty()
+                    )
+                }
+            }
+            return true
+        }
+
+        if (currentActive.forwardStack.isNotEmpty()) {
+            var navigatedUrl: String? = null
+            updateTab(currentActive.id) { tab ->
+                val targetUrl = tab.forwardStack.firstOrNull() ?: return@updateTab tab
+                navigatedUrl = targetUrl
+                val remainingForward = tab.forwardStack.drop(1)
+                val nextBack = if (tab.url.isNotBlank() && !tab.url.equals(targetUrl, ignoreCase = true)) {
+                    (tab.backStack + tab.url).takeLast(50)
+                } else {
+                    tab.backStack
+                }
+                val isHome = targetUrl.equals("nyxora://home", ignoreCase = true)
+                val nextTitle = if (isHome) {
+                    if (tab.isPrivate) "Private Home" else "Home"
+                } else {
+                    UrlAndSearchHandler.formatSafeDisplayHost(targetUrl).ifBlank { targetUrl }
+                }
+                tab.copy(
+                    url = targetUrl,
+                    title = nextTitle,
+                    isLoading = !isHome,
+                    progress = if (isHome) 0 else 8,
+                    canGoBack = nextBack.isNotEmpty() || !isHome || tab.parentTabId != null,
+                    canGoForward = remainingForward.isNotEmpty(),
+                    backStack = nextBack,
+                    forwardStack = remainingForward,
+                    hasCertificateError = false,
+                    pageErrorDescription = null,
+                    lastActiveAtMillis = System.currentTimeMillis()
+                )
+            }
+            return navigatedUrl != null
+        }
+        return false
     }
 
     // --- TABS & SESSION MANAGEMENT ---
@@ -556,19 +1010,48 @@ class NyxoraBrowserViewModel(
         url: String = "nyxora://home",
         inPrivateMode: Boolean = _isPrivateMode.value,
         inBackground: Boolean = false,
-        groupName: String = "Default"
+        groupName: String = "Default",
+        parentTabId: String? = null
     ): String {
         val currentSettings = settings.value
-        val host = UrlAndSearchHandler.extractHost(url)
+        val trimmedUrl = url.trim().ifBlank { "nyxora://home" }
+        val resolvedUrl = if (
+            trimmedUrl.equals("nyxora://home", ignoreCase = true) ||
+            trimmedUrl.equals("about:blank", ignoreCase = true) ||
+            trimmedUrl.startsWith("http://", ignoreCase = true) ||
+            trimmedUrl.startsWith("https://", ignoreCase = true) ||
+            trimmedUrl.startsWith("file://", ignoreCase = true) ||
+            trimmedUrl.startsWith("nyxora://", ignoreCase = true)
+        ) {
+            trimmedUrl
+        } else {
+            UrlAndSearchHandler.normalizeUserInput(
+                rawInput = trimmedUrl,
+                searchEngine = currentSettings.searchEngine,
+                httpsOnlyMode = currentSettings.httpsOnlyMode
+            ).finalUrl
+        }
+        val isHome = resolvedUrl.equals("nyxora://home", ignoreCase = true)
+        val host = UrlAndSearchHandler.extractHost(resolvedUrl)
         val siteOverride = getSiteSettingForHost(host)
+        val cleanGroup = groupName.trim().ifBlank { "Default" }
         val newTab = BrowserTab(
             id = UUID.randomUUID().toString(),
-            title = if (url == "nyxora://home") (if (inPrivateMode) "Private Home" else "Home") else host.ifBlank { "New Tab" },
-            url = url,
+            title = if (isHome) {
+                if (inPrivateMode) "Private Home" else "Home"
+            } else {
+                UrlAndSearchHandler.formatSafeDisplayHost(resolvedUrl).ifBlank { host.ifBlank { "New Tab" } }
+            },
+            url = resolvedUrl,
             isPrivate = inPrivateMode,
-            groupName = groupName,
+            groupName = cleanGroup,
+            isLoading = !isHome,
+            progress = if (isHome) 0 else 8,
+            canGoBack = !isHome || !parentTabId.isNullOrBlank(),
             desktopMode = siteOverride?.desktopMode ?: currentSettings.defaultDesktopSite,
-            textZoom = siteOverride?.textZoom ?: currentSettings.globalTextZoom
+            textZoom = siteOverride?.textZoom ?: currentSettings.globalTextZoom,
+            lastActiveAtMillis = System.currentTimeMillis(),
+            parentTabId = parentTabId
         )
 
         if (inPrivateMode) {
@@ -579,95 +1062,260 @@ class NyxoraBrowserViewModel(
             }
         } else {
             _normalTabs.update { it + newTab }
-            if (!inBackground) {
+            if (!inBackground || _activeNormalTabId.value.isBlank()) {
                 _activeNormalTabId.value = newTab.id
                 _isPrivateMode.value = false
             }
-            viewModelScope.launch {
-                savedTabDao.upsertSavedTab(
-                    SyncedTabItem(
-                        id = newTab.id,
-                        userId = currentUserId,
-                        title = newTab.title,
-                        url = newTab.url,
-                        groupName = newTab.groupName,
-                        isActive = !inBackground,
-                        desktopMode = newTab.desktopMode,
-                        textZoom = newTab.textZoom,
-                        updatedAtMillis = System.currentTimeMillis()
-                    )
-                )
-            }
+            persistNormalTabAsync(newTab, isActive = !inBackground)
         }
+        syncMultiTabState()
         suspendExcessInactiveTabs()
         if (inBackground) {
             emitToast("Opened in background ${if (inPrivateMode) "private " else ""}tab")
         }
+        if (!inPrivateMode && !isApplyingRemoteSyncNavigation && !isHome) {
+            connectManager.publishUrlNavigation(
+                url = newTab.url,
+                title = newTab.title,
+                isPrivateTab = false,
+                isPrivateMode = false,
+                eventType = RealtimeEventType.NEW_PAGE_OPENED
+            )
+        }
         return newTab.id
     }
 
-    fun selectTab(tabId: String, isPrivate: Boolean) {
+    fun selectTab(
+        tabId: String,
+        isPrivate: Boolean = _privateTabs.value.any { it.id == tabId } ||
+            (_isPrivateMode.value && _normalTabs.value.none { it.id == tabId })
+    ) {
+        val existsInTargetMode = if (isPrivate) {
+            _privateTabs.value.any { it.id == tabId }
+        } else {
+            _normalTabs.value.any { it.id == tabId }
+        }
+        if (!existsInTargetMode) {
+            // Check if the tab exists in the opposite mode
+            val existsInPrivate = _privateTabs.value.any { it.id == tabId }
+            val existsInNormal = _normalTabs.value.any { it.id == tabId }
+            if (!existsInPrivate && !existsInNormal) return
+            return selectTab(tabId, isPrivate = existsInPrivate)
+        }
+
         _isPrivateMode.value = isPrivate
         if (isPrivate) {
             _activePrivateTabId.value = tabId
         } else {
             _activeNormalTabId.value = tabId
         }
-        updateTab(tabId) { it.copy(isSuspended = false, lastActiveAtMillis = System.currentTimeMillis()) }
+        val now = System.currentTimeMillis()
+        updateTab(tabId) { it.copy(isSuspended = false, lastActiveAtMillis = now) }
+        syncMultiTabState()
         suspendExcessInactiveTabs()
+        if (!isPrivate) {
+            val selectedTab = _normalTabs.value.firstOrNull { it.id == tabId }
+            if (selectedTab != null) {
+                persistNormalTabAsync(selectedTab, isActive = true)
+                if (!isApplyingRemoteSyncNavigation) {
+                    connectManager.publishUrlNavigation(
+                        url = selectedTab.url,
+                        title = selectedTab.title,
+                        isPrivateTab = false,
+                        isPrivateMode = false,
+                        eventType = RealtimeEventType.SELECT_TAB_NAVIGATION
+                    )
+                }
+            }
+        }
     }
 
-    fun duplicateTab(tabId: String) {
-        val source = (_normalTabs.value + _privateTabs.value).find { it.id == tabId } ?: return
-        createNewTab(
+    /**
+     * Switches to the open tab matching [tabId] across normal or private tabs.
+     * Returns true if the tab was found and activated, false otherwise.
+     */
+    fun switchToTab(tabId: String): Boolean {
+        val inPrivate = _privateTabs.value.any { it.id == tabId }
+        val inNormal = _normalTabs.value.any { it.id == tabId }
+        if (!inPrivate && !inNormal) return false
+        selectTab(tabId = tabId, isPrivate = inPrivate)
+        return true
+    }
+
+    /**
+     * Switches to the tab at [index] in the currently active browsing mode's tab list.
+     * Returns true if [index] is within bounds and the tab was selected.
+     */
+    fun switchToTabAtIndex(index: Int): Boolean {
+        val tabs = if (_isPrivateMode.value) _privateTabs.value else _normalTabs.value
+        val target = tabs.getOrNull(index) ?: return false
+        selectTab(target.id, _isPrivateMode.value)
+        return true
+    }
+
+    /**
+     * Switches to the next tab in the current browsing mode (wrapping around to the first tab).
+     * Returns the newly active tab's ID, or null if no tabs exist in the current mode.
+     */
+    fun switchToNextTab(): String? {
+        val tabs = if (_isPrivateMode.value) _privateTabs.value else _normalTabs.value
+        if (tabs.isEmpty()) return null
+        if (tabs.size == 1) {
+            val only = tabs.first()
+            selectTab(only.id, _isPrivateMode.value)
+            return only.id
+        }
+        val currentId = if (_isPrivateMode.value) _activePrivateTabId.value else _activeNormalTabId.value
+        val currentIdx = tabs.indexOfFirst { it.id == currentId }.coerceAtLeast(0)
+        val nextTab = tabs[(currentIdx + 1) % tabs.size]
+        selectTab(nextTab.id, _isPrivateMode.value)
+        return nextTab.id
+    }
+
+    /**
+     * Switches to the previous tab in the current browsing mode (wrapping around to the last tab).
+     * Returns the newly active tab's ID, or null if no tabs exist in the current mode.
+     */
+    fun switchToPreviousTab(): String? {
+        val tabs = if (_isPrivateMode.value) _privateTabs.value else _normalTabs.value
+        if (tabs.isEmpty()) return null
+        if (tabs.size == 1) {
+            val only = tabs.first()
+            selectTab(only.id, _isPrivateMode.value)
+            return only.id
+        }
+        val currentId = if (_isPrivateMode.value) _activePrivateTabId.value else _activeNormalTabId.value
+        val currentIdx = tabs.indexOfFirst { it.id == currentId }.coerceAtLeast(0)
+        val prevIdx = (currentIdx - 1 + tabs.size) % tabs.size
+        val prevTab = tabs[prevIdx]
+        selectTab(prevTab.id, _isPrivateMode.value)
+        return prevTab.id
+    }
+
+    /**
+     * Reorders an open tab identified by [tabId] to [targetIndex] within its tab list.
+     * Returns true if the tab was moved, false if not found or index unchanged.
+     */
+    fun reorderTab(tabId: String, targetIndex: Int): Boolean {
+        val privIdx = _privateTabs.value.indexOfFirst { it.id == tabId }
+        if (privIdx != -1) {
+            val list = _privateTabs.value.toMutableList()
+            val coerced = targetIndex.coerceIn(0, list.lastIndex)
+            if (privIdx == coerced) return false
+            val item = list.removeAt(privIdx)
+            list.add(coerced, item)
+            _privateTabs.value = list
+            syncMultiTabState()
+            return true
+        }
+        val normIdx = _normalTabs.value.indexOfFirst { it.id == tabId }
+        if (normIdx != -1) {
+            val list = _normalTabs.value.toMutableList()
+            val coerced = targetIndex.coerceIn(0, list.lastIndex)
+            if (normIdx == coerced) return false
+            val item = list.removeAt(normIdx)
+            list.add(coerced, item)
+            _normalTabs.value = list
+            syncMultiTabState()
+            return true
+        }
+        return false
+    }
+
+    fun duplicateTab(tabId: String): String? {
+        val source = (_normalTabs.value + _privateTabs.value).find { it.id == tabId } ?: return null
+        val newId = createNewTab(
             url = source.url,
             inPrivateMode = source.isPrivate,
             inBackground = false,
             groupName = source.groupName
         )
+        updateTab(newId) {
+            it.copy(
+                title = source.title,
+                desktopMode = source.desktopMode,
+                textZoom = source.textZoom,
+                backStack = source.backStack,
+                forwardStack = source.forwardStack,
+                canGoBack = source.canGoBack,
+                canGoForward = source.canGoForward
+            )
+        }
+        return newId
     }
 
-    fun closeTab(tabId: String) {
-        val privMatch = _privateTabs.value.find { it.id == tabId }
-        if (privMatch != null) {
-            val remaining = _privateTabs.value.filterNot { it.id == tabId }
+    fun closeTab(tabId: String): Boolean {
+        val privList = _privateTabs.value
+        val privIdx = privList.indexOfFirst { it.id == tabId }
+        if (privIdx != -1) {
+            val remaining = privList.filterNot { it.id == tabId }
             _privateTabs.value = remaining
             if (_activePrivateTabId.value == tabId) {
-                _activePrivateTabId.value = remaining.lastOrNull()?.id
+                val nextActive = if (remaining.isNotEmpty()) {
+                    remaining[privIdx.coerceAtMost(remaining.lastIndex)]
+                } else {
+                    null
+                }
+                _activePrivateTabId.value = nextActive?.id
+                if (nextActive != null) {
+                    val now = System.currentTimeMillis()
+                    _privateTabs.update { list ->
+                        list.map { if (it.id == nextActive.id) it.copy(isSuspended = false, lastActiveAtMillis = now) else it }
+                    }
+                }
             }
             if (remaining.isEmpty()) {
                 wipePrivateSessionData()
+                _isPrivateMode.value = false
             }
-            return
+            if (_splitSecondaryTabId.value == tabId) {
+                _splitSecondaryTabId.value = null
+            }
+            syncMultiTabState()
+            return true
         }
 
-        val normMatch = _normalTabs.value.find { it.id == tabId } ?: return
+        val normList = _normalTabs.value
+        val normIdx = normList.indexOfFirst { it.id == tabId }
+        if (normIdx == -1) return false
+        val normMatch = normList[normIdx]
         _recentlyClosedTabs.update { (listOf(normMatch) + it).take(15) }
-        val remaining = _normalTabs.value.filterNot { it.id == tabId }
+        val remaining = normList.filterNot { it.id == tabId }
         if (remaining.isEmpty()) {
             val fallback = BrowserTab(id = UUID.randomUUID().toString(), title = "Home", url = "nyxora://home")
             _normalTabs.value = listOf(fallback)
             _activeNormalTabId.value = fallback.id
+            persistNormalTabAsync(fallback, isActive = true)
         } else {
-            _normalTabs.value = remaining
-            if (_activeNormalTabId.value == tabId) {
-                _activeNormalTabId.value = remaining.last().id
+            val wasActive = _activeNormalTabId.value == tabId
+            val nextActiveId = if (wasActive) {
+                remaining[normIdx.coerceAtMost(remaining.lastIndex)].id
+            } else {
+                _activeNormalTabId.value
             }
+            val now = System.currentTimeMillis()
+            _normalTabs.value = remaining.map { tab ->
+                if (tab.id == nextActiveId) tab.copy(isSuspended = false, lastActiveAtMillis = now) else tab
+            }
+            _activeNormalTabId.value = nextActiveId
         }
         if (_splitSecondaryTabId.value == tabId) {
             _splitSecondaryTabId.value = null
         }
+        syncMultiTabState()
         viewModelScope.launch {
             savedTabDao.deleteSavedTab(tabId)
         }
+        return true
     }
 
-    fun closeAllTabs(inPrivateMode: Boolean) {
+    fun closeAllTabs(inPrivateMode: Boolean = _isPrivateMode.value) {
         if (inPrivateMode) {
             _privateTabs.value = emptyList()
             _activePrivateTabId.value = null
             wipePrivateSessionData()
             _isPrivateMode.value = false
+            syncMultiTabState()
             emitToast("Private session wiped")
         } else {
             val oldTabs = _normalTabs.value
@@ -676,6 +1324,7 @@ class NyxoraBrowserViewModel(
             _normalTabs.value = listOf(fresh)
             _activeNormalTabId.value = fresh.id
             _splitSecondaryTabId.value = null
+            syncMultiTabState()
             viewModelScope.launch {
                 savedTabDao.clearAllSavedTabs()
                 savedTabDao.upsertSavedTab(
@@ -692,15 +1341,27 @@ class NyxoraBrowserViewModel(
         }
     }
 
-    fun reopenRecentlyClosedTab() {
-        val latest = _recentlyClosedTabs.value.firstOrNull() ?: return
+    fun reopenRecentlyClosedTab(): String? {
+        val latest = _recentlyClosedTabs.value.firstOrNull() ?: return null
         _recentlyClosedTabs.update { it.drop(1) }
-        createNewTab(
+        val newId = createNewTab(
             url = latest.url,
             inPrivateMode = false,
             inBackground = false,
             groupName = latest.groupName
         )
+        updateTab(newId) {
+            it.copy(
+                title = latest.title,
+                desktopMode = latest.desktopMode,
+                textZoom = latest.textZoom,
+                backStack = latest.backStack,
+                forwardStack = latest.forwardStack,
+                canGoBack = latest.canGoBack,
+                canGoForward = latest.canGoForward
+            )
+        }
+        return newId
     }
 
     fun switchBrowsingMode(privateMode: Boolean) {
@@ -711,8 +1372,14 @@ class NyxoraBrowserViewModel(
             }
             if (_privateTabs.value.isEmpty()) {
                 createNewTab(url = "nyxora://home", inPrivateMode = true, inBackground = false)
+                return
+            } else if (_activePrivateTabId.value == null || _privateTabs.value.none { it.id == _activePrivateTabId.value }) {
+                _activePrivateTabId.value = _privateTabs.value.last().id
             }
+        } else if (_normalTabs.value.none { it.id == _activeNormalTabId.value }) {
+            _activeNormalTabId.value = _normalTabs.value.lastOrNull()?.id ?: "tab_initial"
         }
+        syncMultiTabState()
     }
 
     fun unlockPrivateTabsWithPin(pin: String): Boolean {
@@ -785,6 +1452,7 @@ class NyxoraBrowserViewModel(
                 if (tab.id in keepIds) tab else tab.copy(isSuspended = true)
             }
         }
+        syncMultiTabState()
     }
 
     fun updateTabGroup(tabId: String, groupName: String) {
@@ -807,19 +1475,57 @@ class NyxoraBrowserViewModel(
     fun toggleDesktopSiteForActiveTab() {
         val current = activeTab.value
         val nextDesktop = !current.desktopMode
-        updateTab(current.id) { it.copy(desktopMode = nextDesktop) }
         val host = current.host
         if (host.isNotBlank() && host != "nyxora.home") {
-            val existing = getSiteSettingForHost(host) ?: SiteSettingItem(userId = currentUserId, host = host)
+            val cleanHost = normalizeSiteHostKey(host)
+            val existing = getSiteSettingForHost(cleanHost) ?: SiteSettingItem(userId = currentUserId, host = cleanHost)
             saveSiteSetting(existing.copy(desktopMode = nextDesktop))
         }
+        updateTab(current.id) { tab ->
+            val updatedUrl = if (!tab.isHomePage && nextDesktop) {
+                rewriteMobileSubdomainToDesktopUrl(tab.url)
+            } else {
+                tab.url
+            }
+            tab.copy(
+                url = updatedUrl,
+                desktopMode = nextDesktop,
+                isLoading = !tab.isHomePage,
+                progress = if (tab.isHomePage) 0 else 12,
+                reloadTriggerTick = tab.reloadTriggerTick + 1
+            )
+        }
+        emitToast(if (nextDesktop) "Desktop site enabled" else "Mobile site enabled")
+    }
+
+    private fun rewriteMobileSubdomainToDesktopUrl(url: String): String {
+        return runCatching {
+            val uri = Uri.parse(url)
+            val rawHost = uri.host ?: return url
+            val lowerHost = rawHost.lowercase()
+            val desktopHost = when {
+                lowerHost.startsWith("m.") && lowerHost.length > 2 -> rawHost.substring(2)
+                lowerHost.startsWith("mobile.") && lowerHost.length > 7 -> rawHost.substring(7)
+                else -> return url
+            }
+            uri.buildUpon().authority(
+                if (uri.port != -1) "$desktopHost:${uri.port}" else desktopHost
+            ).build().toString()
+        }.getOrDefault(url)
+    }
+
+    private fun normalizeSiteHostKey(host: String): String {
+        return host.trim().lowercase()
+            .removePrefix("www.")
+            .removePrefix("m.")
+            .removePrefix("mobile.")
     }
 
     fun updateTextZoomForActiveTab(newZoom: Int) {
         val clamped = newZoom.coerceIn(50, 250)
         val current = activeTab.value
         updateTab(current.id) { it.copy(textZoom = clamped) }
-        val host = current.host
+        val host = normalizeSiteHostKey(current.host)
         if (host.isNotBlank() && host != "nyxora.home") {
             val existing = getSiteSettingForHost(host) ?: SiteSettingItem(userId = currentUserId, host = host)
             saveSiteSetting(existing.copy(textZoom = clamped))
@@ -827,28 +1533,70 @@ class NyxoraBrowserViewModel(
     }
 
     fun getSiteSettingForHost(host: String): SiteSettingItem? {
-        val clean = host.trim().lowercase().removePrefix("www.")
+        val clean = normalizeSiteHostKey(host)
         if (clean.isEmpty()) return null
-        return siteSettings.value.firstOrNull { it.host.equals(clean, ignoreCase = true) }
+        localSiteSettingCache[clean]?.let { return it }
+        return siteSettings.value.firstOrNull { normalizeSiteHostKey(it.host) == clean }
     }
 
     fun saveSiteSetting(setting: SiteSettingItem) {
-        val cleanHost = setting.host.trim().lowercase().removePrefix("www.")
+        val cleanHost = normalizeSiteHostKey(setting.host)
         if (cleanHost.isEmpty()) return
         val normalized = setting.copy(
             id = setting.id.ifBlank { cleanHost },
             userId = currentUserId,
             host = cleanHost
         )
+        localSiteSettingCache[cleanHost] = normalized
         viewModelScope.launch {
             siteSettingDao.upsertSiteSetting(normalized)
         }
     }
 
     fun deleteSiteSetting(host: String) {
-        val cleanHost = host.trim().lowercase().removePrefix("www.")
+        val cleanHost = normalizeSiteHostKey(host)
+        localSiteSettingCache.remove(cleanHost)
         viewModelScope.launch {
             siteSettingDao.deleteSiteSettingByHost(cleanHost)
+        }
+    }
+
+    fun clearAllSiteData() {
+        viewModelScope.launch {
+            if (hasInitializedWebViewEngine) {
+                runCatching {
+                    val cookieManager = CookieManager.getInstance()
+                    cookieManager.removeAllCookies(null)
+                    cookieManager.flush()
+                    WebStorage.getInstance().deleteAllData()
+                }
+            }
+            emitToast("Cleared site cookies and local storage")
+        }
+    }
+
+    fun resetAllSitePermissions() {
+        localSiteSettingCache.clear()
+        viewModelScope.launch {
+            siteSettingDao.clearAllSiteSettings()
+            settingsDataStore.updateSettings {
+                it.copy(
+                    defaultLocationPermission = "ASK",
+                    defaultCameraPermission = "ASK",
+                    defaultMicPermission = "ASK",
+                    defaultNotificationPermission = "ASK"
+                )
+            }
+            emitToast("Reset all site permissions")
+        }
+    }
+
+    fun resetBrowserSettings() {
+        localSiteSettingCache.clear()
+        viewModelScope.launch {
+            settingsDataStore.resetToDefaults()
+            siteSettingDao.clearAllSiteSettings()
+            emitToast("Browser settings restored to defaults")
         }
     }
 
@@ -856,7 +1604,10 @@ class NyxoraBrowserViewModel(
 
     fun toggleBookmarkForActiveTab() {
         val tab = activeTab.value
-        if (tab.isHomePage) return
+        if (tab.isHomePage) {
+            _activeOverlay.value = OverlaySheet.BOOKMARKS
+            return
+        }
         val existing = bookmarks.value.firstOrNull { it.url.equals(tab.url, ignoreCase = true) }
         viewModelScope.launch {
             if (existing != null) {
@@ -893,7 +1644,33 @@ class NyxoraBrowserViewModel(
                 createdAtMillis = System.currentTimeMillis()
             )
             bookmarkDao.upsertBookmark(item)
-            emitToast(if (isShortcut) "Shortcut pinned to Homepage" else "Bookmark saved")
+            emitToast(if (isShortcut) "Shortcut added to Homepage" else "Bookmark saved")
+        }
+    }
+
+    fun moveShortcut(shortcutId: String, moveEarlier: Boolean) {
+        viewModelScope.launch {
+            val allBookmarks = bookmarkDao.getAllBookmarks()
+            val shortcuts = allBookmarks.filter { it.isShortcut }
+            val index = shortcuts.indexOfFirst { it.id == shortcutId }
+            if (index == -1) return@launch
+            val swapIndex = if (moveEarlier) index - 1 else index + 1
+            if (swapIndex !in shortcuts.indices) return@launch
+
+            val current = shortcuts[index]
+            val neighbor = shortcuts[swapIndex]
+            val currentTs = current.createdAtMillis
+            val neighborTs = if (neighbor.createdAtMillis == currentTs) {
+                if (moveEarlier) currentTs + 1L else currentTs - 1L
+            } else {
+                neighbor.createdAtMillis
+            }
+            bookmarkDao.upsertBookmarks(
+                listOf(
+                    current.copy(createdAtMillis = neighborTs),
+                    neighbor.copy(createdAtMillis = currentTs)
+                )
+            )
         }
     }
 
@@ -932,23 +1709,29 @@ class NyxoraBrowserViewModel(
     }
 
     fun onAutoRedirectBlocked(blockedUrl: String) {
+        val event = BlockedEventSnackbar(
+            message = "Auto-redirect blocked",
+            blockedUrl = blockedUrl
+        )
+        _pendingRedirectWarning.value = event
         viewModelScope.launch {
             settingsDataStore.incrementBlockedMetric(redirects = 1)
             if (settings.value.showBlockedMessages) {
-                _blockedSnackbar.tryEmit(
-                    BlockedEventSnackbar(
-                        message = "Auto-redirect blocked",
-                        blockedUrl = blockedUrl
-                    )
-                )
+                _blockedSnackbar.tryEmit(event)
             }
         }
     }
 
+    fun dismissRedirectWarning() {
+        _pendingRedirectWarning.value = null
+    }
+
     fun allowUrlOnce(url: String) {
         if (url.isBlank()) return
-        _allowOnceUrls.update { it + url }
-        navigateInActiveTab(url)
+        _pendingRedirectWarning.value = null
+        val trimmed = url.trim()
+        _allowOnceUrls.update { it + trimmed }
+        navigateInActiveTab(trimmed)
     }
 
     fun refreshRemoteFilterList() {
@@ -1007,7 +1790,12 @@ class NyxoraBrowserViewModel(
         if (isRisky && settings.value.downloadConfirmRiskyFiles) {
             _pendingRiskyDownload.value = PendingRiskyDownload(url, suggestedFileName, mimeType)
         } else {
-            downloadEngine.enqueueDownload(url, suggestedFileName, mimeType)
+            downloadEngine.enqueueDownload(
+                url = url,
+                suggestedFileName = suggestedFileName,
+                mimeType = mimeType,
+                notificationsEnabled = settings.value.downloadNotificationsEnabled
+            )
             emitToast("Download started: ${suggestedFileName ?: UrlAndSearchHandler.extractHost(url)}")
         }
     }
@@ -1016,7 +1804,12 @@ class NyxoraBrowserViewModel(
         val pending = _pendingRiskyDownload.value ?: return
         _pendingRiskyDownload.value = null
         if (proceed) {
-            downloadEngine.enqueueDownload(pending.url, pending.suggestedFileName, pending.mimeType)
+            downloadEngine.enqueueDownload(
+                url = pending.url,
+                suggestedFileName = pending.suggestedFileName,
+                mimeType = pending.mimeType,
+                notificationsEnabled = settings.value.downloadNotificationsEnabled
+            )
             emitToast("Download started")
         }
     }
@@ -1133,6 +1926,20 @@ class NyxoraBrowserViewModel(
     // --- SETTINGS & ENCRYPTED BACKUP ---
 
     fun updateSettings(transform: (NyxoraSettingsState) -> NyxoraSettingsState) {
+        val before = settings.value
+        val after = transform(before)
+        if (after.globalTextZoom != before.globalTextZoom || after.defaultDesktopSite != before.defaultDesktopSite) {
+            val propagateToTab: (BrowserTab) -> BrowserTab = { tab ->
+                val siteOverride = getSiteSettingForHost(tab.host)
+                tab.copy(
+                    textZoom = siteOverride?.textZoom ?: after.globalTextZoom,
+                    desktopMode = siteOverride?.desktopMode ?: after.defaultDesktopSite
+                )
+            }
+            _normalTabs.update { list -> list.map(propagateToTab) }
+            _privateTabs.update { list -> list.map(propagateToTab) }
+            syncMultiTabState()
+        }
         viewModelScope.launch {
             settingsDataStore.updateSettings(transform)
         }
@@ -1207,7 +2014,8 @@ class NyxoraBrowserViewModel(
                     )
                 }
                 for (site in payload.siteSettings) {
-                    val cleanHost = site.host.trim().lowercase().removePrefix("www.")
+                    val cleanHost = normalizeSiteHostKey(site.host)
+                    if (cleanHost.isEmpty()) continue
                     val siteEntity = SiteSettingItem(
                         id = cleanHost,
                         userId = currentUserId,
@@ -1222,6 +2030,7 @@ class NyxoraBrowserViewModel(
                         locationPermission = site.locationPermission,
                         notificationPermission = site.notificationPermission
                     )
+                    localSiteSettingCache[cleanHost] = siteEntity
                     siteSettingDao.upsertSiteSetting(siteEntity)
                 }
                 onResult(Result.success(payload.bookmarks.size + payload.siteSettings.size))
@@ -1235,13 +2044,64 @@ class NyxoraBrowserViewModel(
         _statusToast.tryEmit(message)
     }
 
+    private fun persistNormalTabAsync(tab: BrowserTab, isActive: Boolean = tab.id == _activeNormalTabId.value) {
+        if (tab.isPrivate) return
+        val now = System.currentTimeMillis()
+        viewModelScope.launch {
+            runCatching {
+                savedTabDao.upsertSavedTab(
+                    SyncedTabItem(
+                        id = tab.id,
+                        userId = currentUserId,
+                        title = tab.title,
+                        url = tab.url,
+                        groupName = tab.groupName,
+                        isActive = isActive,
+                        desktopMode = tab.desktopMode,
+                        textZoom = tab.textZoom,
+                        updatedAtMillis = now
+                    )
+                )
+            }
+        }
+    }
+
     private fun updateTab(tabId: String, transform: (BrowserTab) -> BrowserTab) {
+        var updatedNormalTab: BrowserTab? = null
+        var previousNormalTab: BrowserTab? = null
         _normalTabs.update { list ->
-            list.map { if (it.id == tabId) transform(it) else it }
+            list.map {
+                if (it.id == tabId) {
+                    previousNormalTab = it
+                    val next = transform(it)
+                    updatedNormalTab = next
+                    next
+                } else {
+                    it
+                }
+            }
         }
         _privateTabs.update { list ->
             list.map { if (it.id == tabId) transform(it) else it }
         }
+        syncMultiTabState()
+        val nextNorm = updatedNormalTab
+        val prevNorm = previousNormalTab
+        if (nextNorm != null && prevNorm != null && (
+                nextNorm.url != prevNorm.url ||
+                    nextNorm.title != prevNorm.title ||
+                    nextNorm.groupName != prevNorm.groupName ||
+                    nextNorm.desktopMode != prevNorm.desktopMode ||
+                    nextNorm.textZoom != prevNorm.textZoom
+                )
+        ) {
+            persistNormalTabAsync(nextNorm)
+        }
+    }
+
+    override fun onCleared() {
+        connectManager.leaveOrCloseRoom(notifyServer = true)
+        super.onCleared()
     }
 
     companion object {

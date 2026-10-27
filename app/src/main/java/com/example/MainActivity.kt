@@ -2,6 +2,7 @@ package com.example
 
 import android.app.PictureInPictureParams
 import android.content.ComponentCallbacks2
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.util.Rational
@@ -18,8 +19,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.example.data.local.NyxoraSettingsDataStore
-import com.example.data.local.NyxoraSettingsState
 import com.example.domain.browser.BrowserNetworkClient
 import com.example.ui.components.NyxoraLaunchSplash
 import com.example.ui.screens.NyxoraMainBrowserScreen
@@ -28,20 +27,22 @@ import com.example.ui.viewmodel.NyxoraBrowserViewModel
 
 class MainActivity : ComponentActivity() {
 
-    private var activeBrowserViewModel: NyxoraBrowserViewModel? = null
+    internal var activeBrowserViewModel: NyxoraBrowserViewModel? = null
+    private var pendingIntentUrl by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        val settingsStore = NyxoraSettingsDataStore(applicationContext)
+        if (savedInstanceState == null) {
+            val initialUrl = intent?.dataString?.trim()
+            if (!initialUrl.isNullOrBlank()) {
+                pendingIntentUrl = initialUrl
+            }
+        }
         val skipSplash = intent?.getBooleanExtra(EXTRA_SKIP_SPLASH, false) == true
 
         setContent {
-            val settings by settingsStore.settingsFlow.collectAsStateWithLifecycle(
-                initialValue = NyxoraSettingsState()
-            )
-
             var splashCompleted by rememberSaveable { mutableStateOf(skipSplash) }
 
             val vm: NyxoraBrowserViewModel = viewModel(
@@ -50,12 +51,22 @@ class MainActivity : ComponentActivity() {
             )
             activeBrowserViewModel = vm
 
+            val settings by vm.settings.collectAsStateWithLifecycle()
             val isPrivateMode by vm.isPrivateMode.collectAsStateWithLifecycle()
 
             // Warm up browser engine, HTTP cache, and DNS prefetch AFTER the first frame is drawn
             LaunchedEffect(Unit) {
                 withFrameNanos { /* Wait for first UI frame to complete */ }
                 BrowserNetworkClient.warmUpEngineAfterFirstFrame(applicationContext)
+            }
+
+            // Handle initial or new incoming VIEW intent URLs once without re-triggering on rotation
+            val externalUrl = pendingIntentUrl
+            LaunchedEffect(externalUrl) {
+                if (!externalUrl.isNullOrBlank()) {
+                    pendingIntentUrl = null
+                    vm.navigateInActiveTab(externalUrl)
+                }
             }
 
             // Block screenshots / Recents previews in Private Mode when enabled
@@ -85,6 +96,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val incomingUrl = intent.dataString?.trim()
+        if (!incomingUrl.isNullOrBlank()) {
+            pendingIntentUrl = incomingUrl
+        }
+    }
+
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
         val vm = activeBrowserViewModel ?: return
@@ -106,6 +126,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @Suppress("DEPRECATION")
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
         if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
@@ -118,7 +139,10 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        activeBrowserViewModel?.wipePrivateSessionData()
+        if (isFinishing) {
+            activeBrowserViewModel?.wipePrivateSessionData()
+        }
+        activeBrowserViewModel = null
         super.onDestroy()
     }
 
@@ -126,3 +150,4 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_SKIP_SPLASH = "com.example.extra.SKIP_SPLASH"
     }
 }
+

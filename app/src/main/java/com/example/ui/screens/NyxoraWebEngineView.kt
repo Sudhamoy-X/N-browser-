@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.net.Uri
 import android.net.http.SslError
@@ -20,6 +21,7 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.GeolocationPermissions
+import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.SslErrorHandler
@@ -37,34 +39,40 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AspectRatio
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.PictureInPictureAlt
+import androidx.compose.material.icons.outlined.FitScreen
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.ScreenRotation
 import androidx.compose.material.icons.outlined.WarningAmber
+import androidx.compose.material.icons.outlined.ZoomIn
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
@@ -72,6 +80,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -80,40 +89,133 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.example.data.local.FullscreenOrientationMode
 import com.example.data.local.NyxoraSettingsState
 import com.example.data.local.VideoAspectMode
 import com.example.data.model.SiteSettingItem
 import com.example.domain.browser.ContentBlockingEngine
+import com.example.domain.browser.FaviconCacheManager
 import com.example.domain.browser.NavigationDecision
 import com.example.domain.browser.ReaderArticle
 import com.example.domain.browser.ReaderModeExtractor
 import com.example.domain.browser.UrlAndSearchHandler
+import com.example.domain.connect.VideoCompatibilityState
+import com.example.domain.connect.WatchTogetherMediaBridge
 import com.example.ui.viewmodel.BrowserTab
 import com.example.ui.viewmodel.PendingSitePermissionPrompt
-import java.io.ByteArrayInputStream
 import kotlin.math.abs
+import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 
-private const val MOBILE_USER_AGENT =
+internal const val MOBILE_USER_AGENT =
     "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36 Nyxora/1.0"
-private const val DESKTOP_USER_AGENT =
+internal const val DESKTOP_USER_AGENT =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Nyxora/1.0"
 
 private const val MAX_LIVE_WEBVIEW_TABS = 3
+internal const val VIDEO_TOOLBAR_AUTO_HIDE_MS = 2500L
+internal const val MIN_VIDEO_ZOOM = 1.0f
+internal const val MAX_VIDEO_ZOOM = 10.0f
+internal val VIDEO_ZOOM_LEVELS = floatArrayOf(1.0f, 1.15f, 1.30f, 1.50f, 2.0f, 3.0f, 5.0f, 7.5f, 10.0f)
+
+internal data class VideoZoomTransform(
+    val zoom: Float,
+    val panX: Float,
+    val panY: Float
+)
+
+/**
+ * Computes two-finger pinch-to-zoom centered around the user's focal point and clamps pan offsets
+ * so the video never moves completely off-screen while preserving aspect ratio (100% to 1000%).
+ */
+internal fun computeVideoZoomAndClampedPan(
+    currentZoom: Float,
+    currentPanX: Float,
+    currentPanY: Float,
+    zoomMultiplier: Float,
+    panDeltaX: Float,
+    panDeltaY: Float,
+    focalX: Float,
+    focalY: Float,
+    containerWidth: Float,
+    containerHeight: Float,
+    baseAspectScale: Float = 1.0f
+): VideoZoomTransform {
+    val newZoom = (currentZoom * zoomMultiplier).coerceIn(MIN_VIDEO_ZOOM, MAX_VIDEO_ZOOM)
+    val prevEffectiveScale = (baseAspectScale * currentZoom).coerceAtLeast(1.0f)
+    val nextEffectiveScale = (baseAspectScale * newZoom).coerceAtLeast(1.0f)
+    val scaleRatio = nextEffectiveScale / prevEffectiveScale
+
+    val centerX = if (containerWidth > 0f) containerWidth / 2f else focalX
+    val centerY = if (containerHeight > 0f) containerHeight / 2f else focalY
+    val dxFromCenter = focalX - centerX
+    val dyFromCenter = focalY - centerY
+
+    val rawPanX = (currentPanX - dxFromCenter) * scaleRatio + dxFromCenter + panDeltaX
+    val rawPanY = (currentPanY - dyFromCenter) * scaleRatio + dyFromCenter + panDeltaY
+
+    if (newZoom <= 1.001f && baseAspectScale <= 1.001f) {
+        return VideoZoomTransform(zoom = 1.0f, panX = 0f, panY = 0f)
+    }
+
+    val safeW = containerWidth.coerceAtLeast(1f)
+    val safeH = containerHeight.coerceAtLeast(1f)
+    val maxPanX = ((safeW * (nextEffectiveScale - 1f)) / 2f).coerceAtLeast(0f)
+    val maxPanY = ((safeH * (nextEffectiveScale - 1f)) / 2f).coerceAtLeast(0f)
+
+    return VideoZoomTransform(
+        zoom = newZoom,
+        panX = rawPanX.coerceIn(-maxPanX, maxPanX),
+        panY = rawPanY.coerceIn(-maxPanY, maxPanY)
+    )
+}
+
+private data class AppliedTabWebConfig(
+    val desktopMode: Boolean,
+    val reloadTriggerTick: Int
+)
 
 class WebViewControllerHandle {
     internal var webView: WebView? = null
     internal var customReloadAction: (() -> Unit)? = null
     internal var customStopAction: (() -> Unit)? = null
     internal var customReaderExtractAction: (((ReaderArticle?) -> Unit) -> Unit)? = null
+    internal var onExitFullscreenRequest: (() -> Unit)? = null
+
+    var isFullscreen by mutableStateOf(false)
+        internal set
+
+    var fullscreenCustomView by mutableStateOf<View?>(null)
+        internal set
+
+    fun exitFullscreen(): Boolean {
+        val exitAction = onExitFullscreenRequest
+        return if (isFullscreen && exitAction != null) {
+            exitAction.invoke()
+            true
+        } else {
+            false
+        }
+    }
 
     fun reload() {
         customReloadAction?.invoke() ?: webView?.reload()
@@ -121,6 +223,14 @@ class WebViewControllerHandle {
 
     fun stopLoading() {
         customStopAction?.invoke() ?: webView?.stopLoading()
+    }
+
+    fun canGoBack(): Boolean {
+        return webView?.canGoBack() == true
+    }
+
+    fun canGoForward(): Boolean {
+        return webView?.canGoForward() == true
     }
 
     fun goBack(): Boolean {
@@ -160,6 +270,75 @@ class WebViewControllerHandle {
         webView?.clearMatches()
     }
 
+    fun clearCache() {
+        runCatching { webView?.clearCache(true) }
+    }
+
+    /**
+     * Applies GPU-friendly CSS transform strictly to the active HTML5 `<video>` element on the page
+     * (never scaling the entire webpage), and gracefully detects DRM or native player limitations.
+     */
+    fun applyHtml5VideoZoomTransform(
+        scale: Float,
+        panX: Float,
+        panY: Float,
+        onResult: ((supported: Boolean, reason: String?) -> Unit)? = null
+    ) {
+        val wv = webView
+        if (wv == null) {
+            onResult?.invoke(false, "No active web page")
+            return
+        }
+        val clampedScale = scale.coerceIn(MIN_VIDEO_ZOOM, MAX_VIDEO_ZOOM)
+        val js = """
+            (function() {
+                try {
+                    var videos = document.querySelectorAll('video');
+                    if (!videos || videos.length === 0) {
+                        var iframes = document.querySelectorAll('iframe');
+                        if (iframes && iframes.length > 0) {
+                            return JSON.stringify({supported: false, reason: 'Embedded native/cross-origin player restricts custom video zoom'});
+                        }
+                        return JSON.stringify({supported: false, reason: 'No HTML5 video element found'});
+                    }
+                    var v = videos[0];
+                    for (var i = 0; i < videos.length; i++) {
+                        if (!videos[i].paused || videos[i].readyState >= 2) {
+                            v = videos[i];
+                            break;
+                        }
+                    }
+                    if (v.mediaKeys || v.webkitKeys) {
+                        return JSON.stringify({supported: false, reason: 'DRM-protected video restricts custom zoom'});
+                    }
+                    v.style.transformOrigin = 'center center';
+                    v.style.willChange = 'transform';
+                    if (${clampedScale} <= 1.001 && Math.abs(${panX}) < 0.5 && Math.abs(${panY}) < 0.5) {
+                        v.style.transform = '';
+                    } else {
+                        v.style.transform = 'translate3d(${panX}px, ${panY}px, 0px) scale(${clampedScale})';
+                    }
+                    return JSON.stringify({supported: true, reason: null});
+                } catch (e) {
+                    return JSON.stringify({supported: false, reason: e.message || 'Video zoom restricted by player'});
+                }
+            })();
+        """.trimIndent()
+        wv.evaluateJavascript(js) { raw ->
+            if (onResult != null) {
+                val isSupported = raw?.contains("\"supported\":true") == true || raw?.contains("\\\"supported\\\":true") == true
+                val reason = if (!isSupported && raw != null && raw.contains("DRM")) {
+                    "DRM-protected video restricts custom zoom"
+                } else if (!isSupported && raw != null && raw.contains("Embedded")) {
+                    "Native/embedded player restricts custom zoom"
+                } else {
+                    null
+                }
+                onResult(isSupported, reason)
+            }
+        }
+    }
+
     fun extractReaderArticle(onResult: (ReaderArticle?) -> Unit) {
         val customExtractor = customReaderExtractAction
         if (customExtractor != null) {
@@ -175,16 +354,83 @@ class WebViewControllerHandle {
             onResult(ReaderModeExtractor.parseEvaluateJavascriptResult(raw))
         }
     }
+
+    var onLocalWatchTogetherEvent: ((eventType: String, currentTimeSec: Double, durationSec: Double, isPaused: Boolean, playbackRate: Double) -> Unit)? = null
+
+    fun probeWatchTogetherMedia(
+        onResult: (
+            compatibility: VideoCompatibilityState,
+            currentTimeSec: Double,
+            durationSec: Double,
+            isPaused: Boolean,
+            playbackRate: Double
+        ) -> Unit
+    ) {
+        val wv = webView
+        if (wv == null) {
+            onResult(VideoCompatibilityState.NO_VIDEO_DETECTED, 0.0, 0.0, true, 1.0)
+            return
+        }
+        wv.evaluateJavascript(WatchTogetherMediaBridge.buildMediaHookAndProbeScript()) { raw ->
+            val parsed = WatchTogetherMediaBridge.parseProbeResult(raw)
+            onResult(
+                parsed.compatibility,
+                parsed.currentTimeSec,
+                parsed.durationSec,
+                parsed.isPaused,
+                parsed.playbackRate
+            )
+        }
+    }
+
+    fun applyWatchTogetherPlayback(
+        shouldPlay: Boolean,
+        seekToSeconds: Double?,
+        playbackRate: Double
+    ) {
+        val wv = webView ?: return
+        val script = WatchTogetherMediaBridge.buildApplyRemotePlaybackScript(
+            shouldPlay = shouldPlay,
+            seekToSeconds = seekToSeconds,
+            playbackRate = playbackRate
+        )
+        wv.evaluateJavascript(script, null)
+    }
+}
+
+private class NyxoraConnectWebViewBridge(
+    private val controllerProvider: () -> WebViewControllerHandle
+) {
+    @JavascriptInterface
+    fun onMediaEvent(
+        eventType: String,
+        currentTimeSec: Double,
+        durationSec: Double,
+        isPaused: Boolean,
+        playbackRate: Double
+    ) {
+        val safeCur = if (currentTimeSec.isNaN() || currentTimeSec < 0.0) 0.0 else currentTimeSec
+        val safeDur = if (durationSec.isNaN() || durationSec < 0.0) 0.0 else durationSec
+        val safeRate = if (playbackRate.isNaN()) 1.0 else playbackRate.coerceIn(0.25, 2.0)
+        controllerProvider().onLocalWatchTogetherEvent?.invoke(
+            eventType,
+            safeCur,
+            safeDur,
+            isPaused,
+            safeRate
+        )
+    }
 }
 
 /**
  * Native Android System WebView container with:
- * - Multi-tab live WebView pool (up to 5 active tabs kept alive in memory so switching tabs never reloads pages)
+ * - Multi-tab live WebView pool (up to 3 active tabs kept alive in memory so switching tabs never reloads pages)
  * - Pull-to-refresh gesture at top of page
- * - Subresource ad & tracker filter blocking (shouldInterceptRequest)
+ * - Subresource ad & tracker filter blocking (shouldInterceptRequest) + cosmetic ad-slot hiding
  * - Gesture-verified pop-up blocking (onCreateWindow) & auto-redirect blocking (shouldOverrideUrlLoading)
- * - Fullscreen video custom view with portrait/landscape orientation detection & restoration
- * - File upload chooser & site permission prompts (Camera, Microphone, Location)
+ * - Functional Desktop Mode user-agent, viewport adaptation, and automatic reload on toggle
+ * - Fullscreen video custom view with portrait/landscape orientation preservation and 100%–1000% pinch/step video zoom
+ * - Live website favicon capture into FaviconCacheManager
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
@@ -210,6 +456,8 @@ fun NyxoraWebEngineView(
     onFindMatchesUpdated: (activeOrdinal: Int, totalMatches: Int) -> Unit,
     onNavigateHome: () -> Unit,
     onToast: (String) -> Unit,
+    openTabIds: Set<String> = emptySet(),
+    onHistoryUpdated: (tabId: String, url: String, canGoBack: Boolean, canGoForward: Boolean) -> Unit = { _, _, _, _ -> },
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -219,6 +467,7 @@ fun NyxoraWebEngineView(
     val currentSettings by rememberUpdatedState(settings)
     val currentSiteSettings by rememberUpdatedState(siteSettings)
     val currentAllowOnce by rememberUpdatedState(allowOnceUrls)
+    val currentOpenTabIds by rememberUpdatedState(openTabIds)
 
     var lastUserTouchElapsedRealtime by remember { mutableLongStateOf(0L) }
     var fileUploadCallback by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
@@ -228,19 +477,113 @@ fun NyxoraWebEngineView(
     var isPullRefreshing by remember { mutableStateOf(false) }
     val pullToRefreshState = rememberPullToRefreshState()
 
-    // Fullscreen video state
+    // Fullscreen video state + 100%..1000% zoom & clamped pan state
     var fullscreenCustomView by remember { mutableStateOf<View?>(null) }
     var fullscreenCallback by remember { mutableStateOf<WebChromeClient.CustomViewCallback?>(null) }
-    var savedOrientationBeforeFullscreen by remember {
-        mutableStateOf(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED)
+    var savedWindowStateBeforeFullscreen by remember {
+        mutableStateOf<SavedFullscreenWindowState?>(null)
     }
     var currentVideoAspect by remember(settings.defaultVideoAspectMode) {
-        mutableStateOf(settings.defaultVideoAspectMode)
+        mutableStateOf(
+            if (settings.defaultVideoAspectMode == VideoAspectMode.FILL) {
+                VideoAspectMode.FILL
+            } else {
+                VideoAspectMode.FIT
+            }
+        )
     }
+    var currentVideoZoom by remember { mutableFloatStateOf(1.0f) }
+    var currentVideoPanX by remember { mutableFloatStateOf(0f) }
+    var currentVideoPanY by remember { mutableFloatStateOf(0f) }
+    var fullscreenContainerSize by remember { mutableStateOf(IntSize.Zero) }
+    var isVideoToolbarVisible by remember { mutableStateOf(true) }
+    var videoToolbarInteractionTick by remember { mutableIntStateOf(0) }
+
+    // Auto-hide fullscreen video toolbar after 2.5 seconds without user interaction
+    LaunchedEffect(fullscreenCustomView, isVideoToolbarVisible, videoToolbarInteractionTick) {
+        if (fullscreenCustomView != null && isVideoToolbarVisible) {
+            delay(VIDEO_TOOLBAR_AUTO_HIDE_MS)
+            isVideoToolbarVisible = false
+        }
+    }
+
+    val resetVideoZoomTo100: () -> Unit = {
+        currentVideoZoom = 1.0f
+        currentVideoPanX = 0f
+        currentVideoPanY = 0f
+        controllerHandle.applyHtml5VideoZoomTransform(1.0f, 0f, 0f)
+    }
+
+    val exitFullscreenVideo: () -> Unit = {
+        val viewToDetach = fullscreenCustomView
+        val callbackToNotify = fullscreenCallback
+        val stateToRestore = savedWindowStateBeforeFullscreen
+        val wasFullscreen = viewToDetach != null || controllerHandle.isFullscreen
+        if (wasFullscreen) {
+            fullscreenCustomView = null
+            fullscreenCallback = null
+            savedWindowStateBeforeFullscreen = null
+            currentVideoZoom = 1.0f
+            currentVideoPanX = 0f
+            currentVideoPanY = 0f
+            isVideoToolbarVisible = true
+            controllerHandle.fullscreenCustomView = null
+            controllerHandle.isFullscreen = false
+            controllerHandle.applyHtml5VideoZoomTransform(1.0f, 0f, 0f)
+            runCatching {
+                viewToDetach?.scaleX = 1.0f
+                viewToDetach?.scaleY = 1.0f
+                viewToDetach?.translationX = 0f
+                viewToDetach?.translationY = 0f
+                (viewToDetach?.parent as? ViewGroup)?.removeView(viewToDetach)
+            }
+            runCatching {
+                callbackToNotify?.onCustomViewHidden()
+            }
+            restoreActivityAfterFullscreen(activity, stateToRestore)
+        }
+    }
+
+    val enterFullscreenVideo: (View, WebChromeClient.CustomViewCallback?) -> Unit = { view, callback ->
+        val existingView = fullscreenCustomView
+        if (existingView != null && existingView !== view) {
+            val prevCallback = fullscreenCallback
+            runCatching {
+                (existingView.parent as? ViewGroup)?.removeView(existingView)
+            }
+            runCatching {
+                prevCallback?.onCustomViewHidden()
+            }
+        }
+        if (savedWindowStateBeforeFullscreen == null) {
+            savedWindowStateBeforeFullscreen = captureWindowStateBeforeFullscreen(activity)
+        }
+        fullscreenCustomView = view
+        fullscreenCallback = callback
+        currentVideoZoom = 1.0f
+        currentVideoPanX = 0f
+        currentVideoPanY = 0f
+        isVideoToolbarVisible = true
+        videoToolbarInteractionTick++
+        controllerHandle.fullscreenCustomView = view
+        controllerHandle.isFullscreen = true
+        enterImmersiveFullscreen(
+            activity = activity,
+            keepScreenOn = currentSettings.keepScreenOnWhilePlaying,
+            orientationMode = currentSettings.fullscreenOrientationMode
+        )
+    }
+
+    val currentOnEnterFullscreen by rememberUpdatedState(enterFullscreenVideo)
+    val currentOnExitFullscreen by rememberUpdatedState(exitFullscreenVideo)
+    controllerHandle.onExitFullscreenRequest = exitFullscreenVideo
 
     // LRU pool of live WebViews keyed by tabId so tab switching never reloads pages
     val webViewPool = remember {
         LinkedHashMap<String, WebView>(MAX_LIVE_WEBVIEW_TABS + 1, 0.75f, true)
+    }
+    val appliedTabConfigMap = remember {
+        HashMap<String, AppliedTabWebConfig>()
     }
     var useSoftwareLayerFallback by remember { mutableStateOf(false) }
     var renderRecoveryEpoch by remember { mutableIntStateOf(0) }
@@ -254,7 +597,7 @@ fun NyxoraWebEngineView(
     }
 
     val triggerPullToRefresh: () -> Unit = {
-        if (currentSettings.pullToRefreshEnabled && !currentTab.isHomePage) {
+        if (currentSettings.pullToRefreshEnabled && !currentTab.isHomePage && fullscreenCustomView == null) {
             isPullRefreshing = true
             controllerHandle.reload()
         }
@@ -283,9 +626,13 @@ fun NyxoraWebEngineView(
         action?.invoke(allGranted)
     }
 
-    // Clean up all pooled WebViews when leaving composition
+    // Clean up all pooled WebViews and restore window state if leaving composition during fullscreen
     DisposableEffect(Unit) {
         onDispose {
+            if (fullscreenCustomView != null || controllerHandle.isFullscreen) {
+                currentOnExitFullscreen()
+            }
+            controllerHandle.onExitFullscreenRequest = null
             for ((_, wv) in webViewPool) {
                 runCatching {
                     (wv.parent as? ViewGroup)?.removeView(wv)
@@ -295,14 +642,12 @@ fun NyxoraWebEngineView(
                 }
             }
             webViewPool.clear()
+            appliedTabConfigMap.clear()
         }
     }
 
     BackHandler(enabled = fullscreenCustomView != null) {
-        fullscreenCallback?.onCustomViewHidden()
-        fullscreenCustomView = null
-        fullscreenCallback = null
-        restoreActivityAfterFullscreen(activity, savedOrientationBeforeFullscreen)
+        exitFullscreenVideo()
     }
 
     Box(
@@ -364,6 +709,10 @@ fun NyxoraWebEngineView(
                         val tabId = activeTabSnapshot.id
 
                         val targetWebView = webViewPool.getOrPut(tabId) {
+                            appliedTabConfigMap[tabId] = AppliedTabWebConfig(
+                                desktopMode = activeTabSnapshot.desktopMode,
+                                reloadTriggerTick = activeTabSnapshot.reloadTriggerTick
+                            )
                             createConfiguredTabWebView(
                                 ctx = hostContainer.context,
                                 initialTabId = tabId,
@@ -381,6 +730,7 @@ fun NyxoraWebEngineView(
                                 },
                                 onPageStarted = onPageStarted,
                                 onPageFinished = onPageFinished,
+                                onHistoryUpdated = onHistoryUpdated,
                                 onProgressChanged = onProgressChanged,
                                 onPageError = onPageError,
                                 onSslError = onSslError,
@@ -407,21 +757,14 @@ fun NyxoraWebEngineView(
                                     osPermissionLauncher.launch(perms)
                                 },
                                 onEnterFullscreenVideo = { view, callback ->
-                                    fullscreenCustomView = view
-                                    fullscreenCallback = callback
-                                    savedOrientationBeforeFullscreen =
-                                        activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-                                    if (currentSettings.keepScreenOnWhilePlaying) {
-                                        activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                                    }
+                                    currentOnEnterFullscreen(view, callback)
                                 },
                                 onExitFullscreenVideo = {
-                                    fullscreenCustomView = null
-                                    fullscreenCallback = null
-                                    restoreActivityAfterFullscreen(activity, savedOrientationBeforeFullscreen)
+                                    currentOnExitFullscreen()
                                 },
                                 onRendererGone = { goneTabId, goneView ->
                                     webViewPool.remove(goneTabId)
+                                    appliedTabConfigMap.remove(goneTabId)
                                     if (controllerHandle.webView === goneView) {
                                         controllerHandle.webView = null
                                     }
@@ -445,13 +788,33 @@ fun NyxoraWebEngineView(
                                         )
                                     }
                                 },
+                                controllerHandle = controllerHandle,
                                 activity = activity
                             )
+                        }
+
+                        // Immediately evict and destroy WebViews belonging to closed tabs
+                        val validOpenIds = currentOpenTabIds
+                        if (validOpenIds.isNotEmpty()) {
+                            val closedKeys = webViewPool.keys.filter { it != tabId && it !in validOpenIds }
+                            for (closedId in closedKeys) {
+                                appliedTabConfigMap.remove(closedId)
+                                val closedWv = webViewPool.remove(closedId) ?: continue
+                                runCatching {
+                                    (closedWv.parent as? ViewGroup)?.removeView(closedWv)
+                                    closedWv.stopLoading()
+                                    closedWv.clearHistory()
+                                    closedWv.clearFormData()
+                                    closedWv.webChromeClient = null
+                                    closedWv.destroy()
+                                }
+                            }
                         }
 
                         // Evict oldest inactive WebViews if pool exceeds MAX_LIVE_WEBVIEW_TABS
                         while (webViewPool.size > MAX_LIVE_WEBVIEW_TABS) {
                             val oldestEntry = webViewPool.entries.firstOrNull { it.key != tabId } ?: break
+                            appliedTabConfigMap.remove(oldestEntry.key)
                             webViewPool.remove(oldestEntry.key)
                             runCatching {
                                 val evicted = oldestEntry.value
@@ -506,70 +869,167 @@ fun NyxoraWebEngineView(
                         controllerHandle.customStopAction = { targetWebView.stopLoading() }
                         controllerHandle.customReaderExtractAction = null
 
-                        // Apply dynamic per-tab & global settings without reloading unless URL/UA changed
-                        applyDynamicWebSettings(targetWebView, activeTabSnapshot, currentSettings)
+                        // Check if Desktop Mode or explicit reload trigger changed on this tab
+                        val prevApplied = appliedTabConfigMap[tabId]
+                        val desktopChanged = prevApplied != null && prevApplied.desktopMode != activeTabSnapshot.desktopMode
+                        val reloadRequested = prevApplied != null && prevApplied.reloadTriggerTick != activeTabSnapshot.reloadTriggerTick
+                        appliedTabConfigMap[tabId] = AppliedTabWebConfig(
+                            desktopMode = activeTabSnapshot.desktopMode,
+                            reloadTriggerTick = activeTabSnapshot.reloadTriggerTick
+                        )
+
+                        // Apply dynamic per-tab & global settings (including Desktop Mode User-Agent & viewport)
+                        val uaChanged = applyDynamicWebSettings(targetWebView, activeTabSnapshot, currentSettings)
 
                         val currentLoadedUrl = targetWebView.url
                         val desiredUrl = activeTabSnapshot.url
-                        if (!activeTabSnapshot.isHomePage &&
+                        if (fullscreenCustomView == null &&
+                            !activeTabSnapshot.isHomePage &&
                             desiredUrl.isNotBlank() &&
-                            desiredUrl != "nyxora://home" &&
-                            currentLoadedUrl != desiredUrl &&
-                            targetWebView.tag != desiredUrl
+                            desiredUrl != "nyxora://home"
                         ) {
-                            targetWebView.tag = desiredUrl
-                            targetWebView.loadUrl(desiredUrl)
+                            if (currentLoadedUrl != desiredUrl && targetWebView.tag != desiredUrl) {
+                                targetWebView.tag = desiredUrl
+                                targetWebView.loadUrl(desiredUrl)
+                            } else if (desktopChanged || reloadRequested || uaChanged) {
+                                targetWebView.tag = desiredUrl
+                                if (currentLoadedUrl != null && currentLoadedUrl != desiredUrl) {
+                                    targetWebView.loadUrl(desiredUrl)
+                                } else {
+                                    targetWebView.reload()
+                                }
+                                applyViewportModeScript(targetWebView, activeTabSnapshot.desktopMode)
+                            }
                         }
                     }
                 )
             }
         }
 
-        // Edge-Swipe Back / Forward gesture zones (left & right 20dp edges)
-        if (settings.edgeSwipeBackForward && fullscreenCustomView == null) {
-            EdgeSwipeZone(
-                modifier = Modifier
-                    .align(Alignment.CenterStart)
-                    .width(20.dp)
-                    .fillMaxHeight(),
-                onSwipeTriggered = {
-                    if (!controllerHandle.goBack()) {
-                        onNavigateHome()
-                    }
-                }
-            )
-            EdgeSwipeZone(
-                modifier = Modifier
-                    .align(Alignment.CenterEnd)
-                    .width(20.dp)
-                    .fillMaxHeight(),
-                onSwipeTriggered = {
-                    controllerHandle.goForward()
-                }
-            )
-        }
-
-        // Fullscreen Video Custom View Overlay (Portrait & Landscape Video Support)
+        // Fullscreen Video Custom View Overlay (Portrait & Landscape Video Support + 100%..1000% Pinch & Step Zoom)
         val customVideoView = fullscreenCustomView
         if (customVideoView != null) {
+            val baseAspectScale = if (currentVideoAspect == VideoAspectMode.FILL) 1.18f else 1.0f
+            val effectiveScale = baseAspectScale * currentVideoZoom
+
+            // Re-clamp pan offsets if orientation / container dimensions change
+            LaunchedEffect(fullscreenContainerSize, currentVideoZoom, currentVideoAspect) {
+                if (fullscreenContainerSize.width > 0 && fullscreenContainerSize.height > 0) {
+                    val clamped = computeVideoZoomAndClampedPan(
+                        currentZoom = currentVideoZoom,
+                        currentPanX = currentVideoPanX,
+                        currentPanY = currentVideoPanY,
+                        zoomMultiplier = 1.0f,
+                        panDeltaX = 0f,
+                        panDeltaY = 0f,
+                        focalX = fullscreenContainerSize.width / 2f,
+                        focalY = fullscreenContainerSize.height / 2f,
+                        containerWidth = fullscreenContainerSize.width.toFloat(),
+                        containerHeight = fullscreenContainerSize.height.toFloat(),
+                        baseAspectScale = baseAspectScale
+                    )
+                    currentVideoPanX = clamped.panX
+                    currentVideoPanY = clamped.panY
+                }
+            }
+
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black)
+                    .onSizeChanged { fullscreenContainerSize = it }
+                    .pointerInput(currentVideoAspect) {
+                        awaitEachGesture {
+                            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                            isVideoToolbarVisible = true
+                            videoToolbarInteractionTick++
+
+                            do {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                val pressedCount = event.changes.count { it.pressed }
+                                if (pressedCount >= 2) {
+                                    val zoomChange = event.calculateZoom()
+                                    val panChange = event.calculatePan()
+                                    val centroid = event.calculateCentroid(useCurrent = true)
+                                    val safeFocal = if (centroid != Offset.Unspecified) {
+                                        centroid
+                                    } else {
+                                        Offset(size.width / 2f, size.height / 2f)
+                                    }
+                                    if (abs(zoomChange - 1f) > 0.002f || panChange.getDistance() > 0.5f) {
+                                        val next = computeVideoZoomAndClampedPan(
+                                            currentZoom = currentVideoZoom,
+                                            currentPanX = currentVideoPanX,
+                                            currentPanY = currentVideoPanY,
+                                            zoomMultiplier = zoomChange,
+                                            panDeltaX = panChange.x,
+                                            panDeltaY = panChange.y,
+                                            focalX = safeFocal.x,
+                                            focalY = safeFocal.y,
+                                            containerWidth = size.width.toFloat(),
+                                            containerHeight = size.height.toFloat(),
+                                            baseAspectScale = if (currentVideoAspect == VideoAspectMode.FILL) 1.18f else 1.0f
+                                        )
+                                        currentVideoZoom = next.zoom
+                                        currentVideoPanX = next.panX
+                                        currentVideoPanY = next.panY
+                                        isVideoToolbarVisible = true
+                                        videoToolbarInteractionTick++
+                                        controllerHandle.applyHtml5VideoZoomTransform(
+                                            scale = next.zoom * (if (currentVideoAspect == VideoAspectMode.FILL) 1.18f else 1.0f),
+                                            panX = next.panX,
+                                            panY = next.panY
+                                        )
+                                        event.changes.forEach { change ->
+                                            if (change.position != change.previousPosition) {
+                                                change.consume()
+                                            }
+                                        }
+                                    }
+                                } else if (pressedCount == 1 && currentVideoZoom > 1.01f) {
+                                    // Allow single-finger panning within clamped bounds when video is zoomed in
+                                    val panChange = event.calculatePan()
+                                    if (panChange.getDistance() > 1.5f) {
+                                        val next = computeVideoZoomAndClampedPan(
+                                            currentZoom = currentVideoZoom,
+                                            currentPanX = currentVideoPanX,
+                                            currentPanY = currentVideoPanY,
+                                            zoomMultiplier = 1.0f,
+                                            panDeltaX = panChange.x,
+                                            panDeltaY = panChange.y,
+                                            focalX = size.width / 2f,
+                                            focalY = size.height / 2f,
+                                            containerWidth = size.width.toFloat(),
+                                            containerHeight = size.height.toFloat(),
+                                            baseAspectScale = if (currentVideoAspect == VideoAspectMode.FILL) 1.18f else 1.0f
+                                        )
+                                        currentVideoPanX = next.panX
+                                        currentVideoPanY = next.panY
+                                        videoToolbarInteractionTick++
+                                    }
+                                }
+                            } while (event.changes.any { it.pressed })
+                        }
+                    }
                     .testTag("fullscreen_video_overlay")
             ) {
                 AndroidView(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(
-                            horizontal = when (currentVideoAspect) {
-                                VideoAspectMode.FIT -> 0.dp
-                                VideoAspectMode.FILL -> 0.dp
-                                VideoAspectMode.ORIGINAL -> 24.dp
-                            }
-                        ),
+                        .testTag("fullscreen_custom_view_container"),
                     factory = { ctx ->
-                        FrameLayout(ctx).apply {
+                        FullscreenVideoHostLayout(
+                            context = ctx,
+                            onUserInteraction = {
+                                isVideoToolbarVisible = true
+                                videoToolbarInteractionTick++
+                            }
+                        ).apply {
+                            layoutParams = ViewGroup.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT
+                            )
+                            setBackgroundColor(android.graphics.Color.BLACK)
                             (customVideoView.parent as? ViewGroup)?.removeView(customVideoView)
                             addView(
                                 customVideoView,
@@ -581,87 +1041,216 @@ fun NyxoraWebEngineView(
                         }
                     },
                     update = { container ->
-                        customVideoView.scaleX = if (currentVideoAspect == VideoAspectMode.FILL) 1.18f else 1.0f
-                        customVideoView.scaleY = if (currentVideoAspect == VideoAspectMode.FILL) 1.18f else 1.0f
-                        if (customVideoView.parent != container) {
+                        container.onUserInteraction = {
+                            isVideoToolbarVisible = true
+                            videoToolbarInteractionTick++
+                        }
+                        // Preserve aspect ratio with identical X/Y scale and GPU-friendly translation
+                        customVideoView.scaleX = effectiveScale
+                        customVideoView.scaleY = effectiveScale
+                        customVideoView.translationX = currentVideoPanX
+                        customVideoView.translationY = currentVideoPanY
+                        if (container.childCount != 1 || container.getChildAt(0) !== customVideoView) {
                             (customVideoView.parent as? ViewGroup)?.removeView(customVideoView)
                             container.removeAllViews()
-                            container.addView(customVideoView)
+                            container.addView(
+                                customVideoView,
+                                FrameLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    ViewGroup.LayoutParams.MATCH_PARENT
+                                )
+                            )
                         }
                     }
                 )
 
-                // Floating Fullscreen Video Controls (Rotate, Aspect Mode, PiP, Exit)
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    FilledTonalIconButton(
-                        onClick = {
-                            val currentOrient = activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-                            val nextOrient = if (currentOrient == ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE) {
-                                ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
-                            } else {
-                                ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                // Easy 1-tap Reset to 100% pill when zoomed in (> 100%)
+                if (isVideoToolbarVisible && currentVideoZoom > 1.005f) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(top = 12.dp, start = 12.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0x990A0D14))
+                            .clickable {
+                                isVideoToolbarVisible = true
+                                videoToolbarInteractionTick++
+                                resetVideoZoomTo100()
+                                onToast("Video Zoom: 100%")
                             }
-                            activity?.requestedOrientation = nextOrient
-                        }
+                            .padding(horizontal = 10.dp, vertical = 8.dp)
+                            .testTag("fullscreen_zoom_reset_button"),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Icon(
-                            imageVector = Icons.Outlined.ScreenRotation,
-                            contentDescription = "Toggle Portrait / Landscape Video"
+                        Text(
+                            text = "${(currentVideoZoom * 100f).roundToInt()}% • Reset",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium
+                            ),
+                            color = Color(0xFFE2E8F0)
                         )
                     }
+                }
 
-                    FilledTonalIconButton(
-                        onClick = {
-                            val modes = VideoAspectMode.entries
-                            val nextIdx = (modes.indexOf(currentVideoAspect) + 1) % modes.size
-                            currentVideoAspect = modes[nextIdx]
-                            onToast("Video Aspect: ${currentVideoAspect.label}")
-                        }
+                // Minimal Monochrome Auto-Hiding Video Toolbar (Orientation, Fit/Fill, Video Zoom, Exit)
+                if (isVideoToolbarVisible) {
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(top = 12.dp, end = 12.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0x990A0D14))
+                            .padding(horizontal = 4.dp, vertical = 2.dp)
+                            .testTag("fullscreen_video_toolbar"),
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Outlined.AspectRatio,
-                            contentDescription = "Cycle Video Aspect Ratio"
-                        )
-                    }
-
-                    if (settings.pipEnabled) {
-                        FilledTonalIconButton(
+                        // 1. Screen Orientation
+                        MonochromeVideoToolbarButton(
+                            icon = Icons.Outlined.ScreenRotation,
+                            contentDescription = "Screen Orientation",
+                            testTag = "fullscreen_rotate_button",
                             onClick = {
-                                runCatching {
-                                    activity?.enterPictureInPictureMode(
-                                        android.app.PictureInPictureParams.Builder().build()
-                                    )
+                                isVideoToolbarVisible = true
+                                videoToolbarInteractionTick++
+                                val act = activity ?: return@MonochromeVideoToolbarButton
+                                val nextOrient = if (isActivityCurrentlyLandscape(act)) {
+                                    ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                                } else {
+                                    ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
                                 }
+                                act.requestedOrientation = nextOrient
                             }
-                        ) {
-                            Icon(
-                                imageVector = Icons.Outlined.PictureInPictureAlt,
-                                contentDescription = "Picture in Picture"
-                            )
-                        }
-                    }
+                        )
 
-                    FilledTonalIconButton(
-                        onClick = {
-                            fullscreenCallback?.onCustomViewHidden()
-                            fullscreenCustomView = null
-                            fullscreenCallback = null
-                            restoreActivityAfterFullscreen(activity, savedOrientationBeforeFullscreen)
-                        }
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.Close,
-                            contentDescription = "Exit Fullscreen Video"
+                        // 2. Fit Screen / Fill Screen
+                        val isFillMode = currentVideoAspect == VideoAspectMode.FILL
+                        MonochromeVideoToolbarButton(
+                            icon = if (isFillMode) Icons.Outlined.FitScreen else Icons.Outlined.AspectRatio,
+                            contentDescription = if (isFillMode) "Fill Screen" else "Fit Screen",
+                            isActive = isFillMode,
+                            testTag = "fullscreen_aspect_button",
+                            onClick = {
+                                isVideoToolbarVisible = true
+                                videoToolbarInteractionTick++
+                                currentVideoAspect = if (isFillMode) {
+                                    VideoAspectMode.FIT
+                                } else {
+                                    VideoAspectMode.FILL
+                                }
+                                val modeLabel = if (currentVideoAspect == VideoAspectMode.FILL) {
+                                    "Fill Screen"
+                                } else {
+                                    "Fit Screen"
+                                }
+                                onToast(modeLabel)
+                            }
+                        )
+
+                        // 3. Video Zoom (cycles up to 1000% / 10x and wraps back to 100%)
+                        MonochromeVideoToolbarButton(
+                            icon = Icons.Outlined.ZoomIn,
+                            contentDescription = "Video Zoom",
+                            isActive = currentVideoZoom > 1.0f,
+                            testTag = "fullscreen_zoom_button",
+                            onClick = {
+                                isVideoToolbarVisible = true
+                                videoToolbarInteractionTick++
+                                val nextZoom = nextStepVideoZoom(currentVideoZoom)
+                                val nextTransform = computeVideoZoomAndClampedPan(
+                                    currentZoom = currentVideoZoom,
+                                    currentPanX = currentVideoPanX,
+                                    currentPanY = currentVideoPanY,
+                                    zoomMultiplier = if (currentVideoZoom > 0f) nextZoom / currentVideoZoom else nextZoom,
+                                    panDeltaX = 0f,
+                                    panDeltaY = 0f,
+                                    focalX = fullscreenContainerSize.width / 2f,
+                                    focalY = fullscreenContainerSize.height / 2f,
+                                    containerWidth = fullscreenContainerSize.width.toFloat(),
+                                    containerHeight = fullscreenContainerSize.height.toFloat(),
+                                    baseAspectScale = baseAspectScale
+                                )
+                                currentVideoZoom = nextTransform.zoom
+                                currentVideoPanX = nextTransform.panX
+                                currentVideoPanY = nextTransform.panY
+                                controllerHandle.applyHtml5VideoZoomTransform(
+                                    scale = nextTransform.zoom * baseAspectScale,
+                                    panX = nextTransform.panX,
+                                    panY = nextTransform.panY
+                                ) { supported, reason ->
+                                    if (!supported && reason != null && reason.contains("DRM")) {
+                                        onToast(reason)
+                                    }
+                                }
+                                onToast("Video Zoom: ${(currentVideoZoom * 100f).roundToInt()}%")
+                            }
+                        )
+
+                        // 4. Exit Fullscreen
+                        MonochromeVideoToolbarButton(
+                            icon = Icons.Outlined.Close,
+                            contentDescription = "Exit Fullscreen",
+                            testTag = "fullscreen_exit_button",
+                            onClick = {
+                                exitFullscreenVideo()
+                            }
                         )
                     }
                 }
             }
         }
+    }
+}
+
+internal fun nextStepVideoZoom(currentZoom: Float): Float {
+    val exactIdx = VIDEO_ZOOM_LEVELS.indexOfFirst { abs(it - currentZoom) < 0.02f }
+    if (exactIdx >= 0) {
+        return VIDEO_ZOOM_LEVELS[(exactIdx + 1) % VIDEO_ZOOM_LEVELS.size]
+    }
+    val nextHigher = VIDEO_ZOOM_LEVELS.firstOrNull { it > currentZoom + 0.02f }
+    return nextHigher ?: 1.0f
+}
+
+@Composable
+private fun MonochromeVideoToolbarButton(
+    icon: ImageVector,
+    contentDescription: String,
+    isActive: Boolean = false,
+    testTag: String,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .minimumInteractiveComponentSize()
+            .size(40.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+            .testTag(testTag),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = if (isActive) Color(0xFFFFFFFF) else Color(0xFFE2E8F0),
+            modifier = Modifier.size(18.dp)
+        )
+    }
+}
+
+private class FullscreenVideoHostLayout(
+    context: Context,
+    var onUserInteraction: (() -> Unit)? = null
+) : FrameLayout(context) {
+    override fun dispatchTouchEvent(ev: MotionEvent?): Boolean {
+        val action = ev?.actionMasked
+        if (action == MotionEvent.ACTION_DOWN ||
+            action == MotionEvent.ACTION_UP ||
+            action == MotionEvent.ACTION_POINTER_DOWN
+        ) {
+            onUserInteraction?.invoke()
+        }
+        return super.dispatchTouchEvent(ev)
     }
 }
 
@@ -679,6 +1268,7 @@ private fun createConfiguredTabWebView(
     onPullRefreshTriggered: () -> Unit,
     onPageStarted: (tabId: String, url: String) -> Unit,
     onPageFinished: (tabId: String, url: String, title: String?, canGoBack: Boolean, canGoForward: Boolean) -> Unit,
+    onHistoryUpdated: (tabId: String, url: String, canGoBack: Boolean, canGoForward: Boolean) -> Unit,
     onProgressChanged: (tabId: String, progress: Int) -> Unit,
     onPageError: (tabId: String, failingUrl: String, description: String) -> Unit,
     onSslError: (tabId: String, failingUrl: String, errorName: String, onDecision: (Boolean) -> Unit) -> Unit,
@@ -696,6 +1286,7 @@ private fun createConfiguredTabWebView(
     onEnterFullscreenVideo: (View, WebChromeClient.CustomViewCallback?) -> Unit,
     onExitFullscreenVideo: () -> Unit,
     onRendererGone: (tabId: String, view: WebView?) -> Unit,
+    controllerHandle: WebViewControllerHandle,
     activity: Activity?
 ): WebView {
     return WebView(ctx).apply {
@@ -785,6 +1376,7 @@ private fun createConfiguredTabWebView(
         settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
+            @Suppress("DEPRECATION")
             databaseEnabled = true
             mediaPlaybackRequiresUserGesture = false
             setSupportZoom(true)
@@ -811,6 +1403,11 @@ private fun createConfiguredTabWebView(
             onRequestDownload(url, guessedName, mimeType)
         }
 
+        addJavascriptInterface(
+            NyxoraConnectWebViewBridge { controllerHandle },
+            "NyxoraConnectJsBridge"
+        )
+
         webViewClient = object : WebViewClient() {
 
             override fun onRenderProcessGone(
@@ -834,9 +1431,7 @@ private fun createConfiguredTabWebView(
                 val tabSnapshot = currentTabProvider()
                 val pageUrl = tabSnapshot.url
                 val pageHost = UrlAndSearchHandler.extractHost(pageUrl)
-                val siteOverride = currentSiteSettingsProvider().firstOrNull {
-                    it.host.equals(pageHost, ignoreCase = true)
-                }
+                val siteOverride = findSiteSettingForHost(currentSiteSettingsProvider(), pageHost)
 
                 val shouldBlock = ContentBlockingEngine.shouldBlockSubresource(
                     requestUrl = reqUrl,
@@ -846,14 +1441,7 @@ private fun createConfiguredTabWebView(
                 )
                 if (shouldBlock) {
                     onAdBlocked()
-                    return WebResourceResponse(
-                        "text/plain",
-                        "utf-8",
-                        204,
-                        "Blocked by NYXORA",
-                        mapOf("Access-Control-Allow-Origin" to "*"),
-                        ByteArrayInputStream(ByteArray(0))
-                    )
+                    return ContentBlockingEngine.createBlockedSubresourceResponse(reqUrl)
                 }
                 return super.shouldInterceptRequest(view, request)
             }
@@ -869,10 +1457,13 @@ private fun createConfiguredTabWebView(
                 val tabSnapshot = currentTabProvider()
                 val pageUrl = view?.url ?: tabSnapshot.url
                 val pageHost = UrlAndSearchHandler.extractHost(pageUrl)
-                val siteOverride = currentSiteSettingsProvider().firstOrNull {
-                    it.host.equals(pageHost, ignoreCase = true)
+                val siteOverride = findSiteSettingForHost(currentSiteSettingsProvider(), pageHost)
+                val lastTouch = lastTouchTimeProvider()
+                val elapsedSinceTouch = if (lastTouch > 0L) {
+                    SystemClock.elapsedRealtime() - lastTouch
+                } else {
+                    Long.MAX_VALUE
                 }
-                val elapsedSinceTouch = SystemClock.elapsedRealtime() - lastTouchTimeProvider()
 
                 // Allow user-picked local files explicitly registered via the system picker
                 if (targetUrl.startsWith("file://", ignoreCase = true)) {
@@ -923,29 +1514,77 @@ private fun createConfiguredTabWebView(
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
                 val safeUrl = url ?: return
+                view?.tag = safeUrl
                 if (!safeUrl.startsWith("file://", ignoreCase = true)) {
                     view?.settings?.allowFileAccess = false
                 }
+                if (favicon != null && !currentTabProvider().isPrivate) {
+                    FaviconCacheManager.saveFaviconForUrl(ctx, safeUrl, favicon)
+                }
                 onPageStarted(initialTabId, safeUrl)
 
+                val pageHost = UrlAndSearchHandler.extractHost(safeUrl)
+                val siteOverride = findSiteSettingForHost(currentSiteSettingsProvider(), pageHost)
+                val adBlockActive = currentSettingsProvider().adBlockingEnabled && (siteOverride?.allowAds != true)
                 val cosmeticJs = ContentBlockingEngine.buildCosmeticAndDarkModeScript(
                     hideCookieBanners = currentSettingsProvider().hideCookieConsentBanners,
-                    forceDarkWebPages = currentSettingsProvider().forceDarkWebPages
+                    forceDarkWebPages = currentSettingsProvider().forceDarkWebPages,
+                    adBlockingEnabled = adBlockActive
                 )
                 if (cosmeticJs.isNotEmpty()) {
                     view?.evaluateJavascript(cosmeticJs, null)
                 }
+                if (view != null) {
+                    applyViewportModeScript(view, currentTabProvider().desktopMode)
+                }
+                if (currentSettingsProvider().doNotTrackEnabled) {
+                    view?.evaluateJavascript(
+                        "(function(){try{Object.defineProperty(navigator,'doNotTrack',{get:function(){return '1';}});Object.defineProperty(navigator,'globalPrivacyControl',{get:function(){return true;}});}catch(e){}})();",
+                        null
+                    )
+                }
+                if (!currentSettingsProvider().clipboardAccessEnabled) {
+                    view?.evaluateJavascript(
+                        "(function(){try{if(navigator.clipboard){navigator.clipboard.readText=function(){return Promise.reject(new DOMException('Clipboard access blocked by NYXORA','NotAllowedError'));};navigator.clipboard.writeText=function(){return Promise.reject(new DOMException('Clipboard access blocked by NYXORA','NotAllowedError'));};}}catch(e){}})();",
+                        null
+                    )
+                }
+            }
+
+            override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                super.doUpdateVisitedHistory(view, url, isReload)
+                val safeUrl = url ?: view?.url ?: return
+                onHistoryUpdated(
+                    initialTabId,
+                    safeUrl,
+                    view?.canGoBack() ?: false,
+                    view?.canGoForward() ?: false
+                )
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 val safeUrl = url ?: return
+                view?.tag = safeUrl
+                val pageHost = UrlAndSearchHandler.extractHost(safeUrl)
+                val siteOverride = findSiteSettingForHost(currentSiteSettingsProvider(), pageHost)
+                val adBlockActive = currentSettingsProvider().adBlockingEnabled && (siteOverride?.allowAds != true)
                 val cosmeticJs = ContentBlockingEngine.buildCosmeticAndDarkModeScript(
                     hideCookieBanners = currentSettingsProvider().hideCookieConsentBanners,
-                    forceDarkWebPages = currentSettingsProvider().forceDarkWebPages
+                    forceDarkWebPages = currentSettingsProvider().forceDarkWebPages,
+                    adBlockingEnabled = adBlockActive
                 )
                 if (cosmeticJs.isNotEmpty()) {
                     view?.evaluateJavascript(cosmeticJs, null)
+                }
+                if (view != null) {
+                    applyViewportModeScript(view, currentTabProvider().desktopMode)
+                }
+                if (!currentSettingsProvider().clipboardAccessEnabled) {
+                    view?.evaluateJavascript(
+                        "(function(){try{if(navigator.clipboard){navigator.clipboard.readText=function(){return Promise.reject(new DOMException('Clipboard access blocked by NYXORA','NotAllowedError'));};navigator.clipboard.writeText=function(){return Promise.reject(new DOMException('Clipboard access blocked by NYXORA','NotAllowedError'));};}}catch(e){}})();",
+                        null
+                    )
                 }
                 onPageFinished(
                     initialTabId,
@@ -1009,6 +1648,14 @@ private fun createConfiguredTabWebView(
                 }
             }
 
+            override fun onReceivedIcon(view: WebView?, icon: Bitmap?) {
+                super.onReceivedIcon(view, icon)
+                val currentUrl = view?.url ?: currentTabProvider().url
+                if (icon != null && !currentTabProvider().isPrivate) {
+                    FaviconCacheManager.saveFaviconForUrl(ctx, currentUrl, icon)
+                }
+            }
+
             override fun onCreateWindow(
                 view: WebView?,
                 isDialog: Boolean,
@@ -1019,9 +1666,7 @@ private fun createConfiguredTabWebView(
                 val hitUrl = hostView.hitTestResult.extra
                 val pageUrl = hostView.url ?: currentTabProvider().url
                 val pageHost = UrlAndSearchHandler.extractHost(pageUrl)
-                val siteOverride = currentSiteSettingsProvider().firstOrNull {
-                    it.host.equals(pageHost, ignoreCase = true)
-                }
+                val siteOverride = findSiteSettingForHost(currentSiteSettingsProvider(), pageHost)
 
                 val decision = ContentBlockingEngine.evaluatePopupRequest(
                     targetUrl = hitUrl,
@@ -1073,32 +1718,6 @@ private fun createConfiguredTabWebView(
             override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
                 if (view == null) return
                 onEnterFullscreenVideo(view, callback)
-
-                val mode = currentSettingsProvider().fullscreenOrientationMode
-                when (mode) {
-                    FullscreenOrientationMode.ALWAYS_LANDSCAPE -> {
-                        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                    }
-                    FullscreenOrientationMode.KEEP_CURRENT -> Unit
-                    FullscreenOrientationMode.AUTO -> {
-                        evaluateJavascript(
-                            """
-                            (function() {
-                                var v = document.querySelector('video');
-                                if (!v || !v.videoWidth || !v.videoHeight) return 'LANDSCAPE';
-                                return (v.videoHeight > v.videoWidth) ? 'PORTRAIT' : 'LANDSCAPE';
-                            })();
-                            """.trimIndent()
-                        ) { res ->
-                            val isPortraitVideo = res?.contains("PORTRAIT", ignoreCase = true) == true
-                            activity?.requestedOrientation = if (isPortraitVideo) {
-                                ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
-                            } else {
-                                ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                            }
-                        }
-                    }
-                }
             }
 
             override fun onHideCustomView() {
@@ -1122,9 +1741,7 @@ private fun createConfiguredTabWebView(
             override fun onPermissionRequest(request: PermissionRequest?) {
                 val req = request ?: return
                 val originHost = UrlAndSearchHandler.extractHost(req.origin?.toString().orEmpty())
-                val siteRule = currentSiteSettingsProvider().firstOrNull {
-                    it.host.equals(originHost, ignoreCase = true)
-                }
+                val siteRule = findSiteSettingForHost(currentSiteSettingsProvider(), originHost)
 
                 val requestedTypes = mutableListOf<String>()
                 val osPermissionsNeeded = mutableListOf<String>()
@@ -1146,16 +1763,18 @@ private fun createConfiguredTabWebView(
                     return
                 }
 
-                val cameraBlocked = "CAMERA" in requestedTypes && siteRule?.cameraPermission == "DENY"
-                val micBlocked = "MICROPHONE" in requestedTypes && siteRule?.micPermission == "DENY"
+                val effectiveCameraRule = siteRule?.cameraPermission ?: currentSettingsProvider().defaultCameraPermission
+                val effectiveMicRule = siteRule?.micPermission ?: currentSettingsProvider().defaultMicPermission
+                val cameraBlocked = "CAMERA" in requestedTypes && effectiveCameraRule == "DENY"
+                val micBlocked = "MICROPHONE" in requestedTypes && effectiveMicRule == "DENY"
                 if (cameraBlocked || micBlocked) {
                     req.deny()
                     return
                 }
 
                 val proceedWithPromptOrGrant: () -> Unit = {
-                    val cameraPreAllowed = "CAMERA" !in requestedTypes || siteRule?.cameraPermission == "ALLOW"
-                    val micPreAllowed = "MICROPHONE" !in requestedTypes || siteRule?.micPermission == "ALLOW"
+                    val cameraPreAllowed = "CAMERA" !in requestedTypes || effectiveCameraRule == "ALLOW"
+                    val micPreAllowed = "MICROPHONE" !in requestedTypes || effectiveMicRule == "ALLOW"
                     if (cameraPreAllowed && micPreAllowed) {
                         req.grant(req.resources)
                     } else {
@@ -1187,11 +1806,10 @@ private fun createConfiguredTabWebView(
             ) {
                 val cb = callback ?: return
                 val originHost = UrlAndSearchHandler.extractHost(origin.orEmpty())
-                val siteRule = currentSiteSettingsProvider().firstOrNull {
-                    it.host.equals(originHost, ignoreCase = true)
-                }
+                val siteRule = findSiteSettingForHost(currentSiteSettingsProvider(), originHost)
+                val effectiveLocationRule = siteRule?.locationPermission ?: currentSettingsProvider().defaultLocationPermission
 
-                if (siteRule?.locationPermission == "DENY") {
+                if (effectiveLocationRule == "DENY") {
                     cb.invoke(origin, false, false)
                     return
                 }
@@ -1206,7 +1824,7 @@ private fun createConfiguredTabWebView(
                 ) == PackageManager.PERMISSION_GRANTED
 
                 val showSiteLocationDialog: () -> Unit = {
-                    if (siteRule?.locationPermission == "ALLOW") {
+                    if (effectiveLocationRule == "ALLOW") {
                         cb.invoke(origin, true, true)
                     } else {
                         onPromptSitePermission(
@@ -1237,14 +1855,53 @@ private fun createConfiguredTabWebView(
     }
 }
 
-private fun applyDynamicWebSettings(
+internal fun findSiteSettingForHost(
+    siteSettings: List<SiteSettingItem>,
+    rawHost: String
+): SiteSettingItem? {
+    val cleanHost = rawHost.trim().lowercase()
+        .removePrefix("www.")
+        .removePrefix("m.")
+        .removePrefix("mobile.")
+    if (cleanHost.isEmpty()) return null
+    return siteSettings.firstOrNull {
+        val candidate = it.host.trim().lowercase()
+            .removePrefix("www.")
+            .removePrefix("m.")
+            .removePrefix("mobile.")
+        candidate == cleanHost
+    }
+}
+
+/**
+ * Applies dynamic per-tab & global settings (including Desktop Mode User-Agent and viewport behavior).
+ * Returns true if the User-Agent string changed so the caller can trigger a page reload.
+ */
+internal fun applyDynamicWebSettings(
     webView: WebView,
     tab: BrowserTab,
     settings: NyxoraSettingsState
-) {
+): Boolean {
+    if (webView.settings.javaScriptEnabled != settings.javascriptEnabled) {
+        webView.settings.javaScriptEnabled = settings.javascriptEnabled
+    }
     val targetUa = if (tab.desktopMode) DESKTOP_USER_AGENT else MOBILE_USER_AGENT
-    if (webView.settings.userAgentString != targetUa) {
+    val uaChanged = webView.settings.userAgentString != targetUa
+    if (uaChanged) {
         webView.settings.userAgentString = targetUa
+    }
+    webView.settings.useWideViewPort = true
+    webView.settings.loadWithOverviewMode = true
+    webView.settings.setSupportZoom(true)
+    webView.settings.builtInZoomControls = true
+    webView.settings.displayZoomControls = false
+    val desiredLayoutAlgorithm = if (tab.desktopMode) {
+        WebSettings.LayoutAlgorithm.NORMAL
+    } else {
+        WebSettings.LayoutAlgorithm.TEXT_AUTOSIZING
+    }
+    if (webView.settings.layoutAlgorithm != desiredLayoutAlgorithm) {
+        webView.settings.layoutAlgorithm = desiredLayoutAlgorithm
     }
     if (webView.settings.textZoom != tab.textZoom) {
         webView.settings.textZoom = tab.textZoom
@@ -1266,35 +1923,56 @@ private fun applyDynamicWebSettings(
         webView.settings.allowFileAccess = allowFile
     }
     runCatching {
+        CookieManager.getInstance().setAcceptCookie(settings.cookiesEnabled)
         CookieManager.getInstance().setAcceptThirdPartyCookies(
             webView,
-            !settings.blockThirdPartyCookies && !tab.isPrivate
+            settings.cookiesEnabled && !settings.blockThirdPartyCookies && !tab.isPrivate
         )
     }
+    return uaChanged
 }
 
-@Composable
-private fun EdgeSwipeZone(
-    modifier: Modifier = Modifier,
-    onSwipeTriggered: () -> Unit
-) {
-    var cumulativeDrag by remember { mutableStateOf(0f) }
-    Box(
-        modifier = modifier.pointerInput(Unit) {
-            detectHorizontalDragGestures(
-                onDragStart = { cumulativeDrag = 0f },
-                onHorizontalDrag = { _, dragAmount ->
-                    cumulativeDrag += dragAmount
-                },
-                onDragEnd = {
-                    if (abs(cumulativeDrag) > 72f) {
-                        onSwipeTriggered()
-                    }
-                    cumulativeDrag = 0f
+/**
+ * Synchronizes the page's `<meta name="viewport">` tag for Desktop Site vs Mobile Site mode
+ * so responsive websites render desktop layouts when enabled and cleanly restore mobile layouts when disabled.
+ */
+private fun applyViewportModeScript(webView: WebView, desktopMode: Boolean) {
+    val js = if (desktopMode) {
+        """
+        (function() {
+            try {
+                var meta = document.querySelector('meta[name="viewport"]');
+                if (!meta) {
+                    meta = document.createElement('meta');
+                    meta.name = 'viewport';
+                    meta.setAttribute('data-nyxora-created', 'true');
+                    (document.head || document.documentElement).appendChild(meta);
+                } else if (!meta.hasAttribute('data-nyxora-orig')) {
+                    meta.setAttribute('data-nyxora-orig', meta.getAttribute('content') || 'width=device-width, initial-scale=1.0');
                 }
-            )
-        }
-    )
+                meta.setAttribute('content', 'width=1280, initial-scale=0.65, minimum-scale=0.25, maximum-scale=5.0, user-scalable=yes');
+            } catch (e) {}
+        })();
+        """.trimIndent()
+    } else {
+        """
+        (function() {
+            try {
+                var meta = document.querySelector('meta[name="viewport"]');
+                if (meta) {
+                    if (meta.getAttribute('data-nyxora-created') === 'true') {
+                        meta.setAttribute('content', 'width=device-width, initial-scale=1.0');
+                        meta.removeAttribute('data-nyxora-created');
+                    } else if (meta.hasAttribute('data-nyxora-orig')) {
+                        meta.setAttribute('content', meta.getAttribute('data-nyxora-orig'));
+                        meta.removeAttribute('data-nyxora-orig');
+                    }
+                }
+            } catch (e) {}
+        })();
+        """.trimIndent()
+    }
+    webView.evaluateJavascript(js, null)
 }
 
 @Composable
@@ -1367,10 +2045,167 @@ private fun NyxoraErrorStateView(
     }
 }
 
-private fun restoreActivityAfterFullscreen(activity: Activity?, savedOrientation: Int) {
-    activity ?: return
-    activity.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-    activity.requestedOrientation = savedOrientation
+internal data class SavedFullscreenWindowState(
+    val requestedOrientation: Int,
+    val systemUiVisibility: Int,
+    val systemBarsBehavior: Int,
+    val cutoutMode: Int,
+    val hadKeepScreenOnFlag: Boolean,
+    val hadFullscreenFlag: Boolean
+)
+
+internal fun isExplicitLandscapeOrientation(orientation: Int): Boolean {
+    return orientation == ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE ||
+        orientation == ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE ||
+        orientation == ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE ||
+        orientation == ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE
+}
+
+internal fun isExplicitPortraitOrientation(orientation: Int): Boolean {
+    return orientation == ActivityInfo.SCREEN_ORIENTATION_PORTRAIT ||
+        orientation == ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT ||
+        orientation == ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT ||
+        orientation == ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT
+}
+
+internal fun isActivityCurrentlyLandscape(activity: Activity): Boolean {
+    val req = activity.requestedOrientation
+    return when {
+        isExplicitLandscapeOrientation(req) -> true
+        isExplicitPortraitOrientation(req) -> false
+        else -> activity.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+    }
+}
+
+private fun captureWindowStateBeforeFullscreen(activity: Activity?): SavedFullscreenWindowState? {
+    val act = activity ?: return null
+    val window = act.window ?: return null
+    val decorView = window.decorView
+    val insetsController = WindowCompat.getInsetsController(window, decorView)
+    val attrs = window.attributes
+    val cutoutMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        attrs.layoutInDisplayCutoutMode
+    } else {
+        0
+    }
+    @Suppress("DEPRECATION")
+    val sysUiVis = decorView.systemUiVisibility
+    @Suppress("DEPRECATION")
+    val hadFullscreenFlag = (attrs.flags and WindowManager.LayoutParams.FLAG_FULLSCREEN) != 0
+    return SavedFullscreenWindowState(
+        requestedOrientation = act.requestedOrientation,
+        systemUiVisibility = sysUiVis,
+        systemBarsBehavior = insetsController.systemBarsBehavior,
+        cutoutMode = cutoutMode,
+        hadKeepScreenOnFlag = (attrs.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) != 0,
+        hadFullscreenFlag = hadFullscreenFlag
+    )
+}
+
+private fun enterImmersiveFullscreen(
+    activity: Activity?,
+    keepScreenOn: Boolean,
+    orientationMode: FullscreenOrientationMode
+) {
+    val act = activity ?: return
+    val window = act.window
+
+    // 1. Preserve current orientation (Portrait stays Portrait, Landscape stays Landscape) without forcing landscape
+    when (orientationMode) {
+        FullscreenOrientationMode.ALWAYS_LANDSCAPE -> {
+            act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        }
+        FullscreenOrientationMode.PORTRAIT -> {
+            act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        }
+        FullscreenOrientationMode.KEEP_CURRENT,
+        FullscreenOrientationMode.AUTO -> {
+            if (isActivityCurrentlyLandscape(act)) {
+                if (!isExplicitLandscapeOrientation(act.requestedOrientation)) {
+                    act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                }
+            } else {
+                if (!isExplicitPortraitOrientation(act.requestedOrientation)) {
+                    act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                }
+            }
+        }
+    }
+
+    if (window == null) return
+
+    if (keepScreenOn) {
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        val params = window.attributes
+        params.layoutInDisplayCutoutMode =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            } else {
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        window.attributes = params
+    }
+
+    WindowCompat.setDecorFitsSystemWindows(window, false)
+    val decorView = window.decorView
+    val insetsController = WindowCompat.getInsetsController(window, decorView)
+    insetsController.systemBarsBehavior =
+        WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+    insetsController.hide(WindowInsetsCompat.Type.systemBars())
+
+    @Suppress("DEPRECATION")
+    decorView.systemUiVisibility = (
+        View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+            or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+            or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+            or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+            or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+            or View.SYSTEM_UI_FLAG_FULLSCREEN
+        )
+    @Suppress("DEPRECATION")
+    window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+}
+
+private fun restoreActivityAfterFullscreen(
+    activity: Activity?,
+    savedState: SavedFullscreenWindowState?
+) {
+    val act = activity ?: return
+    val window = act.window
+
+    if (window != null) {
+        if (savedState?.hadKeepScreenOnFlag != true) {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        if (savedState?.hadFullscreenFlag != true) {
+            @Suppress("DEPRECATION")
+            window.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && savedState != null) {
+            val params = window.attributes
+            params.layoutInDisplayCutoutMode = savedState.cutoutMode
+            window.attributes = params
+        }
+
+        val decorView = window.decorView
+        val insetsController = WindowCompat.getInsetsController(window, decorView)
+        insetsController.show(WindowInsetsCompat.Type.systemBars())
+        if (savedState != null) {
+            insetsController.systemBarsBehavior = savedState.systemBarsBehavior
+            @Suppress("DEPRECATION")
+            decorView.systemUiVisibility = savedState.systemUiVisibility
+        } else {
+            @Suppress("DEPRECATION")
+            decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+        }
+    }
+
+    act.requestedOrientation =
+        savedState?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
 }
 
 private fun Context.findActivity(): Activity? {

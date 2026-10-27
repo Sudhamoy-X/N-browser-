@@ -147,11 +147,13 @@ object UrlAndSearchHandler {
             )
         }
 
-        // 2. Internal NYXORA pages
+        // 2. Internal NYXORA pages & NYXORA Connect deep links
         if (lower.startsWith("nyxora://")) {
-            val h = lower.removePrefix("nyxora://").ifEmpty { "home" }
+            val pathAndQuery = trimmed.substring("nyxora://".length)
+            val h = pathAndQuery.substringBefore('?').substringBefore('/').lowercase().ifEmpty { "home" }
+            val normalizedInternal = if (h == "home") "nyxora://home" else "nyxora://$pathAndQuery"
             return NormalizedDestination(
-                finalUrl = lower,
+                finalUrl = normalizedInternal,
                 classification = InputClassification.INTERNAL_NYXORA,
                 isSecure = true,
                 host = "nyxora.$h",

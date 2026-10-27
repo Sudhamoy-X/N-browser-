@@ -25,6 +25,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -148,6 +149,7 @@ fun NyxoraLaunchSplash(
 ) {
     val alphaAnim = remember { Animatable(if (reducedMotion) 1f else 0f) }
     val scaleAnim = remember { Animatable(if (reducedMotion) 1f else 0.94f) }
+    val creditAlphaAnim = remember { Animatable(if (reducedMotion) 1f else 0f) }
 
     LaunchedEffect(reducedMotion) {
         if (reducedMotion) {
@@ -159,8 +161,13 @@ fun NyxoraLaunchSplash(
             val animJob2 = launch {
                 scaleAnim.animateTo(1f, animationSpec = tween(200, easing = FastOutSlowInEasing))
             }
+            val animJob3 = launch {
+                delay(40L)
+                creditAlphaAnim.animateTo(1f, animationSpec = tween(170, easing = FastOutSlowInEasing))
+            }
             animJob1.join()
             animJob2.join()
+            animJob3.join()
             onSplashCompleted()
         }
     }
@@ -198,6 +205,21 @@ fun NyxoraLaunchSplash(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                text = "Crafted by Sudhamoy",
+                style = MaterialTheme.typography.labelSmall.copy(
+                    letterSpacing = 0.8.sp,
+                    fontWeight = FontWeight.Normal
+                ),
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
+                modifier = Modifier
+                    .testTag("splash_creator_credit")
+                    .graphicsLayer {
+                        alpha = creditAlphaAnim.value
+                    }
+            )
         }
     }
 }
+

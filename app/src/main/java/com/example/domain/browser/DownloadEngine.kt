@@ -7,6 +7,7 @@ import android.database.Cursor
 import android.net.Uri
 import android.os.Environment
 import android.webkit.CookieManager
+import android.webkit.MimeTypeMap
 import android.webkit.URLUtil
 import androidx.core.content.FileProvider
 import com.example.data.local.DownloadDao
@@ -19,8 +20,10 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -35,6 +38,7 @@ class DownloadEngine(
     private val scope: CoroutineScope
 ) {
     private val activeJobs = ConcurrentHashMap<String, Job>()
+    private val activeUrlsToId = ConcurrentHashMap<String, String>()
     private val systemDownloadIds = ConcurrentHashMap<String, Long>()
     private val downloadsDir: File by lazy {
         (context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
@@ -44,11 +48,18 @@ class DownloadEngine(
     fun enqueueDownload(
         url: String,
         suggestedFileName: String?,
-        mimeType: String?
+        mimeType: String?,
+        notificationsEnabled: Boolean = true
     ): String {
+        val cleanUrl = url.trim()
+        val existingActiveId = activeUrlsToId[cleanUrl]
+        if (existingActiveId != null && activeJobs[existingActiveId]?.isActive == true) {
+            return existingActiveId
+        }
+
         val id = UUID.randomUUID().toString()
         val rawName = suggestedFileName?.takeIf { it.isNotBlank() }
-            ?: URLUtil.guessFileName(url, null, mimeType)
+            ?: URLUtil.guessFileName(cleanUrl, null, mimeType)
             ?: "download_${System.currentTimeMillis()}.bin"
         val uniqueFile = resolveDuplicateFile(downloadsDir, sanitizeFileName(rawName))
         val effectiveMime = mimeType?.takeIf { it.isNotBlank() } ?: guessMimeFromName(uniqueFile.name)
@@ -57,7 +68,7 @@ class DownloadEngine(
         val record = DownloadRecord(
             id = id,
             fileName = uniqueFile.name,
-            url = url,
+            url = cleanUrl,
             mimeType = effectiveMime,
             totalBytes = -1L,
             downloadedBytes = 0L,
@@ -68,9 +79,10 @@ class DownloadEngine(
             createdAtMillis = System.currentTimeMillis()
         )
 
+        activeUrlsToId[cleanUrl] = id
         scope.launch(Dispatchers.IO) {
             downloadDao.upsertDownload(record)
-            startOrResumeInternal(record)
+            startOrResumeInternal(record, notificationsEnabled)
         }
         return id
     }
@@ -85,17 +97,18 @@ class DownloadEngine(
         }
         scope.launch(Dispatchers.IO) {
             val existing = downloadDao.getDownloadById(id) ?: return@launch
+            activeUrlsToId.remove(existing.url, id)
             if (existing.status == "RUNNING") {
                 downloadDao.upsertDownload(existing.copy(status = "PAUSED", speedBytesPerSec = 0L))
             }
         }
     }
 
-    fun resumeOrRetryDownload(id: String) {
-        if (activeJobs.containsKey(id)) return
+    fun resumeOrRetryDownload(id: String, notificationsEnabled: Boolean = true) {
+        if (activeJobs[id]?.isActive == true) return
         scope.launch(Dispatchers.IO) {
             val existing = downloadDao.getDownloadById(id) ?: return@launch
-            startOrResumeInternal(existing)
+            startOrResumeInternal(existing, notificationsEnabled)
         }
     }
 
@@ -133,8 +146,12 @@ class DownloadEngine(
         }
     }
 
-    private fun startOrResumeInternal(initialRecord: DownloadRecord) {
-        val job = scope.launch(Dispatchers.IO) {
+    private fun startOrResumeInternal(
+        initialRecord: DownloadRecord,
+        notificationsEnabled: Boolean = true
+    ) {
+        if (activeJobs[initialRecord.id]?.isActive == true) return
+        val job = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
             val targetFile = File(initialRecord.localPath)
             targetFile.parentFile?.mkdirs()
             val existingBytes = if (targetFile.exists() && initialRecord.status == "PAUSED") targetFile.length() else 0L
@@ -154,8 +171,8 @@ class DownloadEngine(
                     (initialRecord.url.startsWith("http://", ignoreCase = true) ||
                         initialRecord.url.startsWith("https://", ignoreCase = true))
 
-                if (canUseSystemDownloadManager && dm != null) {
-                    val enqueued = tryEnqueueWithSystemDownloadManager(dm, currentRecord, targetFile)
+                if (canUseSystemDownloadManager) {
+                    val enqueued = tryEnqueueWithSystemDownloadManager(dm, currentRecord, targetFile, notificationsEnabled)
                     if (enqueued != null) {
                         systemDownloadIds[initialRecord.id] = enqueued
                         monitorSystemDownload(dm, enqueued, currentRecord)
@@ -173,24 +190,33 @@ class DownloadEngine(
                 )
             } finally {
                 activeJobs.remove(initialRecord.id)
+                activeUrlsToId.remove(initialRecord.url, initialRecord.id)
                 systemDownloadIds.remove(initialRecord.id)
             }
         }
         activeJobs[initialRecord.id] = job
+        activeUrlsToId[initialRecord.url] = initialRecord.id
+        job.start()
     }
 
     private fun tryEnqueueWithSystemDownloadManager(
         dm: DownloadManager,
         record: DownloadRecord,
-        targetFile: File
+        targetFile: File,
+        notificationsEnabled: Boolean
     ): Long? {
         return runCatching {
             val uri = Uri.parse(record.url)
+            val notifVisibility = if (notificationsEnabled) {
+                DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
+            } else {
+                DownloadManager.Request.VISIBILITY_VISIBLE
+            }
             val request = DownloadManager.Request(uri)
                 .setTitle(record.fileName)
                 .setDescription("Downloading via NYXORA")
                 .setMimeType(record.mimeType)
-                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                .setNotificationVisibility(notifVisibility)
                 .setAllowedOverMetered(true)
                 .setAllowedOverRoaming(true)
 
@@ -219,7 +245,7 @@ class DownloadEngine(
         var lastBytes = 0L
         var lastTime = System.currentTimeMillis()
 
-        while (scope.isActive) {
+        while (currentCoroutineContext().isActive) {
             val query = DownloadManager.Query().setFilterById(systemDownloadId)
             val cursor: Cursor? = runCatching { dm.query(query) }.getOrNull()
             if (cursor == null) {
@@ -342,7 +368,7 @@ class DownloadEngine(
             conn.inputStream.use { input ->
                 FileOutputStream(targetFile, appendMode).use { output ->
                     val buffer = ByteArray(16 * 1024)
-                    while (scope.isActive) {
+                    while (currentCoroutineContext().isActive) {
                         val read = input.read(buffer)
                         if (read == -1) break
                         output.write(buffer, 0, read)
@@ -367,7 +393,7 @@ class DownloadEngine(
                 }
             }
 
-            if (scope.isActive) {
+            if (currentCoroutineContext().isActive) {
                 downloadDao.upsertDownload(
                     currentRecord.copy(
                         downloadedBytes = bytesReadTotal,
@@ -383,35 +409,59 @@ class DownloadEngine(
     }
 
     fun buildOpenFileIntent(record: DownloadRecord): Intent? {
+        if (record.localPath.isBlank()) return null
         val file = File(record.localPath)
         if (!file.exists()) return null
-        val uri = FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.fileprovider",
-            file
-        )
+        val uri = runCatching {
+            FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                file
+            )
+        }.getOrNull() ?: return null
+        val resolvedMime = resolveEffectiveMimeType(file.name, record.mimeType)
         return Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, record.mimeType.ifBlank { "*/*" })
+            setDataAndType(uri, resolvedMime)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
         }
     }
 
     fun buildShareFileIntent(record: DownloadRecord): Intent? {
+        if (record.localPath.isBlank()) return null
         val file = File(record.localPath)
         if (!file.exists()) return null
-        val uri = FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.fileprovider",
-            file
-        )
+        val uri = runCatching {
+            FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                file
+            )
+        }.getOrNull() ?: return null
+        val resolvedMime = resolveEffectiveMimeType(file.name, record.mimeType)
         val shareIntent = Intent(Intent.ACTION_SEND).apply {
-            type = record.mimeType.ifBlank { "*/*" }
+            type = resolvedMime
             putExtra(Intent.EXTRA_STREAM, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         return Intent.createChooser(shareIntent, "Share ${record.fileName}").apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
+    }
+
+    private fun resolveEffectiveMimeType(fileName: String, rawMimeType: String): String {
+        val cleaned = rawMimeType.substringBefore(';').trim().lowercase()
+        val ext = fileName.substringAfterLast('.', "").lowercase()
+        if (ext == "apk") {
+            return "application/vnd.android.package-archive"
+        }
+        if (cleaned.isNotBlank() && cleaned != "*/*" && cleaned != "application/octet-stream") {
+            return cleaned
+        }
+        if (ext.isNotEmpty()) {
+            val fromMap = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
+            if (!fromMap.isNullOrBlank()) return fromMap
+        }
+        return cleaned.ifBlank { "*/*" }
     }
 
     companion object {

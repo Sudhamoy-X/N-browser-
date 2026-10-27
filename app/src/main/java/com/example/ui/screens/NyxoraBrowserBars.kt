@@ -2,16 +2,21 @@ package com.example.ui.screens
 
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -31,39 +36,27 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.ArrowForward
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bookmark
-import androidx.compose.material.icons.filled.BookmarkBorder
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Computer
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.History
-import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.MenuBook
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.PhoneAndroid
-import androidx.compose.material.icons.filled.Public
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.Splitscreen
-import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material.icons.filled.VisibilityOff
-import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.outlined.BookmarkAdd
+import androidx.compose.material.icons.outlined.Bookmarks
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Computer
+import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.History
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
+import androidx.compose.material.icons.outlined.KeyboardArrowUp
+import androidx.compose.material.icons.outlined.Lock
+import androidx.compose.material.icons.outlined.Public
+import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Security
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.outlined.VisibilityOff
+import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -87,9 +80,14 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -100,15 +98,16 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.data.local.NyxoraSettingsState
 import com.example.domain.browser.BrowserNetworkClient
 import com.example.ui.theme.NyxoraDangerRed
 import com.example.ui.theme.NyxoraElectricBlue
 import com.example.ui.theme.NyxoraSuccessGreen
-import com.example.ui.theme.NyxoraVibrantViolet
 import com.example.ui.theme.NyxoraWarningAmber
 import com.example.ui.viewmodel.BrowserTab
 import com.example.ui.viewmodel.OverlaySheet
@@ -119,7 +118,7 @@ import com.example.ui.viewmodel.PendingSslErrorPrompt
 import kotlinx.coroutines.delay
 
 /**
- * Minimalist NYXORA Top Bar for URL/search input and real-time thin progress indicator.
+ * Clean, compact NYXORA Top Bar for URL/search input and real-time thin progress indicator.
  */
 @Composable
 fun NyxoraTopAddressBar(
@@ -151,7 +150,7 @@ fun NyxoraTopAddressBar(
     val animatedProgressScale by animateFloatAsState(
         targetValue = if (showProgressBar) (activeTab.progress.coerceIn(0, 100) / 100f) else 0f,
         animationSpec = tween(
-            durationMillis = if (settings.reducedMotion) 0 else 160,
+            durationMillis = if (settings.reducedMotion) 0 else 150,
             easing = FastOutSlowInEasing
         ),
         label = "nyxora_top_progress_scale"
@@ -160,13 +159,13 @@ fun NyxoraTopAddressBar(
     val animatedProgressAlpha by animateFloatAsState(
         targetValue = if (showProgressBar) 1f else 0f,
         animationSpec = tween(
-            durationMillis = if (settings.reducedMotion) 0 else 150,
+            durationMillis = if (settings.reducedMotion) 0 else 140,
             easing = FastOutSlowInEasing
         ),
         label = "nyxora_top_progress_alpha"
     )
 
-    // Cheap debounced DNS prefetch + preconnect for typed host in address bar
+    // Debounced DNS prefetch for typed host in address bar
     LaunchedEffect(isEditingAddress, addressInput, isPrivateMode, settings.dataSaverBlockImages) {
         if (isEditingAddress && addressInput.length >= 4 && !isPrivateMode && !settings.dataSaverBlockImages) {
             delay(220L)
@@ -183,15 +182,14 @@ fun NyxoraTopAddressBar(
         modifier = Modifier
             .fillMaxWidth()
             .testTag("nyxora_top_address_bar"),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 2.dp
+        color = MaterialTheme.colorScheme.background
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .statusBarsPadding()
         ) {
-            val verticalPad = if (settings.compactBottomToolbar) 6.dp else 8.dp
+            val verticalPad = if (settings.compactBottomToolbar) 4.dp else 6.dp
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -203,17 +201,17 @@ fun NyxoraTopAddressBar(
                 Row(
                     modifier = Modifier
                         .weight(1f)
-                        .height(if (settings.compactBottomToolbar) 40.dp else 44.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .height(if (settings.compactBottomToolbar) 38.dp else 42.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(MaterialTheme.colorScheme.surface)
                         .border(
                             width = 1.dp,
-                            color = when {
-                                isEditingAddress -> NyxoraElectricBlue
-                                isPrivateMode -> NyxoraVibrantViolet.copy(alpha = 0.55f)
-                                else -> MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+                            color = if (isEditingAddress) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.outline
                             },
-                            shape = RoundedCornerShape(12.dp)
+                            shape = RoundedCornerShape(10.dp)
                         )
                         .pointerInput(currentModeTabs, activeTab.id) {
                             detectHorizontalDragGestures(
@@ -240,31 +238,33 @@ fun NyxoraTopAddressBar(
                     when {
                         isPrivateMode -> {
                             Icon(
-                                imageVector = Icons.Default.VisibilityOff,
+                                imageVector = Icons.Outlined.VisibilityOff,
                                 contentDescription = stringResource(R.string.private_browsing_mode),
-                                tint = NyxoraVibrantViolet,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.size(16.dp)
                             )
                         }
                         activeTab.isHomePage -> {
                             Icon(
-                                imageVector = Icons.Default.Search,
+                                imageVector = Icons.Outlined.Search,
                                 contentDescription = stringResource(R.string.search_or_enter_address),
-                                tint = MaterialTheme.colorScheme.primary,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.size(16.dp)
                             )
                         }
                         activeTab.isSecureConnection -> {
                             Icon(
-                                imageVector = Icons.Default.Lock,
+                                imageVector = Icons.Outlined.Lock,
                                 contentDescription = "Secure HTTPS connection",
                                 tint = NyxoraSuccessGreen,
-                                modifier = Modifier.size(15.dp)
+                                modifier = Modifier
+                                    .size(15.dp)
+                                    .testTag("top_bar_secure_lock_icon")
                             )
                         }
                         else -> {
                             Icon(
-                                imageVector = Icons.Default.Warning,
+                                imageVector = Icons.Outlined.WarningAmber,
                                 contentDescription = "Unencrypted or untrusted connection",
                                 tint = NyxoraWarningAmber,
                                 modifier = Modifier.size(15.dp)
@@ -317,42 +317,46 @@ fun NyxoraTopAddressBar(
                     if (isEditingAddress && addressInput.isNotEmpty()) {
                         IconButton(
                             onClick = onClearAddress,
-                            modifier = Modifier.size(32.dp)
+                            modifier = Modifier
+                                .size(30.dp)
+                                .testTag("toolbar_clear_address_button")
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Close,
+                                imageVector = Icons.Outlined.Close,
                                 contentDescription = stringResource(R.string.clear_input),
-                                modifier = Modifier.size(16.dp)
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(15.dp)
                             )
                         }
                     } else if (!activeTab.isHomePage || activeTab.isLoading) {
                         IconButton(
                             onClick = onReloadOrStop,
                             modifier = Modifier
-                                .size(32.dp)
+                                .size(30.dp)
                                 .testTag("toolbar_reload_button")
                         ) {
                             Icon(
-                                imageVector = if (activeTab.isLoading) Icons.Default.Close else Icons.Default.Refresh,
+                                imageVector = if (activeTab.isLoading) Icons.Outlined.Close else Icons.Outlined.Refresh,
                                 contentDescription = if (activeTab.isLoading) {
                                     stringResource(R.string.stop_loading)
                                 } else {
                                     stringResource(R.string.reload_page)
                                 },
-                                modifier = Modifier.size(16.dp)
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(15.dp)
                             )
                         }
                     }
                 }
             }
 
-            // Thin progress bar in the top bar driven by real progress; animates only transform (scaleX) and opacity (alpha)
+            // Thin progress bar in the top bar driven by real progress
             if (showProgressBar || animatedProgressAlpha > 0.01f) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(2.dp)
-                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.28f))
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f))
                         .let { base ->
                             if (showProgressBar) base.testTag("top_address_bar_progress") else base
                         }
@@ -365,30 +369,30 @@ fun NyxoraTopAddressBar(
                                 alpha = animatedProgressAlpha
                                 transformOrigin = TransformOrigin(0f, 0.5f)
                             }
-                            .background(if (isPrivateMode) NyxoraVibrantViolet else NyxoraElectricBlue)
+                            .background(MaterialTheme.colorScheme.primary)
                     )
                 }
             } else {
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.22f))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
             }
 
             AnimatedVisibility(
                 visible = findInPageVisible,
-                enter = fadeIn(tween(if (settings.reducedMotion) 0 else 150)),
-                exit = fadeOut(tween(if (settings.reducedMotion) 0 else 150))
+                enter = fadeIn(tween(if (settings.reducedMotion) 0 else 140)),
+                exit = fadeOut(tween(if (settings.reducedMotion) 0 else 140))
             ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .background(MaterialTheme.colorScheme.surface)
                         .padding(horizontal = 12.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
-                        imageVector = Icons.Default.Search,
+                        imageVector = Icons.Outlined.Search,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(17.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     BasicTextField(
@@ -420,21 +424,21 @@ fun NyxoraTopAddressBar(
                     )
                     IconButton(
                         onClick = { onFindNext(false) },
-                        modifier = Modifier.size(36.dp)
+                        modifier = Modifier.size(34.dp)
                     ) {
-                        Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Previous match")
+                        Icon(Icons.Outlined.KeyboardArrowUp, contentDescription = "Previous match", modifier = Modifier.size(18.dp))
                     }
                     IconButton(
                         onClick = { onFindNext(true) },
-                        modifier = Modifier.size(36.dp)
+                        modifier = Modifier.size(34.dp)
                     ) {
-                        Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Next match")
+                        Icon(Icons.Outlined.KeyboardArrowDown, contentDescription = "Next match", modifier = Modifier.size(18.dp))
                     }
                     IconButton(
                         onClick = onCloseFindInPage,
-                        modifier = Modifier.size(36.dp)
+                        modifier = Modifier.size(34.dp)
                     ) {
-                        Icon(Icons.Default.Close, contentDescription = "Close find in page")
+                        Icon(Icons.Outlined.Close, contentDescription = "Close find in page", modifier = Modifier.size(17.dp))
                     }
                 }
             }
@@ -443,7 +447,12 @@ fun NyxoraTopAddressBar(
 }
 
 /**
- * Minimalist Bottom Navigation Bar: Back, Forward, Home, Tabs (with count), Menu. Nothing else.
+ * Compact, minimalist 5-button Bottom Navigation Bar with consistent soft-grey outline icons:
+ * 1. Back (Simple left chevron)
+ * 2. Forward (Simple right chevron)
+ * 3. Home (Minimal outline home)
+ * 4. Tabs (Thin rounded-square outline with centered tab count)
+ * 5. Menu (Three thin horizontal lines)
  */
 @Composable
 fun NyxoraBottomTabManagementBar(
@@ -452,87 +461,87 @@ fun NyxoraBottomTabManagementBar(
     isPrivateMode: Boolean,
     compactMode: Boolean,
     showOverflowMenu: Boolean,
-    splitSecondTabId: String?,
     onBack: () -> Unit,
     onForward: () -> Unit,
     onHome: () -> Unit,
     onOpenTabSwitcher: () -> Unit,
-    onToggleOverflowMenu: (Boolean) -> Unit,
-    onMenuNewTab: () -> Unit,
-    onMenuTogglePrivateMode: () -> Unit,
-    onMenuOpenLocalFile: () -> Unit,
-    onMenuToggleBookmark: () -> Unit,
-    onMenuToggleDesktop: () -> Unit,
-    onMenuOpenFindInPage: () -> Unit,
-    onMenuOpenReaderMode: () -> Unit,
-    onMenuToggleSplitView: () -> Unit,
-    onMenuSharePage: () -> Unit,
-    onMenuCopyLink: () -> Unit,
-    onMenuOpenOverlay: (OverlaySheet) -> Unit
+    onToggleOverflowMenu: (Boolean) -> Unit
 ) {
-    val activeAccent = if (isPrivateMode) NyxoraVibrantViolet else NyxoraElectricBlue
+    val canGoBack = !activeTab.isHomePage ||
+        activeTab.canGoBack ||
+        activeTab.backStack.isNotEmpty() ||
+        !activeTab.parentTabId.isNullOrBlank()
+    val canGoForward = activeTab.canGoForward || activeTab.forwardStack.isNotEmpty()
     val tabsDescription = stringResource(R.string.nav_tabs)
+
+    // Soft grey icon palette for both Dark Mode and Light Mode (no colorful/neon states or glow)
+    val enabledIconTint = MaterialTheme.colorScheme.onSurfaceVariant
+    val disabledIconTint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.32f)
+
+    val chevronLeftIcon = remember { buildNyxoraChevronLeftIcon() }
+    val chevronRightIcon = remember { buildNyxoraChevronRightIcon() }
+    val outlineHomeIcon = remember { buildNyxoraOutlineHomeIcon() }
+    val threeLineMenuIcon = remember { buildNyxoraThreeLineMenuIcon() }
 
     Surface(
         modifier = Modifier
             .fillMaxWidth()
             .testTag("nyxora_bottom_tab_bar"),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 3.dp
+        color = MaterialTheme.colorScheme.background,
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
         ) {
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.22f))
+            HorizontalDivider(
+                thickness = 0.5.dp,
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)
+            )
 
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = if (compactMode) 2.dp else 4.dp),
+                    .height(if (compactMode) 46.dp else 50.dp)
+                    .padding(horizontal = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceEvenly
             ) {
-                // 1. Back
+                // 1. Back: Simple left chevron
                 IconButton(
                     onClick = onBack,
-                    enabled = !activeTab.isHomePage,
+                    enabled = canGoBack,
                     modifier = Modifier
                         .minimumInteractiveComponentSize()
                         .testTag("toolbar_back_button")
                 ) {
                     Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        imageVector = chevronLeftIcon,
                         contentDescription = stringResource(R.string.nav_back),
-                        tint = if (!activeTab.isHomePage) {
-                            MaterialTheme.colorScheme.onSurface
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
-                        }
+                        tint = if (canGoBack) enabledIconTint else disabledIconTint,
+                        modifier = Modifier.size(20.dp)
                     )
                 }
 
-                // 2. Forward
+                // 2. Forward: Simple right chevron
                 IconButton(
                     onClick = onForward,
-                    enabled = activeTab.canGoForward,
+                    enabled = canGoForward,
                     modifier = Modifier
                         .minimumInteractiveComponentSize()
                         .testTag("toolbar_forward_button")
                 ) {
                     Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                        imageVector = chevronRightIcon,
                         contentDescription = stringResource(R.string.nav_forward),
-                        tint = if (activeTab.canGoForward) {
-                            MaterialTheme.colorScheme.onSurface
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
-                        }
+                        tint = if (canGoForward) enabledIconTint else disabledIconTint,
+                        modifier = Modifier.size(20.dp)
                     )
                 }
 
-                // 3. Home
+                // 3. Home: Minimal outline home
                 IconButton(
                     onClick = onHome,
                     modifier = Modifier
@@ -540,16 +549,18 @@ fun NyxoraBottomTabManagementBar(
                         .testTag("toolbar_home_or_forward_button")
                 ) {
                     Icon(
-                        imageVector = Icons.Default.Home,
+                        imageVector = outlineHomeIcon,
                         contentDescription = stringResource(R.string.nav_home),
-                        tint = if (activeTab.isHomePage) activeAccent else MaterialTheme.colorScheme.onSurface
+                        tint = enabledIconTint,
+                        modifier = Modifier.size(20.dp)
                     )
                 }
 
-                // 4. Tabs (with count)
+                // 4. Tabs: Thin rounded-square outline with the tab count centered inside
                 Box(
                     modifier = Modifier
                         .minimumInteractiveComponentSize()
+                        .size(48.dp)
                         .clip(RoundedCornerShape(10.dp))
                         .clickable(onClick = onOpenTabSwitcher)
                         .semantics { contentDescription = tabsDescription }
@@ -558,177 +569,399 @@ fun NyxoraBottomTabManagementBar(
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(26.dp)
+                            .size(19.dp)
                             .border(
-                                width = 1.8.dp,
-                                color = if (isPrivateMode) NyxoraVibrantViolet else MaterialTheme.colorScheme.onSurface,
-                                shape = RoundedCornerShape(7.dp)
-                            ),
+                                width = 1.2.dp,
+                                color = enabledIconTint,
+                                shape = RoundedCornerShape(5.dp)
+                            )
+                            .testTag("toolbar_tabs_counter_box"),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
                             text = visibleModeTabsCount.coerceAtMost(99).toString(),
-                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                            color = if (isPrivateMode) NyxoraVibrantViolet else MaterialTheme.colorScheme.onSurface
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontSize = 10.sp,
+                                lineHeight = 10.sp,
+                                fontWeight = FontWeight.Medium
+                            ),
+                            color = enabledIconTint,
+                            textAlign = TextAlign.Center
                         )
                     }
                 }
 
-                // 5. Menu
-                Box {
-                    IconButton(
-                        onClick = { onToggleOverflowMenu(true) },
-                        modifier = Modifier
-                            .minimumInteractiveComponentSize()
-                            .testTag("toolbar_overflow_menu_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.MoreVert,
-                            contentDescription = stringResource(R.string.nav_menu)
+                // 5. Menu: Three thin horizontal lines
+                IconButton(
+                    onClick = { onToggleOverflowMenu(!showOverflowMenu) },
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .testTag("toolbar_overflow_menu_button")
+                ) {
+                    Icon(
+                        imageVector = threeLineMenuIcon,
+                        contentDescription = stringResource(R.string.nav_menu),
+                        tint = enabledIconTint,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+internal const val NYXORA_BOTTOM_NAV_ICON_STROKE_WIDTH = 1.6f
+
+internal fun buildNyxoraChevronLeftIcon(): ImageVector =
+    ImageVector.Builder(
+        name = "NyxoraChevronLeft",
+        defaultWidth = 24.dp,
+        defaultHeight = 24.dp,
+        viewportWidth = 24f,
+        viewportHeight = 24f
+    ).apply {
+        path(
+            fill = null,
+            stroke = SolidColor(Color.White),
+            strokeLineWidth = NYXORA_BOTTOM_NAV_ICON_STROKE_WIDTH,
+            strokeLineCap = StrokeCap.Round,
+            strokeLineJoin = StrokeJoin.Round
+        ) {
+            moveTo(14.5f, 6.0f)
+            lineTo(8.5f, 12.0f)
+            lineTo(14.5f, 18.0f)
+        }
+    }.build()
+
+internal fun buildNyxoraChevronRightIcon(): ImageVector =
+    ImageVector.Builder(
+        name = "NyxoraChevronRight",
+        defaultWidth = 24.dp,
+        defaultHeight = 24.dp,
+        viewportWidth = 24f,
+        viewportHeight = 24f
+    ).apply {
+        path(
+            fill = null,
+            stroke = SolidColor(Color.White),
+            strokeLineWidth = NYXORA_BOTTOM_NAV_ICON_STROKE_WIDTH,
+            strokeLineCap = StrokeCap.Round,
+            strokeLineJoin = StrokeJoin.Round
+        ) {
+            moveTo(9.5f, 6.0f)
+            lineTo(15.5f, 12.0f)
+            lineTo(9.5f, 18.0f)
+        }
+    }.build()
+
+internal fun buildNyxoraOutlineHomeIcon(): ImageVector =
+    ImageVector.Builder(
+        name = "NyxoraOutlineHome",
+        defaultWidth = 24.dp,
+        defaultHeight = 24.dp,
+        viewportWidth = 24f,
+        viewportHeight = 24f
+    ).apply {
+        path(
+            fill = null,
+            stroke = SolidColor(Color.White),
+            strokeLineWidth = NYXORA_BOTTOM_NAV_ICON_STROKE_WIDTH,
+            strokeLineCap = StrokeCap.Round,
+            strokeLineJoin = StrokeJoin.Round
+        ) {
+            // Roof
+            moveTo(4.5f, 10.5f)
+            lineTo(12.0f, 4.2f)
+            lineTo(19.5f, 10.5f)
+            // Walls & base
+            moveTo(6.5f, 9.2f)
+            lineTo(6.5f, 19.0f)
+            lineTo(17.5f, 19.0f)
+            lineTo(17.5f, 9.2f)
+        }
+    }.build()
+
+internal fun buildNyxoraThreeLineMenuIcon(): ImageVector =
+    ImageVector.Builder(
+        name = "NyxoraThreeLineMenu",
+        defaultWidth = 24.dp,
+        defaultHeight = 24.dp,
+        viewportWidth = 24f,
+        viewportHeight = 24f
+    ).apply {
+        path(
+            fill = null,
+            stroke = SolidColor(Color.White),
+            strokeLineWidth = NYXORA_BOTTOM_NAV_ICON_STROKE_WIDTH,
+            strokeLineCap = StrokeCap.Round,
+            strokeLineJoin = StrokeJoin.Round
+        ) {
+            moveTo(5.0f, 7.0f)
+            lineTo(19.0f, 7.0f)
+            moveTo(5.0f, 12.0f)
+            lineTo(19.0f, 12.0f)
+            moveTo(5.0f, 17.0f)
+            lineTo(19.0f, 17.0f)
+        }
+    }.build()
+
+/**
+ * Compact 8-Action Bottom Menu Sheet displayed in a 2-row x 4-column grid:
+ * Row 1: Bookmarks, History, Downloads, Incognito
+ * Row 2: Add Bookmark, Desktop Site, Share, Settings
+ */
+@Composable
+fun NyxoraBottomMenuSheet(
+    visible: Boolean,
+    reducedMotion: Boolean,
+    isPrivateMode: Boolean,
+    isDesktopMode: Boolean,
+    isCurrentPageBookmarked: Boolean,
+    onDismiss: () -> Unit,
+    onOpenBookmarks: () -> Unit,
+    onOpenHistory: () -> Unit,
+    onOpenDownloads: () -> Unit,
+    onToggleIncognito: () -> Unit,
+    onToggleAddBookmark: () -> Unit,
+    onToggleDesktopSite: () -> Unit,
+    onSharePage: () -> Unit,
+    onOpenSettings: () -> Unit
+) {
+    BackHandler(enabled = visible, onBack = onDismiss)
+
+    val animDuration = if (reducedMotion) 0 else 160
+
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(tween(animDuration)),
+        exit = fadeOut(tween(animDuration))
+    ) {
+        var cumulativeDragDown by remember { mutableFloatStateOf(0f) }
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.52f))
+        ) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onDismiss
+                    )
+                    .testTag("bottom_menu_scrim")
+            )
+
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .widthIn(max = 540.dp)
+                    .align(Alignment.CenterHorizontally)
+                    .clip(RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
+                    .border(
+                        width = 1.dp,
+                        color = MaterialTheme.colorScheme.outline,
+                        shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)
+                    )
+                    .pointerInput(Unit) {
+                        detectVerticalDragGestures(
+                            onDragStart = { cumulativeDragDown = 0f },
+                            onVerticalDrag = { _, dragAmount ->
+                                cumulativeDragDown += dragAmount
+                            },
+                            onDragEnd = {
+                                if (cumulativeDragDown > 48f) {
+                                    onDismiss()
+                                }
+                                cumulativeDragDown = 0f
+                            }
                         )
                     }
-
-                    DropdownMenu(
-                        expanded = showOverflowMenu,
-                        onDismissRequest = { onToggleOverflowMenu(false) }
+                    .testTag("nyxora_bottom_menu_sheet"),
+                color = MaterialTheme.colorScheme.surface,
+                shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)
+            ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .navigationBarsPadding()
+                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        DropdownMenuItem(
-                            text = { Text("New tab") },
-                            leadingIcon = { Icon(Icons.Default.Add, contentDescription = null) },
-                            onClick = {
-                                onToggleOverflowMenu(false)
-                                onMenuNewTab()
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = { Text(if (isPrivateMode) "Exit private mode" else "New private tab") },
-                            leadingIcon = { Icon(Icons.Default.VisibilityOff, contentDescription = null) },
-                            onClick = {
-                                onToggleOverflowMenu(false)
-                                onMenuTogglePrivateMode()
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Bookmarks") },
-                            leadingIcon = { Icon(Icons.Default.BookmarkBorder, contentDescription = null) },
-                            onClick = {
-                                onToggleOverflowMenu(false)
-                                onMenuOpenOverlay(OverlaySheet.BOOKMARKS)
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("History") },
-                            leadingIcon = { Icon(Icons.Default.History, contentDescription = null) },
-                            onClick = {
-                                onToggleOverflowMenu(false)
-                                onMenuOpenOverlay(OverlaySheet.HISTORY)
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Downloads") },
-                            leadingIcon = { Icon(Icons.Default.Download, contentDescription = null) },
-                            onClick = {
-                                onToggleOverflowMenu(false)
-                                onMenuOpenOverlay(OverlaySheet.DOWNLOADS)
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Open file") },
-                            leadingIcon = { Icon(Icons.Default.FolderOpen, contentDescription = null) },
-                            onClick = {
-                                onToggleOverflowMenu(false)
-                                onMenuOpenLocalFile()
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Site settings") },
-                            leadingIcon = { Icon(Icons.Default.Tune, contentDescription = null) },
-                            onClick = {
-                                onToggleOverflowMenu(false)
-                                onMenuOpenOverlay(OverlaySheet.SITE_SETTINGS)
-                            }
+                        // Subtle swipe-down handle
+                        Box(
+                            modifier = Modifier
+                                .width(32.dp)
+                                .height(3.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(MaterialTheme.colorScheme.outline)
                         )
 
-                        if (!activeTab.isHomePage) {
-                            HorizontalDivider()
-                            DropdownMenuItem(
-                                text = { Text("Bookmark this page") },
-                                leadingIcon = { Icon(Icons.Default.Bookmark, contentDescription = null) },
+                        // Row 1: Bookmarks, History, Downloads, Incognito
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            BottomMenuGridItem(
+                                icon = Icons.Outlined.Bookmarks,
+                                label = "Bookmarks",
+                                isActive = false,
+                                testTag = "menu_item_bookmarks",
                                 onClick = {
-                                    onToggleOverflowMenu(false)
-                                    onMenuToggleBookmark()
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = {
-                                    Text(if (activeTab.desktopMode) "Mobile site" else "Desktop site")
+                                    onDismiss()
+                                    onOpenBookmarks()
                                 },
-                                leadingIcon = {
-                                    Icon(
-                                        if (activeTab.desktopMode) Icons.Default.PhoneAndroid else Icons.Default.Computer,
-                                        contentDescription = null
-                                    )
+                                modifier = Modifier.weight(1f)
+                            )
+                            BottomMenuGridItem(
+                                icon = Icons.Outlined.History,
+                                label = "History",
+                                isActive = false,
+                                testTag = "menu_item_history",
+                                onClick = {
+                                    onDismiss()
+                                    onOpenHistory()
                                 },
-                                onClick = {
-                                    onToggleOverflowMenu(false)
-                                    onMenuToggleDesktop()
-                                }
+                                modifier = Modifier.weight(1f)
                             )
-                            DropdownMenuItem(
-                                text = { Text("Find in page") },
-                                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                            BottomMenuGridItem(
+                                icon = Icons.Outlined.Download,
+                                label = "Downloads",
+                                isActive = false,
+                                testTag = "menu_item_downloads",
                                 onClick = {
-                                    onToggleOverflowMenu(false)
-                                    onMenuOpenFindInPage()
-                                }
+                                    onDismiss()
+                                    onOpenDownloads()
+                                },
+                                modifier = Modifier.weight(1f)
                             )
-                            DropdownMenuItem(
-                                text = { Text("Reader mode") },
-                                leadingIcon = { Icon(Icons.Default.MenuBook, contentDescription = null) },
+                            BottomMenuGridItem(
+                                icon = Icons.Outlined.VisibilityOff,
+                                label = "Incognito",
+                                isActive = isPrivateMode,
+                                testTag = "menu_item_incognito",
                                 onClick = {
-                                    onToggleOverflowMenu(false)
-                                    onMenuOpenReaderMode()
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(if (splitSecondTabId != null) "Close split view" else "Split view") },
-                                leadingIcon = { Icon(Icons.Default.Splitscreen, contentDescription = null) },
-                                onClick = {
-                                    onToggleOverflowMenu(false)
-                                    onMenuToggleSplitView()
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Share page") },
-                                leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) },
-                                onClick = {
-                                    onToggleOverflowMenu(false)
-                                    onMenuSharePage()
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Copy link") },
-                                leadingIcon = { Icon(Icons.Default.ContentCopy, contentDescription = null) },
-                                onClick = {
-                                    onToggleOverflowMenu(false)
-                                    onMenuCopyLink()
-                                }
+                                    onDismiss()
+                                    onToggleIncognito()
+                                },
+                                modifier = Modifier.weight(1f)
                             )
                         }
 
-                        HorizontalDivider()
-                        DropdownMenuItem(
-                            text = { Text("Settings") },
-                            leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null) },
-                            onClick = {
-                                onToggleOverflowMenu(false)
-                                onMenuOpenOverlay(OverlaySheet.SETTINGS)
-                            }
-                        )
+                        // Row 2: Add Bookmark, Desktop Site, Share, Settings
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            BottomMenuGridItem(
+                                icon = if (isCurrentPageBookmarked) Icons.Filled.Bookmark else Icons.Outlined.BookmarkAdd,
+                                label = if (isCurrentPageBookmarked) "Bookmarked" else "Add Bookmark",
+                                isActive = isCurrentPageBookmarked,
+                                testTag = "menu_item_add_bookmark",
+                                onClick = {
+                                    onDismiss()
+                                    onToggleAddBookmark()
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                            BottomMenuGridItem(
+                                icon = Icons.Outlined.Computer,
+                                label = "Desktop Site",
+                                isActive = isDesktopMode,
+                                testTag = "menu_item_desktop_site",
+                                onClick = {
+                                    onDismiss()
+                                    onToggleDesktopSite()
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                            BottomMenuGridItem(
+                                icon = Icons.Outlined.Share,
+                                label = "Share",
+                                isActive = false,
+                                testTag = "menu_item_share",
+                                onClick = {
+                                    onDismiss()
+                                    onSharePage()
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                            BottomMenuGridItem(
+                                icon = Icons.Outlined.Settings,
+                                label = "Settings",
+                                isActive = false,
+                                testTag = "menu_item_settings",
+                                onClick = {
+                                    onDismiss()
+                                    onOpenSettings()
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
                     }
                 }
             }
         }
+}
+
+@Composable
+private fun BottomMenuGridItem(
+    icon: ImageVector,
+    label: String,
+    isActive: Boolean,
+    testTag: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val bgColor = if (isActive) {
+        MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+    } else {
+        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+    }
+    val borderColor = if (isActive) {
+        MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+    } else {
+        MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+    }
+    val contentTint = if (isActive) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        MaterialTheme.colorScheme.onSurface
+    }
+
+    Column(
+        modifier = modifier
+            .minimumInteractiveComponentSize()
+            .clip(RoundedCornerShape(10.dp))
+            .background(bgColor)
+            .border(1.dp, borderColor, RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 4.dp, vertical = 12.dp)
+            .testTag(testTag),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = contentTint,
+            modifier = Modifier.size(20.dp)
+        )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall.copy(
+                fontSize = 11.sp,
+                fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Medium
+            ),
+            color = contentTint,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center
+        )
     }
 }
 
@@ -748,15 +981,15 @@ internal fun PrivatePinLockView(
         verticalArrangement = Arrangement.Center
     ) {
         Icon(
-            imageVector = Icons.Default.Lock,
+            imageVector = Icons.Outlined.Lock,
             contentDescription = null,
-            tint = NyxoraVibrantViolet,
-            modifier = Modifier.size(48.dp)
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(40.dp)
         )
         Spacer(modifier = Modifier.height(16.dp))
         Text(
             text = "Private Session Locked",
-            style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold)
+            style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.SemiBold)
         )
         Spacer(modifier = Modifier.height(8.dp))
         Text(
@@ -819,7 +1052,7 @@ internal fun NyxoraSecurityAndPermissionDialogs(
             onDismissRequest = {
                 onResolveSitePermission(false, false)
             },
-            icon = { Icon(Icons.Default.Security, contentDescription = null, tint = NyxoraElectricBlue) },
+            icon = { Icon(Icons.Outlined.Security, contentDescription = null, tint = NyxoraElectricBlue) },
             title = { Text("Site Permission Request") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -852,7 +1085,7 @@ internal fun NyxoraSecurityAndPermissionDialogs(
     externalSchemePrompt?.let { prompt ->
         AlertDialog(
             onDismissRequest = onDismissExternalScheme,
-            icon = { Icon(Icons.Default.Public, contentDescription = null, tint = NyxoraElectricBlue) },
+            icon = { Icon(Icons.Outlined.Public, contentDescription = null, tint = NyxoraElectricBlue) },
             title = { Text("Open External Application?") },
             text = {
                 Text(
@@ -892,7 +1125,7 @@ internal fun NyxoraSecurityAndPermissionDialogs(
     riskyDownloadPrompt?.let { prompt ->
         AlertDialog(
             onDismissRequest = { onConfirmRiskyDownload(false) },
-            icon = { Icon(Icons.Default.Warning, contentDescription = null, tint = NyxoraWarningAmber) },
+            icon = { Icon(Icons.Outlined.WarningAmber, contentDescription = null, tint = NyxoraWarningAmber) },
             title = { Text("Potentially Risky File") },
             text = {
                 Text(
@@ -916,7 +1149,7 @@ internal fun NyxoraSecurityAndPermissionDialogs(
     sslWarningPrompt?.let { ssl ->
         AlertDialog(
             onDismissRequest = { onResolveSslError(false) },
-            icon = { Icon(Icons.Default.Warning, contentDescription = null, tint = NyxoraDangerRed) },
+            icon = { Icon(Icons.Outlined.WarningAmber, contentDescription = null, tint = NyxoraDangerRed) },
             title = { Text("Connection Is Not Private") },
             text = {
                 Text(

@@ -1,0 +1,863 @@
+package com.example.domain.connect
+
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
+import java.io.OutputStream
+import java.net.ServerSocket
+import java.net.Socket
+import java.security.MessageDigest
+import java.util.Base64
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import org.json.JSONObject
+
+/**
+ * Standards-compliant RFC 6455 WebSocket Room Authority & Relay Server.
+ *
+ * When a device hosts a room in NYXORA Connect, this server runs on an ephemeral TCP port
+ * (or shares rooms with local/LAN devices via `ws://<lan-ip>:<port>/nyxora`), allowing real
+ * `okhttp3.WebSocket` clients (both the Host client and Participant clients) to connect over
+ * actual RFC 6455 WebSocket frames.
+ *
+ * Enforces:
+ * - Room ID format & expiration checks
+ * - Access Key authentication & HMAC-SHA256 frame verification
+ * - Configurable max participant limit (default 5) & room lock
+ * - Host-authority permission checks (mode switch, navigation sync, playback control, kick, host transfer)
+ * - Sliding-window rate limiting & bounded event deduplication
+ * - Heartbeat monitoring & stale connection cleanup
+ */
+class NyxoraWebSocketRelayServer {
+
+    private val running = AtomicBoolean(false)
+    private var serverSocket: ServerSocket? = null
+    private var serverScope: CoroutineScope? = null
+    private var acceptJob: Job? = null
+    private var maintenanceJob: Job? = null
+
+    private val rooms = ConcurrentHashMap<String, HostedRoomContext>()
+    private val clients = CopyOnWriteArrayList<ClientSessionConnection>()
+    private val rateLimiter = SlidingWindowRateLimiter(maxEventsPerWindow = 30, windowMillis = 3000L)
+    private val deduplicator = BoundedEventDeduplicator(maxCapacity = 1024)
+
+    val listeningPort: Int
+        get() = serverSocket?.localPort ?: -1
+
+    private class HostedRoomContext(
+        @Volatile var state: NyxoraConnectRoomState,
+        val sequenceGenerator: AtomicLong = AtomicLong(1L),
+        val kickedDeviceIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    )
+
+    private inner class ClientSessionConnection(
+        val socket: Socket,
+        val input: InputStream,
+        val output: OutputStream,
+        @Volatile var deviceId: String = "",
+        @Volatile var roomId: String = "",
+        @Volatile var authenticated: Boolean = false,
+        @Volatile var lastSeenMillis: Long = System.currentTimeMillis()
+    ) {
+        private val writeLock = Any()
+        private val closed = AtomicBoolean(false)
+
+        fun sendTextFrame(text: String): Boolean {
+            if (closed.get() || socket.isClosed) return false
+            return synchronized(writeLock) {
+                runCatching {
+                    val payload = text.toByteArray(Charsets.UTF_8)
+                    writeWebSocketFrame(output, opcode = 0x1, payload = payload)
+                    output.flush()
+                    true
+                }.getOrDefault(false)
+            }
+        }
+
+        fun sendPongFrame(payload: ByteArray) {
+            if (closed.get() || socket.isClosed) return
+            synchronized(writeLock) {
+                runCatching {
+                    writeWebSocketFrame(output, opcode = 0xA, payload = payload)
+                    output.flush()
+                }
+            }
+        }
+
+        fun closeConnection(code: Int = 1000, reason: String = "Normal closure") {
+            if (!closed.compareAndSet(false, true)) return
+            synchronized(writeLock) {
+                runCatching {
+                    val reasonBytes = reason.take(64).toByteArray(Charsets.UTF_8)
+                    val closePayload = ByteArray(2 + reasonBytes.size)
+                    closePayload[0] = ((code shr 8) and 0xFF).toByte()
+                    closePayload[1] = (code and 0xFF).toByte()
+                    System.arraycopy(reasonBytes, 0, closePayload, 2, reasonBytes.size)
+                    writeWebSocketFrame(output, opcode = 0x8, payload = closePayload)
+                    output.flush()
+                }
+                runCatching { socket.close() }
+            }
+        }
+    }
+
+    @Synchronized
+    fun startIfNeeded(): Int {
+        if (running.get() && serverSocket != null && serverSocket?.isClosed == false) {
+            return serverSocket!!.localPort
+        }
+        val sock = ServerSocket(0)
+        sock.reuseAddress = true
+        serverSocket = sock
+        running.set(true)
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        serverScope = scope
+
+        acceptJob = scope.launch {
+            while (isActive && running.get()) {
+                val clientSocket = runCatching { sock.accept() }.getOrNull() ?: break
+                scope.launch {
+                    handleIncomingSocket(clientSocket)
+                }
+            }
+        }
+
+        maintenanceJob = scope.launch {
+            while (isActive && running.get()) {
+                delay(5000L)
+                performRoomAndHeartbeatMaintenance()
+            }
+        }
+
+        return sock.localPort
+    }
+
+    fun registerNewRoom(initialState: NyxoraConnectRoomState) {
+        startIfNeeded()
+        rooms[initialState.roomId.uppercase()] = HostedRoomContext(
+            state = initialState.copy(roomId = initialState.roomId.uppercase())
+        )
+    }
+
+    fun getRoomState(roomId: String): NyxoraConnectRoomState? {
+        return rooms[roomId.trim().uppercase()]?.state
+    }
+
+    fun expireRoomForTesting(roomId: String) {
+        val ctx = rooms[roomId.trim().uppercase()] ?: return
+        synchronized(ctx) {
+            ctx.state = ctx.state.copy(expiresAtMillis = System.currentTimeMillis() - 1000L)
+        }
+    }
+
+    @Synchronized
+    fun stopServer() {
+        if (!running.compareAndSet(true, false)) return
+        for (client in clients) {
+            client.closeConnection(1001, "Server shutting down")
+        }
+        clients.clear()
+        rooms.clear()
+        rateLimiter.clear()
+        deduplicator.clear()
+        runCatching { serverSocket?.close() }
+        serverSocket = null
+        acceptJob?.cancel()
+        maintenanceJob?.cancel()
+        serverScope?.cancel()
+        serverScope = null
+    }
+
+    private fun handleIncomingSocket(socket: Socket) {
+        socket.tcpNoDelay = true
+        socket.soTimeout = 45000
+        val input = BufferedInputStream(socket.getInputStream())
+        val output = BufferedOutputStream(socket.getOutputStream())
+
+        if (!performWebSocketHandshake(input, output)) {
+            runCatching { socket.close() }
+            return
+        }
+
+        val connection = ClientSessionConnection(socket = socket, input = input, output = output)
+        clients.add(connection)
+
+        try {
+            while (running.get() && !socket.isClosed) {
+                val frame = readWebSocketFrame(input) ?: break
+                connection.lastSeenMillis = System.currentTimeMillis()
+                when (frame.opcode) {
+                    0x1 -> { // Text frame
+                        val text = String(frame.payload, Charsets.UTF_8)
+                        processIncomingMessage(connection, text)
+                    }
+                    0x8 -> { // Close frame
+                        handleClientDisconnected(connection, explicitLeave = false)
+                        break
+                    }
+                    0x9 -> { // Ping frame
+                        connection.sendPongFrame(frame.payload)
+                    }
+                    0xA -> { // Pong frame
+                        // Heartbeat updated via lastSeenMillis
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            // Socket closed or interrupted
+        } finally {
+            clients.remove(connection)
+            handleClientDisconnected(connection, explicitLeave = false)
+            connection.closeConnection()
+        }
+    }
+
+    private fun processIncomingMessage(conn: ClientSessionConnection, rawText: String) {
+        val envelope = RealtimeEventEnvelope.fromJsonString(rawText) ?: return
+        val now = System.currentTimeMillis()
+
+        // Rate limit check per sender device
+        if (!rateLimiter.tryAcquire(envelope.senderDeviceId, now)) {
+            sendErrorEvent(conn, envelope.roomId, "RATE_LIMITED", "Too many requests; slowing down")
+            return
+        }
+
+        // Duplicate event protection
+        if (!deduplicator.markIfNew(envelope.eventId)) {
+            return
+        }
+
+        val normalizedRoomId = envelope.roomId.trim().uppercase()
+        if (!NyxoraConnectSecurity.validateRoomIdFormat(normalizedRoomId)) {
+            sendRejectEvent(conn, normalizedRoomId, "INVALID_ROOM_ID", "Invalid Room ID format")
+            return
+        }
+
+        val roomCtx = rooms[normalizedRoomId]
+        if (roomCtx == null) {
+            sendRejectEvent(conn, normalizedRoomId, "ROOM_NOT_FOUND", "Room does not exist or has closed")
+            return
+        }
+
+        synchronized(roomCtx) {
+            val currentRoom = roomCtx.state
+            if (now > currentRoom.expiresAtMillis) {
+                rooms.remove(normalizedRoomId)
+                sendRejectEvent(conn, normalizedRoomId, "ROOM_EXPIRED", "This room has expired")
+                return
+            }
+
+            if (roomCtx.kickedDeviceIds.contains(envelope.senderDeviceId)) {
+                sendRejectEvent(conn, normalizedRoomId, "PARTICIPANT_REMOVED", "You were removed from this room by the host")
+                return
+            }
+
+            // Verify HMAC signature using the room's accessKey
+            if (!NyxoraConnectSecurity.verifyEventHmac(currentRoom.accessKey, envelope)) {
+                sendRejectEvent(conn, normalizedRoomId, "UNAUTHORIZED_KEY", "Invalid room access key or signature")
+                return
+            }
+
+            when (envelope.type) {
+                RealtimeEventType.JOIN_REQUEST -> {
+                    handleJoinRequest(conn, roomCtx, envelope, now)
+                }
+                RealtimeEventType.HEARTBEAT_PING -> {
+                    updateMemberHeartbeat(roomCtx, envelope.senderDeviceId, now)
+                    val pongEnvelope = createServerSignedEnvelope(
+                        room = roomCtx.state,
+                        seq = roomCtx.sequenceGenerator.incrementAndGet(),
+                        type = RealtimeEventType.HEARTBEAT_PONG,
+                        payloadJson = JSONObject().put("serverTimeMillis", now).toString()
+                    )
+                    conn.sendTextFrame(pongEnvelope.toJsonString())
+                }
+                RealtimeEventType.LEAVE_ROOM -> {
+                    handleExplicitLeave(conn, roomCtx, envelope.senderDeviceId)
+                }
+                RealtimeEventType.ROOM_CLOSED -> {
+                    if (envelope.senderDeviceId == currentRoom.hostDeviceId) {
+                        val closedEnvelope = createServerSignedEnvelope(
+                            room = currentRoom,
+                            seq = roomCtx.sequenceGenerator.incrementAndGet(),
+                            type = RealtimeEventType.ROOM_CLOSED,
+                            payloadJson = JSONObject().put("reason", "Host closed the room").toString()
+                        )
+                        broadcastToRoom(normalizedRoomId, closedEnvelope)
+                        rooms.remove(normalizedRoomId)
+                    }
+                }
+                RealtimeEventType.UPDATE_ROOM_CONFIG -> {
+                    if (envelope.senderDeviceId == currentRoom.hostDeviceId) {
+                        val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: return
+                        val newMode = runCatching {
+                            RoomSyncMode.valueOf(payload.optString("mode", currentRoom.mode.name))
+                        }.getOrDefault(currentRoom.mode)
+                        val newSyncActive = payload.optBoolean("isSyncActive", currentRoom.isSyncActive)
+                        val newName = payload.optString("roomName", currentRoom.roomName).take(48).ifBlank { currentRoom.roomName }
+                        val newPerms = RoomPermissionsConfig.fromJson(payload.optJSONObject("permissions"))
+                        val nextSeq = roomCtx.sequenceGenerator.incrementAndGet()
+                        roomCtx.state = currentRoom.copy(
+                            roomName = newName,
+                            mode = newMode,
+                            isSyncActive = newSyncActive,
+                            permissions = newPerms,
+                            lastSequenceNumber = nextSeq
+                        )
+                        broadcastSnapshotToRoom(roomCtx)
+                    }
+                }
+                RealtimeEventType.REMOVE_PARTICIPANT -> {
+                    if (envelope.senderDeviceId == currentRoom.hostDeviceId) {
+                        val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: return
+                        val targetId = payload.optString("targetDeviceId", "")
+                        if (targetId.isNotBlank() && targetId != currentRoom.hostDeviceId) {
+                            roomCtx.kickedDeviceIds.add(targetId)
+                            val updatedMembers = currentRoom.members.filterNot { it.deviceId == targetId }
+                            val nextSeq = roomCtx.sequenceGenerator.incrementAndGet()
+                            roomCtx.state = currentRoom.copy(
+                                members = updatedMembers,
+                                lastSequenceNumber = nextSeq
+                            )
+                            // Notify kicked client and close its connection
+                            for (c in clients) {
+                                if (c.roomId == normalizedRoomId && c.deviceId == targetId) {
+                                    sendRejectEvent(c, normalizedRoomId, "PARTICIPANT_REMOVED", "Removed from room by host")
+                                    c.closeConnection(4003, "Removed by host")
+                                }
+                            }
+                            broadcastSnapshotToRoom(roomCtx)
+                        }
+                    }
+                }
+                RealtimeEventType.TRANSFER_HOST -> {
+                    if (envelope.senderDeviceId == currentRoom.hostDeviceId) {
+                        val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: return
+                        val newHostId = payload.optString("targetDeviceId", "")
+                        if (newHostId.isNotBlank() && currentRoom.members.any { it.deviceId == newHostId }) {
+                            val nextEpoch = currentRoom.authorityEpoch + 1L
+                            val nextSeq = roomCtx.sequenceGenerator.incrementAndGet()
+                            val updatedMembers = currentRoom.members.map { m ->
+                                when (m.deviceId) {
+                                    newHostId -> m.copy(role = RoomRole.HOST, isFollowingPaused = false)
+                                    currentRoom.hostDeviceId -> m.copy(role = RoomRole.PARTICIPANT)
+                                    else -> m
+                                }
+                            }
+                            roomCtx.state = currentRoom.copy(
+                                hostDeviceId = newHostId,
+                                authorityEpoch = nextEpoch,
+                                members = updatedMembers,
+                                lastSequenceNumber = nextSeq
+                            )
+                            broadcastSnapshotToRoom(roomCtx)
+                        }
+                    }
+                }
+                RealtimeEventType.PARTICIPANT_FOLLOW_STATE -> {
+                    val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: return
+                    val paused = payload.optBoolean("isFollowingPaused", false)
+                    val nextSeq = roomCtx.sequenceGenerator.incrementAndGet()
+                    val updatedMembers = currentRoom.members.map { m ->
+                        if (m.deviceId == envelope.senderDeviceId) {
+                            m.copy(
+                                isFollowingPaused = paused,
+                                status = if (paused) SyncConnectionStatus.PAUSED_FOLLOWING else SyncConnectionStatus.SYNCED,
+                                lastHeartbeatMillis = now
+                            )
+                        } else {
+                            m
+                        }
+                    }
+                    roomCtx.state = currentRoom.copy(
+                        members = updatedMembers,
+                        lastSequenceNumber = nextSeq
+                    )
+                    broadcastSnapshotToRoom(roomCtx)
+                }
+                RealtimeEventType.NAVIGATE_URL,
+                RealtimeEventType.NAVIGATE_BACK,
+                RealtimeEventType.NAVIGATE_FORWARD,
+                RealtimeEventType.SELECT_TAB_NAVIGATION,
+                RealtimeEventType.NEW_PAGE_OPENED -> {
+                    // Host-authority model: only host can broadcast navigation synchronization
+                    if (envelope.senderDeviceId == currentRoom.hostDeviceId && currentRoom.isSyncActive) {
+                        val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: JSONObject()
+                        val rawUrl = payload.optString("url", "")
+                        val sanitizedUrl = if (rawUrl.isNotBlank()) {
+                            NyxoraConnectSecurity.sanitizeUrlForSync(rawUrl, isPrivateTab = false, isPrivateMode = false)
+                        } else {
+                            null
+                        }
+                        if (envelope.type == RealtimeEventType.NAVIGATE_URL && sanitizedUrl == null) {
+                            return
+                        }
+                        val nextSeq = roomCtx.sequenceGenerator.incrementAndGet()
+                        val nextTitle = payload.optString("title", currentRoom.currentSyncedTitle).take(120)
+                        roomCtx.state = currentRoom.copy(
+                            currentSyncedUrl = sanitizedUrl ?: currentRoom.currentSyncedUrl,
+                            currentSyncedTitle = if (sanitizedUrl != null) nextTitle else currentRoom.currentSyncedTitle,
+                            lastSequenceNumber = nextSeq
+                        )
+                        val cleanPayload = JSONObject(payload.toString()).apply {
+                            if (sanitizedUrl != null) put("url", sanitizedUrl)
+                        }
+                        val broadcastEnv = createServerSignedEnvelope(
+                            room = roomCtx.state,
+                            seq = nextSeq,
+                            type = envelope.type,
+                            senderId = envelope.senderDeviceId,
+                            senderRole = RoomRole.HOST,
+                            payloadJson = cleanPayload.toString()
+                        )
+                        broadcastToRoom(normalizedRoomId, broadcastEnv)
+                    }
+                }
+                RealtimeEventType.PLAYBACK_ACTION,
+                RealtimeEventType.PLAYBACK_BEACON -> {
+                    val isHost = envelope.senderDeviceId == currentRoom.hostDeviceId
+                    val allowedByPermission = isHost ||
+                        (envelope.type == RealtimeEventType.PLAYBACK_ACTION && currentRoom.permissions.allowParticipantPlaybackControl)
+                    if (allowedByPermission && currentRoom.isSyncActive) {
+                        val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: return
+                        val nextSeq = roomCtx.sequenceGenerator.incrementAndGet()
+                        val rawUrl = payload.optString("pageUrl", currentRoom.currentSyncedUrl)
+                        val safePageUrl = NyxoraConnectSecurity.sanitizeUrlForSync(rawUrl, false, false)
+                            ?: currentRoom.currentSyncedUrl
+                        val pbState = WatchTogetherPlaybackState(
+                            pageUrl = safePageUrl,
+                            isPlaying = payload.optBoolean("isPlaying", false),
+                            positionSeconds = payload.optDouble("positionSeconds", 0.0).coerceAtLeast(0.0),
+                            durationSeconds = payload.optDouble("durationSeconds", 0.0).coerceAtLeast(0.0),
+                            playbackRate = payload.optDouble("playbackRate", 1.0).coerceIn(0.25, 2.0),
+                            updatedAtMillis = now,
+                            updatedByDeviceId = envelope.senderDeviceId,
+                            sequenceNumber = nextSeq
+                        )
+                        roomCtx.state = currentRoom.copy(
+                            currentSyncedUrl = safePageUrl.ifBlank { currentRoom.currentSyncedUrl },
+                            playbackState = pbState,
+                            lastSequenceNumber = nextSeq
+                        )
+                        val broadcastEnv = createServerSignedEnvelope(
+                            room = roomCtx.state,
+                            seq = nextSeq,
+                            type = envelope.type,
+                            senderId = envelope.senderDeviceId,
+                            senderRole = if (isHost) RoomRole.HOST else RoomRole.PARTICIPANT,
+                            payloadJson = pbState.toJson().toString()
+                        )
+                        broadcastToRoom(normalizedRoomId, broadcastEnv)
+                    }
+                }
+                RealtimeEventType.REQUEST_RESYNC -> {
+                    // Send authoritative snapshot to the requesting participant
+                    val snapshotEnv = createServerSignedEnvelope(
+                        room = roomCtx.state,
+                        seq = roomCtx.state.lastSequenceNumber,
+                        type = RealtimeEventType.ROOM_STATE_SNAPSHOT,
+                        payloadJson = roomCtx.state.toSnapshotJson(includeAccessKey = false).toString()
+                    )
+                    conn.sendTextFrame(snapshotEnv.toJsonString())
+                }
+                else -> Unit
+            }
+        }
+    }
+
+    private fun handleJoinRequest(
+        conn: ClientSessionConnection,
+        roomCtx: HostedRoomContext,
+        envelope: RealtimeEventEnvelope,
+        now: Long
+    ) {
+        val currentRoom = roomCtx.state
+        val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: JSONObject()
+        val deviceName = payload.optString("deviceName", "NYXORA Device").trim().take(36).ifBlank { "NYXORA Device" }
+        val isRejoin = currentRoom.members.any { it.deviceId == envelope.senderDeviceId }
+        val isHost = envelope.senderDeviceId == currentRoom.hostDeviceId
+
+        if (!isRejoin && !isHost) {
+            if (currentRoom.permissions.isRoomLocked) {
+                sendRejectEvent(conn, currentRoom.roomId, "ROOM_LOCKED", "Room is locked by the host")
+                return
+            }
+            val activeCount = currentRoom.members.count { it.status != SyncConnectionStatus.DISCONNECTED }
+            if (activeCount >= currentRoom.permissions.maxParticipants) {
+                sendRejectEvent(
+                    conn,
+                    currentRoom.roomId,
+                    "ROOM_FULL",
+                    "Room has reached its maximum limit of ${currentRoom.permissions.maxParticipants} devices"
+                )
+                return
+            }
+        }
+
+        conn.deviceId = envelope.senderDeviceId
+        conn.roomId = currentRoom.roomId
+        conn.authenticated = true
+        conn.lastSeenMillis = now
+
+        val memberEntry = ConnectedDeviceMember(
+            deviceId = envelope.senderDeviceId,
+            deviceName = deviceName,
+            role = if (isHost) RoomRole.HOST else RoomRole.PARTICIPANT,
+            status = SyncConnectionStatus.SYNCED,
+            joinedAtMillis = currentRoom.members.firstOrNull { it.deviceId == envelope.senderDeviceId }?.joinedAtMillis ?: now,
+            lastHeartbeatMillis = now,
+            isFollowingPaused = false
+        )
+
+        val updatedMembers = currentRoom.members.filterNot { it.deviceId == envelope.senderDeviceId } + memberEntry
+        val nextSeq = roomCtx.sequenceGenerator.incrementAndGet()
+        roomCtx.state = currentRoom.copy(
+            members = updatedMembers,
+            lastSequenceNumber = nextSeq
+        )
+
+        val acceptEnv = createServerSignedEnvelope(
+            room = roomCtx.state,
+            seq = nextSeq,
+            type = RealtimeEventType.JOIN_ACCEPTED,
+            payloadJson = roomCtx.state.toSnapshotJson(includeAccessKey = false).toString()
+        )
+        conn.sendTextFrame(acceptEnv.toJsonString())
+        broadcastSnapshotToRoom(roomCtx)
+    }
+
+    private fun handleExplicitLeave(
+        conn: ClientSessionConnection,
+        roomCtx: HostedRoomContext,
+        deviceId: String
+    ) {
+        val currentRoom = roomCtx.state
+        if (deviceId == currentRoom.hostDeviceId) {
+            // Host leaving closes the room unless host transferred beforehand
+            val closedEnv = createServerSignedEnvelope(
+                room = currentRoom,
+                seq = roomCtx.sequenceGenerator.incrementAndGet(),
+                type = RealtimeEventType.ROOM_CLOSED,
+                payloadJson = JSONObject().put("reason", "Host left and closed the room").toString()
+            )
+            broadcastToRoom(currentRoom.roomId, closedEnv)
+            rooms.remove(currentRoom.roomId)
+        } else {
+            val nextSeq = roomCtx.sequenceGenerator.incrementAndGet()
+            val updatedMembers = currentRoom.members.filterNot { it.deviceId == deviceId }
+            roomCtx.state = currentRoom.copy(
+                members = updatedMembers,
+                lastSequenceNumber = nextSeq
+            )
+            broadcastSnapshotToRoom(roomCtx)
+        }
+        conn.closeConnection(1000, "Left room")
+    }
+
+    private fun handleClientDisconnected(conn: ClientSessionConnection, explicitLeave: Boolean) {
+        val rId = conn.roomId
+        val dId = conn.deviceId
+        if (rId.isBlank() || dId.isBlank()) return
+        val roomCtx = rooms[rId] ?: return
+        synchronized(roomCtx) {
+            val currentRoom = roomCtx.state
+            if (explicitLeave) {
+                val updated = currentRoom.members.filterNot { it.deviceId == dId }
+                roomCtx.state = currentRoom.copy(
+                    members = updated,
+                    lastSequenceNumber = roomCtx.sequenceGenerator.incrementAndGet()
+                )
+            } else {
+                // Mark as RECONNECTING temporarily so reconnection restores state cleanly
+                val stillConnectedElsewhere = clients.any {
+                    it !== conn && it.roomId == rId && it.deviceId == dId && !it.socket.isClosed
+                }
+                if (!stillConnectedElsewhere) {
+                    val updated = currentRoom.members.map { m ->
+                        if (m.deviceId == dId) m.copy(status = SyncConnectionStatus.RECONNECTING) else m
+                    }
+                    roomCtx.state = currentRoom.copy(
+                        members = updated,
+                        lastSequenceNumber = roomCtx.sequenceGenerator.incrementAndGet()
+                    )
+                }
+            }
+            broadcastSnapshotToRoom(roomCtx)
+        }
+    }
+
+    private fun updateMemberHeartbeat(roomCtx: HostedRoomContext, deviceId: String, now: Long) {
+        val currentRoom = roomCtx.state
+        val updatedMembers = currentRoom.members.map { m ->
+            if (m.deviceId == deviceId) {
+                val nextStatus = if (m.isFollowingPaused) SyncConnectionStatus.PAUSED_FOLLOWING else SyncConnectionStatus.SYNCED
+                m.copy(lastHeartbeatMillis = now, status = nextStatus)
+            } else {
+                m
+            }
+        }
+        roomCtx.state = currentRoom.copy(members = updatedMembers)
+    }
+
+    private fun performRoomAndHeartbeatMaintenance() {
+        val now = System.currentTimeMillis()
+        val iterator = rooms.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            val roomCtx = entry.value
+            synchronized(roomCtx) {
+                val room = roomCtx.state
+                if (now > room.expiresAtMillis) {
+                    val expiredEnv = createServerSignedEnvelope(
+                        room = room,
+                        seq = roomCtx.sequenceGenerator.incrementAndGet(),
+                        type = RealtimeEventType.ROOM_CLOSED,
+                        payloadJson = JSONObject().put("reason", "Room expired due to inactivity").toString()
+                    )
+                    broadcastToRoom(room.roomId, expiredEnv)
+                    iterator.remove()
+                } else {
+                    var changed = false
+                    val cleanedMembers = room.members.mapNotNull { m ->
+                        val silenceMs = now - m.lastHeartbeatMillis
+                        when {
+                            silenceMs > 60_000L && m.deviceId != room.hostDeviceId -> {
+                                changed = true
+                                null
+                            }
+                            silenceMs > 20_000L && m.status != SyncConnectionStatus.RECONNECTING -> {
+                                changed = true
+                                m.copy(status = SyncConnectionStatus.RECONNECTING)
+                            }
+                            else -> m
+                        }
+                    }
+                    if (changed) {
+                        roomCtx.state = room.copy(
+                            members = cleanedMembers,
+                            lastSequenceNumber = roomCtx.sequenceGenerator.incrementAndGet()
+                        )
+                        broadcastSnapshotToRoom(roomCtx)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun broadcastSnapshotToRoom(roomCtx: HostedRoomContext) {
+        val room = roomCtx.state
+        val snapshotEnv = createServerSignedEnvelope(
+            room = room,
+            seq = room.lastSequenceNumber,
+            type = RealtimeEventType.ROOM_STATE_SNAPSHOT,
+            payloadJson = room.toSnapshotJson(includeAccessKey = false).toString()
+        )
+        broadcastToRoom(room.roomId, snapshotEnv)
+    }
+
+    private fun broadcastToRoom(roomId: String, envelope: RealtimeEventEnvelope) {
+        val json = envelope.toJsonString()
+        for (client in clients) {
+            if (client.authenticated && client.roomId.equals(roomId, ignoreCase = true)) {
+                client.sendTextFrame(json)
+            }
+        }
+    }
+
+    private fun sendRejectEvent(conn: ClientSessionConnection, roomId: String, errorCode: String, message: String) {
+        val payload = JSONObject()
+            .put("errorCode", errorCode)
+            .put("message", message)
+            .toString()
+        val env = RealtimeEventEnvelope(
+            eventId = UUID.randomUUID().toString(),
+            roomId = roomId,
+            type = RealtimeEventType.JOIN_REJECTED,
+            senderDeviceId = "server",
+            senderRole = RoomRole.HOST,
+            authorityEpoch = 1L,
+            sequenceNumber = 0L,
+            timestampMillis = System.currentTimeMillis(),
+            payloadJson = payload,
+            hmacSignature = "server_reject"
+        )
+        conn.sendTextFrame(env.toJsonString())
+    }
+
+    private fun sendErrorEvent(conn: ClientSessionConnection, roomId: String, errorCode: String, message: String) {
+        sendRejectEvent(conn, roomId, errorCode, message)
+    }
+
+    private fun createServerSignedEnvelope(
+        room: NyxoraConnectRoomState,
+        seq: Long,
+        type: RealtimeEventType,
+        senderId: String = room.hostDeviceId,
+        senderRole: RoomRole = RoomRole.HOST,
+        payloadJson: String
+    ): RealtimeEventEnvelope {
+        val eventId = UUID.randomUUID().toString()
+        val now = System.currentTimeMillis()
+        val sig = NyxoraConnectSecurity.computeEventHmac(
+            accessKey = room.accessKey,
+            roomId = room.roomId,
+            eventId = eventId,
+            type = type.name,
+            senderDeviceId = senderId,
+            authorityEpoch = room.authorityEpoch,
+            sequenceNumber = seq,
+            timestampMillis = now,
+            payloadJson = payloadJson
+        )
+        return RealtimeEventEnvelope(
+            eventId = eventId,
+            roomId = room.roomId,
+            type = type,
+            senderDeviceId = senderId,
+            senderRole = senderRole,
+            authorityEpoch = room.authorityEpoch,
+            sequenceNumber = seq,
+            timestampMillis = now,
+            payloadJson = payloadJson,
+            hmacSignature = sig
+        )
+    }
+
+    // --- RFC 6455 HTTP UPGRADE & FRAME CODEC ---
+
+    private data class WebSocketFrame(val opcode: Int, val payload: ByteArray)
+
+    private fun performWebSocketHandshake(input: InputStream, output: OutputStream): Boolean {
+        val headers = mutableMapOf<String, String>()
+        val lineBuffer = ByteArrayOutputStream()
+        var requestLineRead = false
+        while (true) {
+            val b = input.read()
+            if (b == -1) return false
+            if (b == '\n'.code) {
+                val line = String(lineBuffer.toByteArray(), Charsets.US_ASCII).trimEnd('\r')
+                lineBuffer.reset()
+                if (!requestLineRead) {
+                    if (!line.startsWith("GET ", ignoreCase = true)) return false
+                    requestLineRead = true
+                } else if (line.isEmpty()) {
+                    break
+                } else {
+                    val colonIdx = line.indexOf(':')
+                    if (colonIdx > 0) {
+                        val key = line.substring(0, colonIdx).trim().lowercase()
+                        val value = line.substring(colonIdx + 1).trim()
+                        headers[key] = value
+                    }
+                }
+            } else {
+                lineBuffer.write(b)
+                if (lineBuffer.size() > 4096) return false
+            }
+        }
+
+        val wsKey = headers["sec-websocket-key"] ?: return false
+        val acceptConcat = wsKey + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+        val sha1 = MessageDigest.getInstance("SHA-1").digest(acceptConcat.toByteArray(Charsets.US_ASCII))
+        val acceptKey = Base64.getEncoder().encodeToString(sha1)
+
+        val response = buildString {
+            append("HTTP/1.1 101 Switching Protocols\r\n")
+            append("Upgrade: websocket\r\n")
+            append("Connection: Upgrade\r\n")
+            append("Sec-WebSocket-Accept: $acceptKey\r\n")
+            append("\r\n")
+        }
+        output.write(response.toByteArray(Charsets.US_ASCII))
+        output.flush()
+        return true
+    }
+
+    private fun readWebSocketFrame(input: InputStream): WebSocketFrame? {
+        val b0 = input.read()
+        if (b0 == -1) return null
+        val b1 = input.read()
+        if (b1 == -1) return null
+
+        val opcode = b0 and 0x0F
+        val isMasked = (b1 and 0x80) != 0
+        var payloadLen = (b1 and 0x7F).toLong()
+
+        if (payloadLen == 126L) {
+            val lenBytes = readExactBytes(input, 2) ?: return null
+            payloadLen = (((lenBytes[0].toInt() and 0xFF) shl 8) or (lenBytes[1].toInt() and 0xFF)).toLong()
+        } else if (payloadLen == 127L) {
+            val lenBytes = readExactBytes(input, 8) ?: return null
+            var length = 0L
+            for (i in 0 until 8) {
+                length = (length shl 8) or (lenBytes[i].toLong() and 0xFFL)
+            }
+            payloadLen = length
+        }
+
+        if (payloadLen < 0L || payloadLen > 16384L) {
+            return null
+        }
+
+        val maskKey = if (isMasked) {
+            readExactBytes(input, 4) ?: return null
+        } else {
+            null
+        }
+
+        val payload = readExactBytes(input, payloadLen.toInt()) ?: return null
+        if (maskKey != null) {
+            for (i in payload.indices) {
+                payload[i] = (payload[i].toInt() xor maskKey[i % 4].toInt()).toByte()
+            }
+        }
+        return WebSocketFrame(opcode = opcode, payload = payload)
+    }
+
+    private fun writeWebSocketFrame(output: OutputStream, opcode: Int, payload: ByteArray) {
+        val firstByte = 0x80 or (opcode and 0x0F)
+        output.write(firstByte)
+        val size = payload.size
+        when {
+            size <= 125 -> {
+                output.write(size)
+            }
+            size <= 65535 -> {
+                output.write(126)
+                output.write((size shr 8) and 0xFF)
+                output.write(size and 0xFF)
+            }
+            else -> {
+                output.write(127)
+                val longLen = size.toLong()
+                for (shift in 56 downTo 0 step 8) {
+                    output.write(((longLen ushr shift) and 0xFFL).toInt())
+                }
+            }
+        }
+        output.write(payload)
+    }
+
+    private fun readExactBytes(input: InputStream, count: Int): ByteArray? {
+        val buf = ByteArray(count)
+        var offset = 0
+        while (offset < count) {
+            val read = input.read(buf, offset, count - offset)
+            if (read == -1) return null
+            offset += read
+        }
+        return buf
+    }
+}

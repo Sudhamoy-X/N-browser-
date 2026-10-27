@@ -49,6 +49,15 @@
                 <data android:scheme="http" />
                 <data android:scheme="https" />
             </intent-filter>
+            <!-- NYXORA Connect Room Invitation Deep Link -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="nyxora"
+                    android:host="connect" />
+            </intent-filter>
         </activity>
 
         <provider

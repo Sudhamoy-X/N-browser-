@@ -1,7 +1,16 @@
 package com.example
 
 import android.content.Context
+import android.content.pm.ActivityInfo
+import android.content.res.Configuration
 import android.net.ConnectivityManager
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
+import android.webkit.WebChromeClient
+import android.webkit.WebView
+import android.widget.FrameLayout
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -9,9 +18,12 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performImeAction
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeDown
+import androidx.compose.ui.test.swipeLeft
+import androidx.compose.ui.test.swipeRight
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.local.NyxoraLocalDatabase
 import com.example.data.local.NyxoraSettingsDataStore
@@ -30,6 +42,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -129,20 +142,35 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `search engine defaults to Google and persists user selection in DataStore`() = runTest {
+    fun `search engine defaults to Google and persists user selection and language in DataStore`() = runTest {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val store = NyxoraSettingsDataStore(context)
 
         val initial = store.settingsFlow.first()
         assertEquals(SearchEngine.GOOGLE, initial.searchEngine)
+        assertEquals("System Default", initial.preferredLanguage)
 
-        // Switch to DuckDuckGo and verify persistence
-        store.updateSettings { it.copy(searchEngine = SearchEngine.DUCKDUCKGO) }
-        assertEquals(SearchEngine.DUCKDUCKGO, store.settingsFlow.first().searchEngine)
+        // Switch to DuckDuckGo and Español and verify persistence
+        store.updateSettings {
+            it.copy(
+                searchEngine = SearchEngine.DUCKDUCKGO,
+                preferredLanguage = "Español"
+            )
+        }
+        val updated = store.settingsFlow.first()
+        assertEquals(SearchEngine.DUCKDUCKGO, updated.searchEngine)
+        assertEquals("Español", updated.preferredLanguage)
 
-        // Switch back to Google and verify persistence
-        store.updateSettings { it.copy(searchEngine = SearchEngine.GOOGLE) }
-        assertEquals(SearchEngine.GOOGLE, store.settingsFlow.first().searchEngine)
+        // Switch back to Google and System Default and verify persistence
+        store.updateSettings {
+            it.copy(
+                searchEngine = SearchEngine.GOOGLE,
+                preferredLanguage = "System Default"
+            )
+        }
+        val restored = store.settingsFlow.first()
+        assertEquals(SearchEngine.GOOGLE, restored.searchEngine)
+        assertEquals("System Default", restored.preferredLanguage)
     }
 
     @Test
@@ -296,4 +324,1173 @@ class ExampleRobolectricTest {
 
         composeTestRule.onNodeWithTag("nyxora_webview_instance").assertIsDisplayed()
     }
+
+    @Test
+    fun `opening splash animation displays Crafted by Sudhamoy and transitions cleanly`() {
+        // Pause clock during initial splash window (< 200ms) to inspect the opening animation
+        composeTestRule.mainClock.autoAdvance = false
+        composeTestRule.mainClock.advanceTimeBy(80L)
+
+        assertTrue(
+            composeTestRule.onAllNodesWithText("Browse Beyond Ordinary.", substring = false)
+                .fetchSemanticsNodes().isNotEmpty()
+        )
+        assertTrue(
+            composeTestRule.onAllNodesWithText("Crafted by Sudhamoy", substring = false)
+                .fetchSemanticsNodes().isNotEmpty()
+        )
+
+        composeTestRule.mainClock.autoAdvance = true
+        composeTestRule.mainClock.advanceTimeBy(350L)
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("nyxora_main_browser_screen").assertIsDisplayed()
+    }
+
+    @Test
+    fun `NYXORA Connect room UI creates room and Settings About displays Crafted by Sudhamoy`() {
+        composeTestRule.mainClock.advanceTimeBy(350L)
+        composeTestRule.waitForIdle()
+
+        // 1. Open Settings from the 8-action bottom menu -> Advanced -> NYXORA Connect
+        composeTestRule.onNodeWithTag("toolbar_overflow_menu_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("nyxora_bottom_menu_sheet").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("menu_item_settings").performClick()
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("settings_category_advanced").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("settings_open_connect_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("nyxora_connect_sheet").assertIsDisplayed()
+
+        // 2. Create a room from the NYXORA Connect sheet
+        composeTestRule.onNodeWithTag("connect_create_room_button").performClick()
+        composeTestRule.mainClock.advanceTimeBy(400L)
+        composeTestRule.waitForIdle()
+
+        // Verify Room ID display and Leave/Close button are shown
+        composeTestRule.onNodeWithTag("connect_active_room_id").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_header_leave_button").assertIsDisplayed()
+
+        // Close the room and dismiss the Connect sheet
+        composeTestRule.onNodeWithTag("connect_header_leave_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("connect_back_button").performClick()
+        composeTestRule.waitForIdle()
+
+        // 3. Open bottom menu -> Settings -> About NYXORA (and search for "Sudhamoy")
+        composeTestRule.onNodeWithTag("toolbar_overflow_menu_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("menu_item_settings").performClick()
+        composeTestRule.waitForIdle()
+
+        // Verify Settings Home has the 5 required categories
+        composeTestRule.onNodeWithTag("settings_category_general").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("settings_category_customization").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("settings_category_privacy").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("settings_category_advanced").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("settings_category_about").performScrollTo().assertIsDisplayed()
+
+        composeTestRule.onNodeWithTag("settings_search_input").performScrollTo().performTextReplacement("Sudhamoy")
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("about_nyxora_title").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("about_nyxora_tagline").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("about_nyxora_creator_credit").assertIsDisplayed()
+        assertTrue(
+            composeTestRule.onAllNodesWithText("Crafted by Sudhamoy", substring = false)
+                .fetchSemanticsNodes().isNotEmpty()
+        )
+    }
+
+    @Test
+    fun `clean UI upgrade verifies 8-item bottom menu sheet 5-category settings general site settings and tab switcher`() {
+        composeTestRule.mainClock.advanceTimeBy(350L)
+        composeTestRule.waitForIdle()
+        composeTestRule.activity.activeBrowserViewModel?.closeAllTabs(inPrivateMode = false)
+        composeTestRule.waitForIdle()
+
+        // 1. Open bottom menu and verify all 8 actions are displayed in the 2-row grid
+        composeTestRule.onNodeWithTag("toolbar_overflow_menu_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("nyxora_bottom_menu_sheet").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("menu_item_bookmarks").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("menu_item_history").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("menu_item_downloads").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("menu_item_incognito").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("menu_item_add_bookmark").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("menu_item_desktop_site").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("menu_item_share").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("menu_item_settings").assertIsDisplayed()
+
+        // Verify outside tap on scrim dismisses the bottom menu
+        composeTestRule.onNodeWithTag("bottom_menu_scrim").performClick()
+        composeTestRule.mainClock.advanceTimeBy(250L)
+        composeTestRule.waitForIdle()
+        assertEquals(
+            0,
+            composeTestRule.onAllNodesWithTag("nyxora_bottom_menu_sheet").fetchSemanticsNodes().size
+        )
+
+        // 2. Open Settings -> General -> Site Settings and verify Content, Permissions, and Site Management
+        composeTestRule.onNodeWithTag("toolbar_overflow_menu_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("menu_item_settings").performClick()
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("settings_category_general").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("settings_open_site_settings_button").performClick()
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("nyxora_site_settings_sheet").assertIsDisplayed()
+        assertTrue(
+            composeTestRule.onAllNodesWithText("Content", substring = false).fetchSemanticsNodes().isNotEmpty()
+        )
+        assertTrue(
+            composeTestRule.onAllNodesWithText("Permissions", substring = false).fetchSemanticsNodes().isNotEmpty()
+        )
+        composeTestRule.onNodeWithTag("site_settings_back_button").performClick()
+        composeTestRule.waitForIdle()
+
+        // 3. Open Tab Switcher, create a new tab, switch to Incognito, and close switcher
+        composeTestRule.onNodeWithTag("toolbar_tabs_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("nyxora_tab_switcher_sheet").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("tab_switcher_normal_mode").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("tab_switcher_private_mode").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("new_tab_button").performClick()
+        composeTestRule.waitForIdle()
+
+        // Active tab count should now be 2
+        assertTrue(
+            composeTestRule.onAllNodesWithText("2", substring = false, useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty()
+        )
+        composeTestRule.activity.activeBrowserViewModel?.closeAllTabs(inPrivateMode = false)
+        composeTestRule.waitForIdle()
+    }
+
+    @Test
+    fun `fullscreen video playback in portrait and landscape hides toolbars and system bars preserves orientation and playback and exits via Back and player control`() {
+        composeTestRule.mainClock.advanceTimeBy(350L)
+        composeTestRule.waitForIdle()
+
+        // Navigate to a video page so the real Android WebView is mounted
+        composeTestRule.onNodeWithTag("main_address_bar_input").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("main_address_bar_input").performTextReplacement("https://example.com/watch")
+        composeTestRule.onNodeWithTag("main_address_bar_input").performImeAction()
+        composeTestRule.mainClock.advanceTimeBy(350L)
+        composeTestRule.waitForIdle()
+
+        // Verify browser toolbars are initially visible before fullscreen
+        composeTestRule.onNodeWithTag("nyxora_top_address_bar").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("nyxora_bottom_tab_bar").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("nyxora_webview_instance").assertIsDisplayed()
+
+        val activity = composeTestRule.activity
+        val initialWebView = findFirstWebView(activity.window.decorView)
+        assertNotNull("Expected live WebView instance mounted in view hierarchy", initialWebView)
+        val chromeClient = initialWebView!!.webChromeClient
+        assertNotNull("Expected WebChromeClient configured on WebView", chromeClient)
+
+        // Simulate playback state on the WebView before entering fullscreen
+        initialWebView.scrollTo(0, 240)
+        val initialOrientation = activity.requestedOrientation
+        assertEquals(Configuration.ORIENTATION_PORTRAIT, activity.resources.configuration.orientation)
+
+        // 1. Enter fullscreen in PORTRAIT mode
+        var portraitCallbackHiddenCount = 0
+        val portraitVideoView = FrameLayout(activity)
+        composeTestRule.runOnUiThread {
+            chromeClient!!.onShowCustomView(
+                portraitVideoView,
+                WebChromeClient.CustomViewCallback { portraitCallbackHiddenCount++ }
+            )
+        }
+        composeTestRule.waitForIdle()
+
+        // 2. Verify portrait mode remains portrait (does NOT force landscape!)
+        assertEquals(
+            "Portrait fullscreen must remain in portrait orientation and never force landscape",
+            ActivityInfo.SCREEN_ORIENTATION_PORTRAIT,
+            activity.requestedOrientation
+        )
+
+        // 3. Verify both browser toolbars completely disappear and fullscreen overlay fills screen
+        assertEquals(
+            0,
+            composeTestRule.onAllNodesWithTag("nyxora_top_address_bar").fetchSemanticsNodes().size
+        )
+        assertEquals(
+            0,
+            composeTestRule.onAllNodesWithTag("nyxora_bottom_tab_bar").fetchSemanticsNodes().size
+        )
+        composeTestRule.onNodeWithTag("fullscreen_video_overlay").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("fullscreen_custom_view_container").assertIsDisplayed()
+        assertNotNull("Fullscreen custom view must be attached to container", portraitVideoView.parent)
+
+        // 4. Verify Android system bars are hidden in immersive fullscreen mode
+        @Suppress("DEPRECATION")
+        val fullscreenWindowFlags = activity.window.attributes.flags
+        @Suppress("DEPRECATION")
+        assertTrue(
+            "Expected FLAG_FULLSCREEN set on window during fullscreen playback",
+            (fullscreenWindowFlags and WindowManager.LayoutParams.FLAG_FULLSCREEN) != 0
+        )
+        @Suppress("DEPRECATION")
+        val fullscreenSysUi = activity.window.decorView.systemUiVisibility
+        @Suppress("DEPRECATION")
+        assertTrue(
+            "Expected immersive fullscreen system UI flags set",
+            (fullscreenSysUi and View.SYSTEM_UI_FLAG_FULLSCREEN) != 0 &&
+                (fullscreenSysUi and View.SYSTEM_UI_FLAG_HIDE_NAVIGATION) != 0 &&
+                (fullscreenSysUi and View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY) != 0
+        )
+
+        // 5. Verify duplicate fullscreen view prevention if onShowCustomView is called again
+        var replacementCallbackHiddenCount = 0
+        val secondPortraitVideoView = FrameLayout(activity)
+        composeTestRule.runOnUiThread {
+            chromeClient!!.onShowCustomView(
+                secondPortraitVideoView,
+                WebChromeClient.CustomViewCallback { replacementCallbackHiddenCount++ }
+            )
+        }
+        composeTestRule.waitForIdle()
+        assertEquals("Previous custom view callback must be notified when replaced", 1, portraitCallbackHiddenCount)
+        assertNull("Previous custom view must be detached when replaced", portraitVideoView.parent)
+        assertNotNull("New custom view must be attached", secondPortraitVideoView.parent)
+        assertEquals("Container must only have 1 child view", 1, (secondPortraitVideoView.parent as ViewGroup).childCount)
+
+        // 5b. Verify upgraded minimal monochrome video toolbar has ONLY the 4 required controls
+        composeTestRule.onNodeWithTag("fullscreen_video_toolbar").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("fullscreen_rotate_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("fullscreen_aspect_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("fullscreen_zoom_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("fullscreen_exit_button").assertIsDisplayed()
+        assertEquals(
+            "Redundant PiP control must not be present in fullscreen video toolbar",
+            0,
+            composeTestRule.onAllNodesWithTag("fullscreen_pip_button").fetchSemanticsNodes().size
+        )
+
+        // Test Fit Screen / Fill Screen toggle and Video Zoom on the fullscreen custom view
+        assertEquals(1.0f, secondPortraitVideoView.scaleX, 0.01f)
+        composeTestRule.onNodeWithTag("fullscreen_aspect_button").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals("Fill Screen mode should scale custom view to 1.18f", 1.18f, secondPortraitVideoView.scaleX, 0.01f)
+        assertEquals("Fill Screen mode should scale custom view to 1.18f", 1.18f, secondPortraitVideoView.scaleY, 0.01f)
+
+        // Reset back to Fit Screen (1.0f) and verify Video Zoom steps up to 1000% (10.0f) and resets cleanly to 100% (1.0f)
+        composeTestRule.onNodeWithTag("fullscreen_aspect_button").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals(1.0f, secondPortraitVideoView.scaleX, 0.01f)
+
+        val expectedZoomSteps = listOf(1.15f, 1.30f, 1.50f, 2.0f, 3.0f, 5.0f, 7.5f, 10.0f)
+        for (expectedScale in expectedZoomSteps) {
+            composeTestRule.onNodeWithTag("fullscreen_zoom_button").performClick()
+            composeTestRule.waitForIdle()
+            assertEquals("Video zoom should step cleanly up to 1000% (10.0f)", expectedScale, secondPortraitVideoView.scaleX, 0.01f)
+            assertEquals("Video zoom should preserve aspect ratio without stretching", expectedScale, secondPortraitVideoView.scaleY, 0.01f)
+        }
+
+        // Verify 1-tap Reset Zoom button returns immediately from 1000% (10.0f) to 100% (1.0f)
+        composeTestRule.onNodeWithTag("fullscreen_zoom_reset_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("fullscreen_zoom_reset_button").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals("Reset zoom button should restore 100% (1.0f) scale", 1.0f, secondPortraitVideoView.scaleX, 0.01f)
+        assertEquals(0f, secondPortraitVideoView.translationX, 0.01f)
+        assertEquals(0f, secondPortraitVideoView.translationY, 0.01f)
+
+        // Test Auto-Hide after 2.5 seconds of inactivity and Tap-to-Show on the video overlay
+        composeTestRule.mainClock.advanceTimeBy(2600L)
+        composeTestRule.waitForIdle()
+        assertEquals(
+            "Video toolbar should auto-hide after 2.5 seconds without interaction",
+            0,
+            composeTestRule.onAllNodesWithTag("fullscreen_video_toolbar").fetchSemanticsNodes().size
+        )
+
+        // Tap the fullscreen video area to reveal the toolbar again
+        composeTestRule.onNodeWithTag("fullscreen_video_overlay").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("fullscreen_video_toolbar").assertIsDisplayed()
+
+        // 6. Exit fullscreen using Android Back button
+        composeTestRule.runOnUiThread {
+            activity.onBackPressedDispatcher.onBackPressed()
+        }
+        composeTestRule.waitForIdle()
+
+        // Verify original browser toolbars, system UI, and previous orientation return cleanly
+        assertEquals(1, replacementCallbackHiddenCount)
+        assertNull("Fullscreen custom view must be detached on exit", secondPortraitVideoView.parent)
+        assertEquals(
+            0,
+            composeTestRule.onAllNodesWithTag("fullscreen_video_overlay").fetchSemanticsNodes().size
+        )
+        composeTestRule.onNodeWithTag("nyxora_top_address_bar").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("nyxora_bottom_tab_bar").assertIsDisplayed()
+        assertEquals("Previous orientation must be restored after exit", initialOrientation, activity.requestedOrientation)
+        @Suppress("DEPRECATION")
+        assertEquals(
+            "FLAG_FULLSCREEN must be cleared after exiting fullscreen",
+            0,
+            activity.window.attributes.flags and WindowManager.LayoutParams.FLAG_FULLSCREEN
+        )
+
+        // Verify WebView instance and state were preserved without reloading or resetting
+        val webViewAfterPortraitExit = findFirstWebView(activity.window.decorView)
+        assertSame("WebView instance must not be recreated on fullscreen exit", initialWebView, webViewAfterPortraitExit)
+        assertEquals("WebView scroll/playback state must be preserved", 240, webViewAfterPortraitExit!!.scrollY)
+
+        // 7. Enter fullscreen in LANDSCAPE mode and exit using the player's exit control (onHideCustomView)
+        composeTestRule.runOnUiThread {
+            activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        }
+        composeTestRule.waitForIdle()
+
+        var landscapeCallbackHiddenCount = 0
+        val landscapeVideoView = FrameLayout(activity)
+        composeTestRule.runOnUiThread {
+            chromeClient!!.onShowCustomView(
+                landscapeVideoView,
+                WebChromeClient.CustomViewCallback { landscapeCallbackHiddenCount++ }
+            )
+        }
+        composeTestRule.waitForIdle()
+
+        // Verify landscape mode remains landscape and toolbars disappear
+        assertEquals(
+            "Landscape mode must remain landscape in fullscreen",
+            ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE,
+            activity.requestedOrientation
+        )
+        assertEquals(
+            0,
+            composeTestRule.onAllNodesWithTag("nyxora_top_address_bar").fetchSemanticsNodes().size
+        )
+        assertEquals(
+            0,
+            composeTestRule.onAllNodesWithTag("nyxora_bottom_tab_bar").fetchSemanticsNodes().size
+        )
+        composeTestRule.onNodeWithTag("fullscreen_video_overlay").assertIsDisplayed()
+
+        // Exit fullscreen using the player's native exit control (WebChromeClient.onHideCustomView)
+        composeTestRule.runOnUiThread {
+            chromeClient!!.onHideCustomView()
+        }
+        composeTestRule.waitForIdle()
+
+        assertEquals(1, landscapeCallbackHiddenCount)
+        assertNull(landscapeVideoView.parent)
+        assertEquals(
+            0,
+            composeTestRule.onAllNodesWithTag("fullscreen_video_overlay").fetchSemanticsNodes().size
+        )
+        composeTestRule.onNodeWithTag("nyxora_top_address_bar").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("nyxora_bottom_tab_bar").assertIsDisplayed()
+        assertEquals(
+            "Previous landscape orientation must be restored on exit",
+            ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE,
+            activity.requestedOrientation
+        )
+        assertSame(initialWebView, findFirstWebView(activity.window.decorView))
+    }
+
+    @Test
+    fun `closing final incognito tab returns to normal mode and global settings propagate to open tabs`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = NyxoraLocalDatabase.createInMemoryForTest(context)
+        val settingsStore = NyxoraSettingsDataStore(context)
+        val dlEngine = com.example.domain.browser.DownloadEngine(
+            context = context,
+            downloadDao = db.downloadDao(),
+            scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob())
+        )
+        val viewModel = com.example.ui.viewmodel.NyxoraBrowserViewModel(
+            bookmarkDao = db.bookmarkDao(),
+            historyDao = db.historyDao(),
+            savedTabDao = db.savedTabDao(),
+            siteSettingDao = db.siteSettingDao(),
+            downloadDao = db.downloadDao(),
+            filterRuleDao = db.filterRuleDao(),
+            settingsDataStore = settingsStore,
+            downloadEngine = dlEngine
+        )
+
+        try {
+            // 1. Create a private tab and verify browser switches to Private Mode
+            val privateTabId = viewModel.createNewTab(
+                url = "https://example.org",
+                inPrivateMode = true,
+                inBackground = false
+            )
+            assertTrue("Expected browser in private mode after opening foreground private tab", viewModel.isPrivateMode.value)
+            assertEquals(1, viewModel.privateTabs.value.size)
+
+            // 2. Close the final private tab and verify browser cleanly exits Private Mode back to Normal Mode
+            viewModel.closeTab(privateTabId)
+            assertEquals(0, viewModel.privateTabs.value.size)
+            assertFalse("Closing the last private tab must exit private mode back to normal mode", viewModel.isPrivateMode.value)
+
+            // 3. Verify SPA history update (doUpdateVisitedHistory -> onWebHistoryUpdated) syncs URL and canGoBack/canGoForward
+            val normalTabId = viewModel.normalTabs.value.first().id
+            viewModel.onWebHistoryUpdated(
+                tabId = normalTabId,
+                url = "https://example.com/spa-route",
+                canGoBack = true,
+                canGoForward = false
+            )
+            val updatedNormalTab = viewModel.normalTabs.value.first { it.id == normalTabId }
+            assertEquals("https://example.com/spa-route", updatedNormalTab.url)
+            assertTrue(updatedNormalTab.canGoBack)
+            assertFalse(updatedNormalTab.canGoForward)
+
+            // 4. Verify changing globalTextZoom and defaultDesktopSite immediately updates open tabs without per-site overrides
+            viewModel.updateSettings {
+                it.copy(
+                    globalTextZoom = 135,
+                    defaultDesktopSite = true
+                )
+            }
+            val propagatedTab = viewModel.normalTabs.value.first { it.id == normalTabId }
+            assertEquals(135, propagatedTab.textZoom)
+            assertTrue(propagatedTab.desktopMode)
+
+            // Restore defaults
+            viewModel.updateSettings {
+                it.copy(
+                    globalTextZoom = 100,
+                    defaultDesktopSite = false
+                )
+            }
+            composeTestRule.waitForIdle()
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun `horizontal edge swipe gestures navigate backward and forward with visual indicator and respect settings toggle`() {
+        composeTestRule.mainClock.advanceTimeBy(350L)
+        composeTestRule.waitForIdle()
+
+        // Verify left and right edge-swipe zones are active by default
+        composeTestRule.onNodeWithTag("edge_swipe_left_zone").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("edge_swipe_right_zone").assertIsDisplayed()
+
+        val vm = composeTestRule.activity.activeBrowserViewModel!!
+
+        // 1. Navigate from Homepage (nyxora://home) -> https://example.com -> https://kotlinlang.org
+        composeTestRule.onNodeWithTag("main_address_bar_input").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("main_address_bar_input").performTextReplacement("https://example.com")
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("main_address_bar_input").performImeAction()
+        composeTestRule.mainClock.advanceTimeBy(250L)
+        composeTestRule.waitForIdle()
+        assertEquals("https://example.com", vm.activeTab.value.url)
+        composeTestRule.onNodeWithTag("nyxora_webview_instance").assertIsDisplayed()
+
+        composeTestRule.onNodeWithTag("main_address_bar_input").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("main_address_bar_input").performTextReplacement("https://kotlinlang.org")
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("main_address_bar_input").performImeAction()
+        composeTestRule.mainClock.advanceTimeBy(250L)
+        composeTestRule.waitForIdle()
+        assertEquals("https://kotlinlang.org", vm.activeTab.value.url)
+
+        // 2. Verify horizontal drag starting in the center of the screen does NOT trigger edge-swipe back
+        composeTestRule.onNodeWithTag("nyxora_central_browser_container").performTouchInput {
+            swipeRight(startX = centerX, endX = right - 20f)
+        }
+        composeTestRule.waitForIdle()
+        assertEquals(
+            "Center-screen horizontal drag must not trigger edge-swipe navigation",
+            "https://kotlinlang.org",
+            vm.activeTab.value.url
+        )
+
+        // 3. Begin a left-edge inward swipe, verify visual indicator appears mid-gesture, then release to navigate Back
+        composeTestRule.onNodeWithTag("nyxora_central_browser_container").performTouchInput {
+            down(Offset(10f, centerY))
+            moveBy(Offset(40f, 0f))
+            moveBy(Offset(140f, 0f))
+        }
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("nyxora_edge_swipe_indicator").assertIsDisplayed()
+
+        composeTestRule.onNodeWithTag("nyxora_central_browser_container").performTouchInput {
+            up()
+        }
+        composeTestRule.mainClock.advanceTimeBy(200L)
+        composeTestRule.waitForIdle()
+
+        // Should have navigated Back from kotlinlang.org to example.com
+        assertEquals(
+            "Left-edge swipe must navigate back from kotlinlang.org to example.com",
+            "https://example.com",
+            vm.activeTab.value.url
+        )
+
+        // 4. Swipe inward from left edge again to navigate Back from example.com to Homepage
+        composeTestRule.onNodeWithTag("nyxora_central_browser_container").performTouchInput {
+            swipeRight(startX = 10f, endX = 320f)
+        }
+        composeTestRule.mainClock.advanceTimeBy(200L)
+        composeTestRule.waitForIdle()
+        assertEquals("nyxora://home", vm.activeTab.value.url)
+        composeTestRule.onNodeWithTag("home_logo_header").assertIsDisplayed()
+
+        // 5. Swipe inward from right edge while on Homepage to navigate Forward back to example.com
+        composeTestRule.onNodeWithTag("nyxora_central_browser_container").performTouchInput {
+            swipeLeft(startX = right - 10f, endX = right - 320f)
+        }
+        composeTestRule.mainClock.advanceTimeBy(200L)
+        composeTestRule.waitForIdle()
+        assertEquals(
+            "Right-edge swipe must navigate forward from Homepage to example.com",
+            "https://example.com",
+            vm.activeTab.value.url
+        )
+
+        // 6. Swipe inward from right edge again to navigate Forward to kotlinlang.org
+        composeTestRule.onNodeWithTag("nyxora_central_browser_container").performTouchInput {
+            swipeLeft(startX = right - 10f, endX = right - 320f)
+        }
+        composeTestRule.mainClock.advanceTimeBy(200L)
+        composeTestRule.waitForIdle()
+        assertEquals(
+            "Right-edge swipe must navigate forward from example.com to kotlinlang.org",
+            "https://kotlinlang.org",
+            vm.activeTab.value.url
+        )
+
+        // 7. Disable Edge Swipe Back & Forward in Settings -> Advanced and verify edge swipe is disabled
+        composeTestRule.onNodeWithTag("toolbar_overflow_menu_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("menu_item_settings").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("settings_category_advanced").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("setting_edge_swipe_toggle").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("settings_back_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("settings_back_button").performClick()
+        composeTestRule.waitForIdle()
+
+        assertEquals(
+            0,
+            composeTestRule.onAllNodesWithTag("edge_swipe_left_zone").fetchSemanticsNodes().size
+        )
+        composeTestRule.onNodeWithTag("nyxora_central_browser_container").performTouchInput {
+            swipeRight(startX = 10f, endX = 320f)
+        }
+        composeTestRule.waitForIdle()
+        assertEquals(
+            "Left-edge swipe must be ignored when Edge Swipe Back & Forward is disabled",
+            "https://kotlinlang.org",
+            vm.activeTab.value.url
+        )
+        vm.updateSettings { it.copy(edgeSwipeBackForward = true) }
+        vm.closeAllTabs(inPrivateMode = false)
+        composeTestRule.waitForIdle()
+    }
+
+    @Test
+    fun `multi-tab data structure and ViewModel logic support creating switching cycling reordering duplicating closing and restoring tabs`() {
+        composeTestRule.mainClock.advanceTimeBy(350L)
+        composeTestRule.waitForIdle()
+
+        val vm = composeTestRule.activity.activeBrowserViewModel!!
+        vm.closeAllTabs(inPrivateMode = false)
+        composeTestRule.waitForIdle()
+
+        // 1. Verify initial single-tab state in MultiTabState
+        val initialState = vm.multiTabState.value
+        assertEquals(1, initialState.tabCount)
+        assertEquals(0, initialState.activeTabIndex)
+        assertEquals("nyxora://home", initialState.activeTab.url)
+        val firstTabId = initialState.activeTabId
+
+        // 2. Create two new foreground tabs and one background tab
+        val secondTabId = vm.createNewTab(
+            url = "https://kotlinlang.org",
+            inPrivateMode = false,
+            inBackground = false,
+            groupName = "Research"
+        )
+        assertEquals(2, vm.multiTabState.value.tabCount)
+        assertEquals(secondTabId, vm.activeTab.value.id)
+        assertEquals(1, vm.multiTabState.value.activeTabIndex)
+        assertEquals("https://kotlinlang.org", vm.activeTab.value.url)
+
+        val thirdTabId = vm.createNewTab(
+            url = "https://developer.android.com",
+            inPrivateMode = false,
+            inBackground = false,
+            groupName = "Work"
+        )
+        assertEquals(3, vm.multiTabState.value.tabCount)
+        assertEquals(thirdTabId, vm.activeTab.value.id)
+        assertEquals(2, vm.multiTabState.value.activeTabIndex)
+
+        val fourthBgTabId = vm.createNewTab(
+            url = "https://wikipedia.org",
+            inPrivateMode = false,
+            inBackground = true,
+            groupName = "Research"
+        )
+        // Background tab should increase tab count to 4 without changing the active tab (thirdTabId)
+        assertEquals(4, vm.multiTabState.value.tabCount)
+        assertEquals(thirdTabId, vm.activeTab.value.id)
+        assertEquals(2, vm.multiTabState.value.activeTabIndex)
+        assertEquals(2, vm.multiTabState.value.getTabsByGroup("Research").size)
+        assertNotNull(vm.multiTabState.value.findTabById(fourthBgTabId))
+
+        // 3. Switch between tabs by ID, by index, and via next/previous cycling
+        assertTrue(vm.switchToTab(firstTabId))
+        assertEquals(firstTabId, vm.activeTab.value.id)
+        assertEquals(0, vm.multiTabState.value.activeTabIndex)
+
+        assertTrue(vm.switchToTabAtIndex(3))
+        assertEquals(fourthBgTabId, vm.activeTab.value.id)
+        assertEquals(3, vm.multiTabState.value.activeTabIndex)
+
+        // Next tab from last index (3) wraps around to index 0 (firstTabId)
+        assertEquals(firstTabId, vm.switchToNextTab())
+        assertEquals(firstTabId, vm.activeTab.value.id)
+
+        // Previous tab from index 0 wraps around to last index (fourthBgTabId)
+        assertEquals(fourthBgTabId, vm.switchToPreviousTab())
+        assertEquals(fourthBgTabId, vm.activeTab.value.id)
+
+        // 4. Reorder tabs while preserving active tab
+        assertTrue(vm.reorderTab(fourthBgTabId, 1))
+        assertEquals(fourthBgTabId, vm.multiTabState.value.currentModeTabs[1].id)
+        assertEquals(fourthBgTabId, vm.activeTab.value.id)
+        assertEquals(1, vm.multiTabState.value.activeTabIndex)
+
+        // 5. Duplicate a tab and verify its properties are copied and it becomes active
+        val duplicatedId = vm.duplicateTab(secondTabId)
+        assertNotNull(duplicatedId)
+        assertEquals(5, vm.multiTabState.value.tabCount)
+        assertEquals(duplicatedId, vm.activeTab.value.id)
+        assertEquals("https://kotlinlang.org", vm.activeTab.value.url)
+        assertEquals("Research", vm.activeTab.value.groupName)
+
+        // 6. Close an inactive tab (firstTabId) and verify the active tab remains duplicatedId
+        assertTrue(vm.closeTab(firstTabId))
+        assertEquals(4, vm.multiTabState.value.tabCount)
+        assertEquals(duplicatedId, vm.activeTab.value.id)
+
+        // 7. Switch to the middle tab and close it; verify adjacent neighbor tab becomes active
+        val currentOrder = vm.multiTabState.value.currentModeTabs.map { it.id }
+        val middleTabId = currentOrder[1]
+        val expectedNeighborId = currentOrder[2]
+        assertTrue(vm.switchToTab(middleTabId))
+        assertTrue(vm.closeTab(middleTabId))
+        assertEquals(3, vm.multiTabState.value.tabCount)
+        assertEquals(expectedNeighborId, vm.activeTab.value.id)
+
+        // 8. Reopen recently closed tab and verify it restores middleTabId's URL & group
+        val reopenedId = vm.reopenRecentlyClosedTab()
+        assertNotNull(reopenedId)
+        assertEquals(4, vm.multiTabState.value.tabCount)
+        assertEquals(reopenedId, vm.activeTab.value.id)
+
+        // 9. Verify UI Tab Switcher reflects all 4 open tabs and supports switching & closing via Compose UI
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("toolbar_tabs_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("nyxora_tab_switcher_sheet").assertIsDisplayed()
+
+        // Close the top-left visible tab card via its close button in the Tab Switcher UI
+        val firstVisibleCardId = vm.multiTabState.value.currentModeTabs.first().id
+        composeTestRule.onNodeWithTag("close_tab_$firstVisibleCardId").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals(3, vm.multiTabState.value.tabCount)
+
+        // Tap the new first visible tab card in the Tab Switcher to switch to it and dismiss the switcher
+        val targetCardId = vm.multiTabState.value.currentModeTabs.first().id
+        composeTestRule.onNodeWithTag("tab_card_$targetCardId").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals(targetCardId, vm.activeTab.value.id)
+
+        // 10. Close all normal tabs and verify a fresh Home tab is automatically created
+        vm.closeAllTabs(inPrivateMode = false)
+        composeTestRule.waitForIdle()
+        assertEquals(1, vm.multiTabState.value.tabCount)
+        assertEquals("nyxora://home", vm.activeTab.value.url)
+    }
+
+    @Test
+    fun `priority bug fixes verify back button hierarchy auto-redirect blocking ad blocker desktop mode 1000 percent video zoom favicon cache and removal of frequently visited`() {
+        composeTestRule.mainClock.advanceTimeBy(350L)
+        composeTestRule.waitForIdle()
+
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val activity = composeTestRule.activity
+        val vm = activity.activeBrowserViewModel!!
+        vm.closeAllTabs(inPrivateMode = false)
+        composeTestRule.waitForIdle()
+
+        // =========================================================================
+        // 1. VERIFY BACK BUTTON & APP EXIT BUG FIX (Strict 5-Step Priority Chain)
+        // =========================================================================
+        // Navigate from Homepage -> https://example.com -> https://kotlinlang.org
+        vm.navigateInActiveTab("https://example.com")
+        composeTestRule.waitForIdle()
+        assertEquals("https://example.com", vm.activeTab.value.url)
+
+        vm.navigateInActiveTab("https://kotlinlang.org")
+        composeTestRule.waitForIdle()
+        assertEquals("https://kotlinlang.org", vm.activeTab.value.url)
+
+        // Open a child tab linked to the current parent tab (e.g., target="_blank" link)
+        val parentTabId = vm.activeTab.value.id
+        val childTabId = vm.createNewTab(
+            url = "https://developer.android.com",
+            inPrivateMode = false,
+            inBackground = false,
+            parentTabId = parentTabId
+        )
+        composeTestRule.waitForIdle()
+        assertEquals(childTabId, vm.activeTab.value.id)
+        assertEquals(parentTabId, vm.activeTab.value.parentTabId)
+
+        // Trigger a redirect warning overlay and open an overlay sheet (History)
+        vm.onAutoRedirectBlocked("https://redirect.popads.net/click")
+        vm.setOverlaySheet(com.example.ui.viewmodel.OverlaySheet.HISTORY)
+        composeTestRule.waitForIdle()
+        assertNotNull(vm.pendingRedirectWarning.value)
+        assertEquals(com.example.ui.viewmodel.OverlaySheet.HISTORY, vm.activeOverlay.value)
+
+        // Priority 1: Fullscreen video exits first when Back is pressed
+        var fullscreenExited = false
+        assertTrue(
+            vm.handleSystemBack(
+                isFullscreenVideo = true,
+                onExitFullscreen = { fullscreenExited = true }
+            )
+        )
+        assertTrue("Priority 1: Fullscreen video must exit first on Back", fullscreenExited)
+        assertNotNull("Redirect warning must remain until next Back press", vm.pendingRedirectWarning.value)
+
+        // Priority 2a: Redirect warning dismisses next when Back is pressed
+        composeTestRule.runOnUiThread {
+            activity.onBackPressedDispatcher.onBackPressed()
+        }
+        composeTestRule.waitForIdle()
+        assertNull("Priority 2a: Redirect warning must be dismissed on Back", vm.pendingRedirectWarning.value)
+        assertFalse("Activity must NOT finish when dismissing redirect warning", activity.isFinishing)
+
+        // Priority 2b: Open overlay sheet (History) dismisses next when Back is pressed
+        composeTestRule.runOnUiThread {
+            activity.onBackPressedDispatcher.onBackPressed()
+        }
+        composeTestRule.waitForIdle()
+        assertEquals(com.example.ui.viewmodel.OverlaySheet.NONE, vm.activeOverlay.value)
+        assertFalse("Activity must NOT finish when dismissing overlay sheet", activity.isFinishing)
+
+        // Priority 4a: Child tab with no earlier webpage history returns to its parent tab on Back
+        composeTestRule.runOnUiThread {
+            activity.onBackPressedDispatcher.onBackPressed()
+        }
+        composeTestRule.waitForIdle()
+        assertEquals("Back from child tab with no history must return to parent tab", parentTabId, vm.activeTab.value.id)
+        assertEquals("https://kotlinlang.org", vm.activeTab.value.url)
+        assertFalse(activity.isFinishing)
+
+        // Priority 3: Parent tab navigates Back within webpage history (kotlinlang.org -> example.com)
+        composeTestRule.runOnUiThread {
+            activity.onBackPressedDispatcher.onBackPressed()
+        }
+        composeTestRule.waitForIdle()
+        assertEquals("Priority 3: Back must navigate to previous webpage in tab history", "https://example.com", vm.activeTab.value.url)
+        assertFalse(activity.isFinishing)
+
+        // Priority 4b: Pressing Back on example.com returns to Homepage (nyxora://home) instead of exiting app!
+        composeTestRule.runOnUiThread {
+            activity.onBackPressedDispatcher.onBackPressed()
+        }
+        composeTestRule.waitForIdle()
+        assertEquals("Priority 4b: Back from first webpage must return to nyxora://home", "nyxora://home", vm.activeTab.value.url)
+        assertTrue(vm.activeTab.value.isHomePage)
+        assertFalse("Activity must NOT close when returning from website to Homepage", activity.isFinishing)
+
+        // Priority 5: Now at root Homepage with no overlays/history, canInterceptSystemBack is false
+        assertFalse(
+            "At root Homepage with no history or overlays, system Back should not be intercepted",
+            vm.canInterceptSystemBack()
+        )
+
+        // =========================================================================
+        // 2. VERIFY AUTO-REDIRECT BLOCKING & REDIRECT LOOP PROTECTION
+        // =========================================================================
+        // Legitimate user tap to a normal cross-origin website is allowed
+        val legitimateTapDecision = ContentBlockingEngine.evaluateTopLevelNavigation(
+            requestUrl = "https://kotlinlang.org/docs/home.html",
+            currentPageUrl = "https://example.com",
+            hasUserGesture = true,
+            isServerRedirect = false,
+            timeSinceLastUserInteractionMs = 120L,
+            globalRedirectBlockingEnabled = true,
+            httpsOnlyMode = false,
+            siteSetting = null,
+            allowOnceUrls = emptySet()
+        )
+        assertEquals(com.example.domain.browser.NavigationDecision.ALLOW, legitimateTapDecision)
+
+        // Unwanted automatic cross-origin redirect without user gesture is blocked
+        val autoRedirectDecision = ContentBlockingEngine.evaluateTopLevelNavigation(
+            requestUrl = "https://unwanted-promo-site.example.net/landing",
+            currentPageUrl = "https://example.com",
+            hasUserGesture = false,
+            isServerRedirect = true,
+            timeSinceLastUserInteractionMs = 5000L,
+            globalRedirectBlockingEnabled = true,
+            httpsOnlyMode = false,
+            siteSetting = null,
+            allowOnceUrls = emptySet()
+        )
+        assertEquals(com.example.domain.browser.NavigationDecision.BLOCK_AUTO_REDIRECT, autoRedirectDecision)
+
+        // Redirect to known ad/tracker domain is blocked even during a gesture unless explicitly allowed once
+        val adRedirectUrl = "https://onclickads.net/afu.php?zoneid=123"
+        val adRedirectDecision = ContentBlockingEngine.evaluateTopLevelNavigation(
+            requestUrl = adRedirectUrl,
+            currentPageUrl = "https://example.com",
+            hasUserGesture = true,
+            isServerRedirect = true,
+            timeSinceLastUserInteractionMs = 100L,
+            globalRedirectBlockingEnabled = true,
+            httpsOnlyMode = false,
+            siteSetting = null,
+            allowOnceUrls = emptySet()
+        )
+        assertEquals(com.example.domain.browser.NavigationDecision.BLOCK_AUTO_REDIRECT, adRedirectDecision)
+
+        // Safe way to continue ("Allow once") permits the blocked redirect URL
+        val allowedOnceDecision = ContentBlockingEngine.evaluateTopLevelNavigation(
+            requestUrl = adRedirectUrl,
+            currentPageUrl = "https://example.com",
+            hasUserGesture = false,
+            isServerRedirect = true,
+            timeSinceLastUserInteractionMs = 5000L,
+            globalRedirectBlockingEnabled = true,
+            httpsOnlyMode = false,
+            siteSetting = null,
+            allowOnceUrls = setOf(adRedirectUrl)
+        )
+        assertEquals(com.example.domain.browser.NavigationDecision.ALLOW, allowedOnceDecision)
+
+        // Rapid redirect loop detection blocks repeated bounces to the same URL
+        val loopUrl = "https://bounce.example.org/loop"
+        assertFalse(ContentBlockingEngine.isRedirectLoopDetected("loop-source.com", "bounce.example.org", loopUrl, false, 1000L))
+        assertFalse(ContentBlockingEngine.isRedirectLoopDetected("loop-source.com", "bounce.example.org", loopUrl, false, 1500L))
+        assertTrue(
+            "3 rapid redirects to the same URL within 4s must be flagged as a redirect loop",
+            ContentBlockingEngine.isRedirectLoopDetected("loop-source.com", "bounce.example.org", loopUrl, false, 2000L)
+        )
+
+        // =========================================================================
+        // 3. VERIFY AD BLOCKER ENGINE, SAFE MEDIA/AUTH WHITELIST, & COSMETIC SCRIPT
+        // =========================================================================
+        assertTrue(
+            ContentBlockingEngine.shouldBlockSubresource(
+                requestUrl = "https://securepubads.g.doubleclick.net/gpt/pubads_impl.js",
+                pageUrl = "https://news.example.com/article",
+                globalAdBlockingEnabled = true,
+                siteSetting = null
+            )
+        )
+        assertTrue(
+            ContentBlockingEngine.shouldBlockSubresource(
+                requestUrl = "https://cdn.popads.net/pop.js",
+                pageUrl = "https://news.example.com/article",
+                globalAdBlockingEnabled = true,
+                siteSetting = null
+            )
+        )
+        // Video CDNs and login/OAuth endpoints must NEVER be blocked
+        assertFalse(
+            ContentBlockingEngine.shouldBlockSubresource(
+                requestUrl = "https://rr1---sn-ab5l6nzy.googlevideo.com/videoplayback?id=123",
+                pageUrl = "https://m.youtube.com/watch?v=123",
+                globalAdBlockingEnabled = true,
+                siteSetting = null
+            )
+        )
+        assertFalse(
+            ContentBlockingEngine.shouldBlockSubresource(
+                requestUrl = "https://accounts.google.com/gsi/client",
+                pageUrl = "https://example.com/login",
+                globalAdBlockingEnabled = true,
+                siteSetting = null
+            )
+        )
+        val blockedJsResp = ContentBlockingEngine.createBlockedSubresourceResponse("https://cdn.taboola.com/libtrc/impl.js")
+        assertEquals("application/javascript", blockedJsResp.mimeType)
+        assertEquals(200, blockedJsResp.statusCode)
+
+        val cosmeticScript = ContentBlockingEngine.buildCosmeticAndDarkModeScript(
+            hideCookieBanners = true,
+            forceDarkWebPages = false,
+            adBlockingEnabled = true
+        )
+        assertTrue(cosmeticScript.contains("ins.adsbygoogle"))
+        assertTrue(cosmeticScript.contains(":not(:has(video))"))
+
+        val adsBefore = vm.settings.value.totalAdsBlockedCount
+        vm.recordAdBlocked()
+        val deadlineAds = System.currentTimeMillis() + 3000L
+        while (vm.settings.value.totalAdsBlockedCount < adsBefore + 1 && System.currentTimeMillis() < deadlineAds) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            composeTestRule.mainClock.advanceTimeBy(50L)
+            composeTestRule.waitForIdle()
+            Thread.sleep(20L)
+        }
+        assertEquals(adsBefore + 1, vm.settings.value.totalAdsBlockedCount)
+
+        // =========================================================================
+        // 4. VERIFY DESKTOP MODE TOGGLE, MOBILE SUBDOMAIN REWRITE, & UA SWITCHING
+        // =========================================================================
+        vm.navigateInActiveTab("https://m.wikipedia.org/wiki/Kotlin")
+        composeTestRule.waitForIdle()
+        assertFalse("Tab should start in Mobile mode by default", vm.activeTab.value.desktopMode)
+        val tickBeforeDesktop = vm.activeTab.value.reloadTriggerTick
+
+        // Toggle Desktop Site ON
+        vm.toggleDesktopSiteForActiveTab()
+        composeTestRule.waitForIdle()
+        assertTrue("Desktop Mode must be enabled after toggle", vm.activeTab.value.desktopMode)
+        assertEquals(
+            "Mobile subdomain m.wikipedia.org must rewrite to desktop wikipedia.org when Desktop Mode is enabled",
+            "https://wikipedia.org/wiki/Kotlin",
+            vm.activeTab.value.url
+        )
+        assertTrue(
+            "reloadTriggerTick must increment when Desktop Mode is toggled",
+            vm.activeTab.value.reloadTriggerTick > tickBeforeDesktop
+        )
+
+        // Verify subsequent navigations in the same tab preserve Desktop Mode
+        vm.navigateInActiveTab("https://m.example.com/news")
+        composeTestRule.waitForIdle()
+        assertTrue("Desktop Mode must persist across subsequent navigations in the tab", vm.activeTab.value.desktopMode)
+        assertEquals("https://example.com/news", vm.activeTab.value.url)
+
+        // Verify mounted WebView applies DESKTOP_USER_AGENT and wide viewport settings
+        val mountedWebView = findFirstWebView(activity.window.decorView)
+        assertNotNull(mountedWebView)
+        assertEquals(
+            com.example.ui.screens.DESKTOP_USER_AGENT,
+            mountedWebView!!.settings.userAgentString
+        )
+        assertTrue(mountedWebView.settings.useWideViewPort)
+        assertTrue(mountedWebView.settings.loadWithOverviewMode)
+
+        // Toggle Desktop Site OFF to return to Mobile mode without restarting the app
+        vm.toggleDesktopSiteForActiveTab()
+        composeTestRule.waitForIdle()
+        assertFalse("Tab must return to Mobile mode when toggled off", vm.activeTab.value.desktopMode)
+        assertTrue(
+            "WebView User-Agent must return to Mobile User-Agent immediately",
+            mountedWebView.settings.userAgentString.contains("Android")
+        )
+
+        // =========================================================================
+        // 5. VERIFY VIDEO ZOOM UP TO 1000% (10.0x) WITH PINCH FOCAL POINT & PAN CLAMPING
+        // =========================================================================
+        assertEquals(10.0f, com.example.ui.screens.MAX_VIDEO_ZOOM, 0.001f)
+        val zoomedState = com.example.ui.screens.computeVideoZoomAndClampedPan(
+            currentZoom = 1.0f,
+            currentPanX = 0f,
+            currentPanY = 0f,
+            zoomMultiplier = 12.0f, // Attempt above 10x should clamp cleanly to 10.0f (1000%)
+            panDeltaX = 50000f,     // Attempt to pan far off-screen should clamp within bounds
+            panDeltaY = -50000f,
+            focalX = 540f,
+            focalY = 960f,
+            containerWidth = 1080f,
+            containerHeight = 1920f,
+            baseAspectScale = 1.0f
+        )
+        assertEquals("Pinch zoom must clamp at 10.0f (1000%)", 10.0f, zoomedState.zoom, 0.001f)
+        val maxAllowedPanX = (1080f * (10.0f - 1.0f)) / 2f
+        val maxAllowedPanY = (1920f * (10.0f - 1.0f)) / 2f
+        assertEquals("Horizontal pan must clamp so video never moves off-screen", maxAllowedPanX, zoomedState.panX, 0.5f)
+        assertEquals("Vertical pan must clamp so video never moves off-screen", -maxAllowedPanY, zoomedState.panY, 0.5f)
+
+        // =========================================================================
+        // 6. VERIFY HOMEPAGE SHORTCUT FAVICON CACHING & NEUTRAL GLOBE FALLBACK
+        // =========================================================================
+        val testBmp = android.graphics.Bitmap.createBitmap(32, 32, android.graphics.Bitmap.Config.ARGB_8888).apply {
+            eraseColor(android.graphics.Color.CYAN)
+        }
+        com.example.domain.browser.FaviconCacheManager.saveFaviconForUrl(
+            context = context,
+            pageUrl = "https://kotlinlang.org",
+            bitmap = testBmp
+        )
+        val cachedFavicon = com.example.domain.browser.FaviconCacheManager.getCachedFavicon(
+            context = context,
+            urlOrHost = "https://kotlinlang.org"
+        )
+        assertNotNull("FaviconCacheManager must retrieve cached favicon from memory/disk offline", cachedFavicon)
+        assertFalse(
+            "Freshly saved favicon must not be marked missing or outdated",
+            com.example.domain.browser.FaviconCacheManager.isFaviconMissingOrOutdated(context, "https://kotlinlang.org")
+        )
+
+        // Navigate back to Homepage, enable shortcuts, and add both a cached-favicon shortcut and an uncached shortcut
+        vm.navigateHome()
+        vm.updateSettings { it.copy(showHomeShortcuts = true) }
+        vm.addBookmarkOrShortcut("Kotlin", "https://kotlinlang.org", "Shortcuts", isShortcut = true)
+        vm.addBookmarkOrShortcut("Offline Site", "https://no-favicon-offline.invalid", "Shortcuts", isShortcut = true)
+        val deadlineShortcuts = System.currentTimeMillis() + 3000L
+        while (
+            (!vm.settings.value.showHomeShortcuts ||
+                vm.bookmarks.value.none { it.isShortcut && it.url.contains("kotlinlang.org") } ||
+                vm.bookmarks.value.none { it.isShortcut && it.url.contains("no-favicon-offline.invalid") }) &&
+            System.currentTimeMillis() < deadlineShortcuts
+        ) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            composeTestRule.mainClock.advanceTimeBy(50L)
+            composeTestRule.waitForIdle()
+            Thread.sleep(20L)
+        }
+        composeTestRule.mainClock.advanceTimeBy(300L)
+        composeTestRule.waitForIdle()
+
+        val shortcuts = vm.bookmarks.value.filter { it.isShortcut }
+        val kotlinShortcut = shortcuts.first { it.url.contains("kotlinlang.org") }
+        val fallbackShortcut = shortcuts.first { it.url.contains("no-favicon-offline.invalid") }
+
+        composeTestRule.onNodeWithTag("shortcut_favicon_image_${kotlinShortcut.id}", useUnmergedTree = true)
+            .assertIsDisplayed()
+        composeTestRule.onNodeWithTag("shortcut_fallback_icon_${fallbackShortcut.id}", useUnmergedTree = true)
+            .assertIsDisplayed()
+
+        // =========================================================================
+        // 7. VERIFY "FREQUENTLY VISITED" IS REMOVED FROM HOMEPAGE WHILE HISTORY WORKS
+        // =========================================================================
+        vm.updateSettings { it.copy(showHomeFreqVisited = true) }
+        composeTestRule.waitForIdle()
+        assertEquals(
+            "Frequently Visited section must not appear on Homepage",
+            0,
+            composeTestRule.onAllNodesWithTag("home_frequently_visited_section").fetchSemanticsNodes().size
+        )
+        assertEquals(
+            "Frequently Visited header must not appear on Homepage",
+            0,
+            composeTestRule.onAllNodesWithText("Frequently Visited", substring = true).fetchSemanticsNodes().size
+        )
+        assertEquals(
+            "History shortcut chip in Frequently Visited must not appear on Homepage",
+            0,
+            composeTestRule.onAllNodesWithTag("home_open_history_chip").fetchSemanticsNodes().size
+        )
+
+        // Verify Browsing History remains intact and accessible from the main bottom menu
+        composeTestRule.onNodeWithTag("toolbar_overflow_menu_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("menu_item_history").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("nyxora_history_sheet").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("history_back_button").performClick()
+        composeTestRule.waitForIdle()
+
+        // Clean up tabs and shortcuts created during this test
+        vm.deleteBookmark(kotlinShortcut.id)
+        vm.deleteBookmark(fallbackShortcut.id)
+        vm.updateSettings { it.copy(showHomeShortcuts = false, showHomeFreqVisited = false) }
+        vm.closeAllTabs(inPrivateMode = false)
+        composeTestRule.waitForIdle()
+    }
+
+    @Test
+    fun testSiteSettingCacheResetAndSubdomainMatching() {
+        composeTestRule.mainClock.advanceTimeBy(350L)
+        composeTestRule.waitForIdle()
+
+        val rules = listOf(
+            SiteSettingItem(
+                id = "youtube.com",
+                userId = "local_user",
+                host = "youtube.com",
+                desktopMode = true,
+                allowAds = false
+            ),
+            SiteSettingItem(
+                id = "twitter.com",
+                userId = "local_user",
+                host = "twitter.com",
+                allowRedirects = true
+            )
+        )
+        assertNotNull(com.example.ui.screens.findSiteSettingForHost(rules, "m.youtube.com"))
+        assertTrue(com.example.ui.screens.findSiteSettingForHost(rules, "m.youtube.com")!!.desktopMode)
+        assertNotNull(com.example.ui.screens.findSiteSettingForHost(rules, "www.youtube.com"))
+        assertNotNull(com.example.ui.screens.findSiteSettingForHost(rules, "mobile.twitter.com"))
+        assertTrue(com.example.ui.screens.findSiteSettingForHost(rules, "mobile.twitter.com")!!.allowRedirects)
+        assertNull(com.example.ui.screens.findSiteSettingForHost(rules, "unrelated.org"))
+
+        val viewModel = composeTestRule.activity.activeBrowserViewModel!!
+
+        viewModel.saveSiteSetting(
+            SiteSettingItem(
+                userId = viewModel.currentUserId,
+                host = "m.example-cache-test.org",
+                desktopMode = true,
+                textZoom = 145
+            )
+        )
+        val cached = viewModel.getSiteSettingForHost("www.example-cache-test.org")
+        assertNotNull("Expected normalized site setting to be retrievable across subdomains", cached)
+        assertTrue(cached!!.desktopMode)
+        assertEquals(145, cached.textZoom)
+
+        // Reset all site permissions and verify the in-memory cache is immediately cleared
+        viewModel.resetAllSitePermissions()
+        composeTestRule.waitForIdle()
+        var afterReset: SiteSettingItem? = cached
+        for (i in 0 until 20) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            composeTestRule.waitForIdle()
+            afterReset = viewModel.getSiteSettingForHost("example-cache-test.org")
+            if (afterReset == null) break
+            Thread.sleep(25)
+        }
+        assertNull("Expected resetAllSitePermissions() to clear localSiteSettingCache and Room", afterReset)
+
+        // Verify minimalist bottom navigation bar outline icons and thin tab counter box
+        assertEquals("NyxoraChevronLeft", com.example.ui.screens.buildNyxoraChevronLeftIcon().name)
+        assertEquals("NyxoraChevronRight", com.example.ui.screens.buildNyxoraChevronRightIcon().name)
+        assertEquals("NyxoraOutlineHome", com.example.ui.screens.buildNyxoraOutlineHomeIcon().name)
+        assertEquals("NyxoraThreeLineMenu", com.example.ui.screens.buildNyxoraThreeLineMenuIcon().name)
+        assertEquals(1.6f, com.example.ui.screens.NYXORA_BOTTOM_NAV_ICON_STROKE_WIDTH, 0.01f)
+        composeTestRule.onNodeWithTag("toolbar_tabs_counter_box", useUnmergedTree = true).assertIsDisplayed()
+    }
+
+    private fun findFirstWebView(root: View?): WebView? {
+        if (root == null) return null
+        if (root is WebView) return root
+        if (root is ViewGroup) {
+            for (i in 0 until root.childCount) {
+                val found = findFirstWebView(root.getChildAt(i))
+                if (found != null) return found
+            }
+        }
+        return null
+    }
 }
+

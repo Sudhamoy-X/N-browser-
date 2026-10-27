@@ -83,6 +83,9 @@ interface SiteSettingDao {
 
     @Query("DELETE FROM local_site_settings WHERE host = :host")
     suspend fun deleteSiteSettingByHost(host: String)
+
+    @Query("DELETE FROM local_site_settings")
+    suspend fun clearAllSiteSettings()
 }
 
 @Dao
