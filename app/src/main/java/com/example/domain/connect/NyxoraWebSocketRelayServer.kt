@@ -27,16 +27,13 @@ import org.json.JSONObject
 /**
  * Standards-compliant RFC 6455 WebSocket Room Authority & Relay Server.
  *
- * When a device hosts a room in NYXORA Connect, this server runs on an ephemeral TCP port
- * (or shares rooms with local/LAN devices via `ws://<lan-ip>:<port>/nyxora`), allowing real
- * `okhttp3.WebSocket` clients (both the Host client and Participant clients) to connect over
- * actual RFC 6455 WebSocket frames.
- *
  * Enforces:
  * - Room ID format & expiration checks
+ * - Signed HTTPS Invitation Token (`inv`) validation (expiration, revocation, single-use)
  * - Access Key authentication & HMAC-SHA256 frame verification
  * - Configurable max participant limit (default 5) & room lock
- * - Host-authority permission checks (mode switch, navigation sync, playback control, kick, host transfer)
+ * - Bidirectional URL & navigation sync (Host + authorized Participants)
+ * - Duplicate session prevention on disconnect/reconnect
  * - Sliding-window rate limiting & bounded event deduplication
  * - Heartbeat monitoring & stale connection cleanup
  */
@@ -59,7 +56,9 @@ class NyxoraWebSocketRelayServer {
     private class HostedRoomContext(
         @Volatile var state: NyxoraConnectRoomState,
         val sequenceGenerator: AtomicLong = AtomicLong(1L),
-        val kickedDeviceIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
+        val kickedDeviceIds: MutableSet<String> = ConcurrentHashMap.newKeySet(),
+        val revokedInviteTokenIds: MutableSet<String> = ConcurrentHashMap.newKeySet(),
+        val consumedSingleUseTokenOwners: ConcurrentHashMap<String, String> = ConcurrentHashMap()
     )
 
     private inner class ClientSessionConnection(
@@ -155,6 +154,16 @@ class NyxoraWebSocketRelayServer {
         return rooms[roomId.trim().uppercase()]?.state
     }
 
+    fun revokeInvitationToken(roomId: String, tokenOrId: String) {
+        val cleanId = tokenOrId.trim().substringBefore('.').trim().uppercase()
+        if (cleanId.isEmpty()) return
+        NyxoraConnectSecurity.revokeInvitationToken(cleanId)
+        val ctx = rooms[roomId.trim().uppercase()] ?: return
+        synchronized(ctx) {
+            ctx.revokedInviteTokenIds.add(cleanId)
+        }
+    }
+
     fun expireRoomForTesting(roomId: String) {
         val ctx = rooms[roomId.trim().uppercase()] ?: return
         synchronized(ctx) {
@@ -245,7 +254,27 @@ class NyxoraWebSocketRelayServer {
             return
         }
 
-        val roomCtx = rooms[normalizedRoomId]
+        var roomCtx = rooms[normalizedRoomId]
+        if (roomCtx == null && envelope.type == RealtimeEventType.JOIN_REQUEST && envelope.senderRole == RoomRole.HOST) {
+            val payloadObj = runCatching { JSONObject(envelope.payloadJson) }.getOrNull()
+            val snapshotObj = payloadObj?.optJSONObject("hostRoomSnapshot")
+            if (snapshotObj != null) {
+                val candidateKey = snapshotObj.optString("accessKey", "").trim().uppercase()
+                if (candidateKey.isNotBlank() && NyxoraConnectSecurity.verifyEventHmac(candidateKey, envelope)) {
+                    val parsedRoom = NyxoraConnectRoomState.fromSnapshotJson(
+                        obj = snapshotObj,
+                        existingAccessKey = candidateKey,
+                        fallbackEndpoint = NyxoraConnectSecurity.DEFAULT_PRODUCTION_WSS_ENDPOINT
+                    ).copy(
+                        roomId = normalizedRoomId,
+                        accessKey = candidateKey,
+                        hostDeviceId = envelope.senderDeviceId
+                    )
+                    registerNewRoom(parsedRoom)
+                    roomCtx = rooms[normalizedRoomId]
+                }
+            }
+        }
         if (roomCtx == null) {
             sendRejectEvent(conn, normalizedRoomId, "ROOM_NOT_FOUND", "Room does not exist or has closed")
             return
@@ -264,16 +293,18 @@ class NyxoraWebSocketRelayServer {
                 return
             }
 
-            // Verify HMAC signature using the room's accessKey
+            if (envelope.type == RealtimeEventType.JOIN_REQUEST) {
+                handleJoinRequest(conn, roomCtx, envelope, now)
+                return
+            }
+
+            // For all post-join events, verify HMAC signature using the room's session accessKey
             if (!NyxoraConnectSecurity.verifyEventHmac(currentRoom.accessKey, envelope)) {
-                sendRejectEvent(conn, normalizedRoomId, "UNAUTHORIZED_KEY", "Invalid room access key or signature")
+                sendRejectEvent(conn, normalizedRoomId, "UNAUTHORIZED_KEY", "Invalid Room Access Key or signature")
                 return
             }
 
             when (envelope.type) {
-                RealtimeEventType.JOIN_REQUEST -> {
-                    handleJoinRequest(conn, roomCtx, envelope, now)
-                }
                 RealtimeEventType.HEARTBEAT_PING -> {
                     updateMemberHeartbeat(roomCtx, envelope.senderDeviceId, now)
                     val pongEnvelope = createServerSignedEnvelope(
@@ -331,9 +362,11 @@ class NyxoraWebSocketRelayServer {
                                 members = updatedMembers,
                                 lastSequenceNumber = nextSeq
                             )
-                            // Notify kicked client and close its connection
                             for (c in clients) {
                                 if (c.roomId == normalizedRoomId && c.deviceId == targetId) {
+                                    c.authenticated = false
+                                    c.roomId = ""
+                                    c.deviceId = ""
                                     sendRejectEvent(c, normalizedRoomId, "PARTICIPANT_REMOVED", "Removed from room by host")
                                     c.closeConnection(4003, "Removed by host")
                                 }
@@ -392,8 +425,10 @@ class NyxoraWebSocketRelayServer {
                 RealtimeEventType.NAVIGATE_FORWARD,
                 RealtimeEventType.SELECT_TAB_NAVIGATION,
                 RealtimeEventType.NEW_PAGE_OPENED -> {
-                    // Host-authority model: only host can broadcast navigation synchronization
-                    if (envelope.senderDeviceId == currentRoom.hostDeviceId && currentRoom.isSyncActive) {
+                    val isHost = envelope.senderDeviceId == currentRoom.hostDeviceId
+                    val isAuthenticatedMember = currentRoom.members.any { it.deviceId == envelope.senderDeviceId }
+                    val allowedByPermission = isHost || (isAuthenticatedMember && currentRoom.permissions.allowParticipantNavigationSync)
+                    if (allowedByPermission && currentRoom.isSyncActive) {
                         val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: JSONObject()
                         val rawUrl = payload.optString("url", "")
                         val sanitizedUrl = if (rawUrl.isNotBlank()) {
@@ -419,7 +454,7 @@ class NyxoraWebSocketRelayServer {
                             seq = nextSeq,
                             type = envelope.type,
                             senderId = envelope.senderDeviceId,
-                            senderRole = RoomRole.HOST,
+                            senderRole = if (isHost) RoomRole.HOST else RoomRole.PARTICIPANT,
                             payloadJson = cleanPayload.toString()
                         )
                         broadcastToRoom(normalizedRoomId, broadcastEnv)
@@ -428,8 +463,11 @@ class NyxoraWebSocketRelayServer {
                 RealtimeEventType.PLAYBACK_ACTION,
                 RealtimeEventType.PLAYBACK_BEACON -> {
                     val isHost = envelope.senderDeviceId == currentRoom.hostDeviceId
+                    val isAuthenticatedMember = currentRoom.members.any { it.deviceId == envelope.senderDeviceId }
                     val allowedByPermission = isHost ||
-                        (envelope.type == RealtimeEventType.PLAYBACK_ACTION && currentRoom.permissions.allowParticipantPlaybackControl)
+                        (isAuthenticatedMember &&
+                            envelope.type == RealtimeEventType.PLAYBACK_ACTION &&
+                            currentRoom.permissions.allowParticipantPlaybackControl)
                     if (allowedByPermission && currentRoom.isSyncActive) {
                         val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: return
                         val nextSeq = roomCtx.sequenceGenerator.incrementAndGet()
@@ -463,7 +501,6 @@ class NyxoraWebSocketRelayServer {
                     }
                 }
                 RealtimeEventType.REQUEST_RESYNC -> {
-                    // Send authoritative snapshot to the requesting participant
                     val snapshotEnv = createServerSignedEnvelope(
                         room = roomCtx.state,
                         seq = roomCtx.state.lastSequenceNumber,
@@ -485,6 +522,59 @@ class NyxoraWebSocketRelayServer {
     ) {
         val currentRoom = roomCtx.state
         val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: JSONObject()
+        val inviteTokenRaw = payload.optString("inviteToken", "").trim()
+
+        // Authenticate JOIN_REQUEST via either signed HTTPS inviteToken or room accessKey
+        var handshakeSigningKey = currentRoom.accessKey
+        if (inviteTokenRaw.isNotEmpty()) {
+            val synthUrl = "https://${NyxoraConnectSecurity.DEFAULT_APP_LINK_DOMAIN}/connect?room=${currentRoom.roomId}&inv=$inviteTokenRaw"
+            val parsedInvite = NyxoraConnectSecurity.parseRoomInviteInput(synthUrl, nowMillis = now)
+            if (parsedInvite == null) {
+                sendRejectEvent(
+                    conn,
+                    currentRoom.roomId,
+                    InvitationValidationStatus.INVALID_FORMAT.errorCode,
+                    InvitationValidationStatus.INVALID_FORMAT.userMessage
+                )
+                return
+            }
+            val tokenStatus = NyxoraConnectSecurity.verifyInvitationTokenAgainstRoom(
+                parsed = parsedInvite,
+                roomId = currentRoom.roomId,
+                roomAccessKey = currentRoom.accessKey,
+                requestingDeviceId = envelope.senderDeviceId,
+                nowMillis = now,
+                serverRevokedTokenIds = roomCtx.revokedInviteTokenIds,
+                serverConsumedTokenOwners = roomCtx.consumedSingleUseTokenOwners
+            )
+            if (tokenStatus != InvitationValidationStatus.VALID) {
+                sendRejectEvent(conn, currentRoom.roomId, tokenStatus.errorCode, tokenStatus.userMessage)
+                return
+            }
+            // Verify envelope signature using either the invite's tokenHmac or the room's accessKey
+            val verifiedByTokenHmac = NyxoraConnectSecurity.verifyEventHmac(parsedInvite.tokenHmac, envelope)
+            val verifiedByAccessKey = NyxoraConnectSecurity.verifyEventHmac(currentRoom.accessKey, envelope)
+            if (!verifiedByTokenHmac && !verifiedByAccessKey) {
+                sendRejectEvent(
+                    conn,
+                    currentRoom.roomId,
+                    InvitationValidationStatus.UNAUTHORIZED_SIGNATURE.errorCode,
+                    "Invalid Room Access Key or invitation signature"
+                )
+                return
+            }
+            if (parsedInvite.singleUse) {
+                roomCtx.consumedSingleUseTokenOwners[parsedInvite.tokenId.uppercase()] = envelope.senderDeviceId
+                NyxoraConnectSecurity.markSingleUseInvitationConsumed(parsedInvite.tokenId, envelope.senderDeviceId)
+            }
+            handshakeSigningKey = if (verifiedByTokenHmac) parsedInvite.tokenHmac else currentRoom.accessKey
+        } else {
+            if (!NyxoraConnectSecurity.verifyEventHmac(currentRoom.accessKey, envelope)) {
+                sendRejectEvent(conn, currentRoom.roomId, "UNAUTHORIZED_KEY", "Invalid Room Access Key or signature")
+                return
+            }
+        }
+
         val deviceName = payload.optString("deviceName", "NYXORA Device").trim().take(36).ifBlank { "NYXORA Device" }
         val isRejoin = currentRoom.members.any { it.deviceId == envelope.senderDeviceId }
         val isHost = envelope.senderDeviceId == currentRoom.hostDeviceId
@@ -506,33 +596,56 @@ class NyxoraWebSocketRelayServer {
             }
         }
 
+        // Prevent duplicate client sessions when a device disconnects and reconnects
+        val staleConnections = clients.filter {
+            it !== conn &&
+                it.roomId.equals(currentRoom.roomId, ignoreCase = true) &&
+                it.deviceId == envelope.senderDeviceId
+        }
+        for (stale in staleConnections) {
+            stale.authenticated = false
+            stale.deviceId = ""
+            stale.roomId = ""
+            clients.remove(stale)
+            stale.closeConnection(1000, "Superseded by reconnected session")
+        }
+
         conn.deviceId = envelope.senderDeviceId
         conn.roomId = currentRoom.roomId
         conn.authenticated = true
         conn.lastSeenMillis = now
 
+        val existingMember = currentRoom.members.firstOrNull { it.deviceId == envelope.senderDeviceId }
         val memberEntry = ConnectedDeviceMember(
             deviceId = envelope.senderDeviceId,
             deviceName = deviceName,
             role = if (isHost) RoomRole.HOST else RoomRole.PARTICIPANT,
-            status = SyncConnectionStatus.SYNCED,
-            joinedAtMillis = currentRoom.members.firstOrNull { it.deviceId == envelope.senderDeviceId }?.joinedAtMillis ?: now,
+            status = if (existingMember?.isFollowingPaused == true) {
+                SyncConnectionStatus.PAUSED_FOLLOWING
+            } else {
+                SyncConnectionStatus.SYNCED
+            },
+            joinedAtMillis = existingMember?.joinedAtMillis ?: now,
             lastHeartbeatMillis = now,
-            isFollowingPaused = false
+            isFollowingPaused = existingMember?.isFollowingPaused ?: false
         )
 
-        val updatedMembers = currentRoom.members.filterNot { it.deviceId == envelope.senderDeviceId } + memberEntry
+        val updatedMembers = (currentRoom.members.filterNot { it.deviceId == envelope.senderDeviceId } + memberEntry)
+            .distinctBy { it.deviceId }
         val nextSeq = roomCtx.sequenceGenerator.incrementAndGet()
         roomCtx.state = currentRoom.copy(
             members = updatedMembers,
             lastSequenceNumber = nextSeq
         )
 
+        // Include the session accessKey in JOIN_ACCEPTED (signed with handshakeSigningKey) so
+        // clients joining via a token-only HTTPS link receive the room's session key securely.
         val acceptEnv = createServerSignedEnvelope(
             room = roomCtx.state,
             seq = nextSeq,
             type = RealtimeEventType.JOIN_ACCEPTED,
-            payloadJson = roomCtx.state.toSnapshotJson(includeAccessKey = false).toString()
+            payloadJson = roomCtx.state.toSnapshotJson(includeAccessKey = true).toString(),
+            explicitSigningKey = handshakeSigningKey
         )
         conn.sendTextFrame(acceptEnv.toJsonString())
         broadcastSnapshotToRoom(roomCtx)
@@ -544,8 +657,13 @@ class NyxoraWebSocketRelayServer {
         deviceId: String
     ) {
         val currentRoom = roomCtx.state
+        // Immediately detach leaving client so it receives no further broadcasts
+        conn.authenticated = false
+        conn.deviceId = ""
+        conn.roomId = ""
+        clients.remove(conn)
+
         if (deviceId == currentRoom.hostDeviceId) {
-            // Host leaving closes the room unless host transferred beforehand
             val closedEnv = createServerSignedEnvelope(
                 room = currentRoom,
                 seq = roomCtx.sequenceGenerator.incrementAndGet(),
@@ -580,9 +698,8 @@ class NyxoraWebSocketRelayServer {
                     lastSequenceNumber = roomCtx.sequenceGenerator.incrementAndGet()
                 )
             } else {
-                // Mark as RECONNECTING temporarily so reconnection restores state cleanly
                 val stillConnectedElsewhere = clients.any {
-                    it !== conn && it.roomId == rId && it.deviceId == dId && !it.socket.isClosed
+                    it !== conn && it.authenticated && it.roomId == rId && it.deviceId == dId && !it.socket.isClosed
                 }
                 if (!stillConnectedElsewhere) {
                     val updated = currentRoom.members.map { m ->
@@ -706,12 +823,14 @@ class NyxoraWebSocketRelayServer {
         type: RealtimeEventType,
         senderId: String = room.hostDeviceId,
         senderRole: RoomRole = RoomRole.HOST,
-        payloadJson: String
+        payloadJson: String,
+        explicitSigningKey: String = ""
     ): RealtimeEventEnvelope {
         val eventId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
+        val signingKey = explicitSigningKey.ifBlank { room.accessKey }
         val sig = NyxoraConnectSecurity.computeEventHmac(
-            accessKey = room.accessKey,
+            accessKey = signingKey,
             roomId = room.roomId,
             eventId = eventId,
             type = type.name,

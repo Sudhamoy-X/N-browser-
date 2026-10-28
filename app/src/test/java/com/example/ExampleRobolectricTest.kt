@@ -40,6 +40,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
@@ -88,13 +89,22 @@ class ExampleRobolectricTest {
                 "usedHeapMb=${"%.2f".format(usedHeapMb)} MB ($usedHeapBytes bytes)"
         )
 
-        // 1. Verify minimalist 3-part layout: Top Bar (URL input + progress support), Central Container, and Minimal Homepage
+        // 1. Verify minimalist homepage layout: ONLY ONE primary search bar below the NYXORA logo (no duplicate top address bar on homepage)
         composeTestRule.onNodeWithTag("nyxora_main_browser_screen").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("nyxora_top_address_bar").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("main_address_bar_input").assertIsDisplayed()
+        assertEquals(
+            "Homepage must NOT show a duplicate top search/address bar",
+            0,
+            composeTestRule.onAllNodesWithTag("nyxora_top_address_bar").fetchSemanticsNodes().size
+        )
+        assertEquals(
+            "Homepage must NOT show top address bar input field",
+            0,
+            composeTestRule.onAllNodesWithTag("main_address_bar_input").fetchSemanticsNodes().size
+        )
         composeTestRule.onNodeWithTag("nyxora_central_browser_container").assertIsDisplayed()
         composeTestRule.onNodeWithTag("home_logo_header").assertIsDisplayed()
         composeTestRule.onNodeWithTag("home_search_bar_trigger").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("home_search_box_input").assertIsDisplayed()
         assertTrue(
             composeTestRule.onAllNodesWithText("Search Google or enter address", substring = true)
                 .fetchSemanticsNodes().isNotEmpty()
@@ -298,15 +308,17 @@ class ExampleRobolectricTest {
         composeTestRule.mainClock.advanceTimeBy(350L)
         composeTestRule.waitForIdle()
 
-        // Navigate to a web page using the top URL bar
-        composeTestRule.onNodeWithTag("main_address_bar_input").performClick()
+        // Navigate to a web page using the single primary homepage search bar
+        composeTestRule.onNodeWithTag("home_search_box_input").performClick()
         composeTestRule.waitForIdle()
-        composeTestRule.onNodeWithTag("main_address_bar_input").performTextReplacement("https://example.com")
-        composeTestRule.onNodeWithTag("main_address_bar_input").performImeAction()
+        composeTestRule.onNodeWithTag("home_search_box_input").performTextReplacement("https://example.com")
+        composeTestRule.onNodeWithTag("home_search_box_input").performImeAction()
         composeTestRule.mainClock.advanceTimeBy(350L)
         composeTestRule.waitForIdle()
 
-        // Verify the real AndroidView(WebView) and pull-to-refresh box are mounted in the central browser container
+        // Verify the top address bar is now displayed while browsing a website, along with the real AndroidView(WebView)
+        composeTestRule.onNodeWithTag("nyxora_top_address_bar").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("main_address_bar_input").assertIsDisplayed()
         composeTestRule.onNodeWithTag("nyxora_pull_to_refresh_box").assertIsDisplayed()
         composeTestRule.onNodeWithTag("nyxora_webview_instance").assertIsDisplayed()
         assertEquals(
@@ -370,13 +382,43 @@ class ExampleRobolectricTest {
         composeTestRule.mainClock.advanceTimeBy(400L)
         composeTestRule.waitForIdle()
 
-        // Verify Room ID display and Leave/Close button are shown
+        // Verify Room ID display, standard HTTPS invite link, and compact 4-action row (Copy, Share, Refresh, Close)
         composeTestRule.onNodeWithTag("connect_active_room_id").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_shareable_https_invite_text").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_compact_action_row").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_copy_invite_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_share_invite_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_rotate_invite_button").assertIsDisplayed()
         composeTestRule.onNodeWithTag("connect_header_leave_button").assertIsDisplayed()
+
+        val vm = composeTestRule.activity.activeBrowserViewModel!!
+        val initialInvite = vm.connectManager.currentShareableInviteUrl.value
+        assertTrue("Expected standard HTTPS invite link", initialInvite.startsWith("https://nyxora.app/connect?"))
+        assertFalse("Invite link must never expose internal 192.0.0.2 address", initialInvite.contains("192.0.0.2"))
+
+        // Tap Refresh (rotate invite) in the compact row and verify a new HTTPS invitation token is issued
+        composeTestRule.onNodeWithTag("connect_rotate_invite_button").performClick()
+        composeTestRule.waitForIdle()
+        val rotatedInvite = vm.connectManager.currentShareableInviteUrl.value
+        assertTrue(rotatedInvite.startsWith("https://nyxora.app/connect?"))
+        assertNotEquals("Refresh button must rotate the invitation token", initialInvite, rotatedInvite)
+        val generatedInvite = rotatedInvite
 
         // Close the room and dismiss the Connect sheet
         composeTestRule.onNodeWithTag("connect_header_leave_button").performClick()
         composeTestRule.waitForIdle()
+        assertEquals(
+            "Closing room must transition status to DISCONNECTED",
+            com.example.domain.connect.SyncConnectionStatus.DISCONNECTED,
+            vm.connectManager.connectionStatus.value
+        )
+        composeTestRule.onNodeWithTag("connect_back_button").performClick()
+        composeTestRule.waitForIdle()
+
+        // Verify opening an HTTPS room invitation URL launches NYXORA Connect instead of loading as a webpage
+        vm.navigateInActiveTab(generatedInvite)
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("nyxora_connect_sheet").assertIsDisplayed()
         composeTestRule.onNodeWithTag("connect_back_button").performClick()
         composeTestRule.waitForIdle()
 
@@ -477,11 +519,11 @@ class ExampleRobolectricTest {
         composeTestRule.mainClock.advanceTimeBy(350L)
         composeTestRule.waitForIdle()
 
-        // Navigate to a video page so the real Android WebView is mounted
-        composeTestRule.onNodeWithTag("main_address_bar_input").performClick()
+        // Navigate to a video page using the homepage search bar so the real Android WebView is mounted
+        composeTestRule.onNodeWithTag("home_search_box_input").performClick()
         composeTestRule.waitForIdle()
-        composeTestRule.onNodeWithTag("main_address_bar_input").performTextReplacement("https://example.com/watch")
-        composeTestRule.onNodeWithTag("main_address_bar_input").performImeAction()
+        composeTestRule.onNodeWithTag("home_search_box_input").performTextReplacement("https://example.com/watch")
+        composeTestRule.onNodeWithTag("home_search_box_input").performImeAction()
         composeTestRule.mainClock.advanceTimeBy(350L)
         composeTestRule.waitForIdle()
 
@@ -785,15 +827,16 @@ class ExampleRobolectricTest {
 
         val vm = composeTestRule.activity.activeBrowserViewModel!!
 
-        // 1. Navigate from Homepage (nyxora://home) -> https://example.com -> https://kotlinlang.org
-        composeTestRule.onNodeWithTag("main_address_bar_input").performClick()
+        // 1. Navigate from Homepage (nyxora://home) using the single homepage search bar -> https://example.com -> https://kotlinlang.org
+        composeTestRule.onNodeWithTag("home_search_box_input").performClick()
         composeTestRule.waitForIdle()
-        composeTestRule.onNodeWithTag("main_address_bar_input").performTextReplacement("https://example.com")
+        composeTestRule.onNodeWithTag("home_search_box_input").performTextReplacement("https://example.com")
         composeTestRule.waitForIdle()
-        composeTestRule.onNodeWithTag("main_address_bar_input").performImeAction()
+        composeTestRule.onNodeWithTag("home_search_box_input").performImeAction()
         composeTestRule.mainClock.advanceTimeBy(250L)
         composeTestRule.waitForIdle()
         assertEquals("https://example.com", vm.activeTab.value.url)
+        composeTestRule.onNodeWithTag("nyxora_top_address_bar").assertIsDisplayed()
         composeTestRule.onNodeWithTag("nyxora_webview_instance").assertIsDisplayed()
 
         composeTestRule.onNodeWithTag("main_address_bar_input").performClick()

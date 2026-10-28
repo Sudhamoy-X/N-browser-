@@ -34,13 +34,12 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        if (savedInstanceState == null) {
-            val initialUrl = intent?.dataString?.trim()
-            if (!initialUrl.isNullOrBlank()) {
-                pendingIntentUrl = initialUrl
-            }
+        val initialIntentUrl = intent?.dataString?.trim()
+        if (savedInstanceState == null && !initialIntentUrl.isNullOrBlank()) {
+            pendingIntentUrl = initialIntentUrl
         }
-        val skipSplash = intent?.getBooleanExtra(EXTRA_SKIP_SPLASH, false) == true
+        val skipSplash = intent?.getBooleanExtra(EXTRA_SKIP_SPLASH, false) == true ||
+            !initialIntentUrl.isNullOrBlank()
 
         setContent {
             var splashCompleted by rememberSaveable { mutableStateOf(skipSplash) }
@@ -60,11 +59,12 @@ class MainActivity : ComponentActivity() {
                 BrowserNetworkClient.warmUpEngineAfterFirstFrame(applicationContext)
             }
 
-            // Handle initial or new incoming VIEW intent URLs once without re-triggering on rotation
+            // Handle initial or new incoming VIEW intent URLs (including HTTPS App Links & nyxora://connect)
             val externalUrl = pendingIntentUrl
             LaunchedEffect(externalUrl) {
                 if (!externalUrl.isNullOrBlank()) {
                     pendingIntentUrl = null
+                    splashCompleted = true
                     vm.navigateInActiveTab(externalUrl)
                 }
             }

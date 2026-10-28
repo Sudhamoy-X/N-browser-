@@ -9,6 +9,7 @@ import kotlinx.coroutines.launch
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -119,23 +120,115 @@ class NyxoraConnectTest {
     }
 
     @Test
-    fun `builds and parses nyxora connect deep-link invitations and enforces deduplication and rate limiting`() {
+    fun `builds and validates standard HTTPS room invitations without exposing secret keys or internal IPs and handles expired revoked and single-use tokens`() {
         val roomId = NyxoraConnectSecurity.generateSecureRoomId()
         val accessKey = NyxoraConnectSecurity.generateRoomAccessKey()
-        val endpoint = "ws://192.168.1.50:41234/nyxora"
-        val link = NyxoraConnectSecurity.buildRoomInviteLink(
+        val internalLanEndpoint = "ws://192.0.0.2:38207/nyxora"
+        val now = 1_710_000_000_000L
+
+        val inviteToken = NyxoraConnectSecurity.issueRoomInvitationToken(
             roomId = roomId,
             accessKey = accessKey,
-            endpointUrl = endpoint,
-            roomName = "Cinema Room"
+            nowMillis = now,
+            ttlMillis = 3_600_000L,
+            singleUse = true
+        )
+        val httpsLink = NyxoraConnectSecurity.buildRoomInviteLink(
+            roomId = roomId,
+            accessKey = accessKey,
+            endpointUrl = internalLanEndpoint,
+            roomName = "Cinema Room",
+            explicitInviteToken = inviteToken,
+            nowMillis = now
         )
 
-        val parsed = NyxoraConnectSecurity.parseRoomInviteInput(link)
+        // 1. Standard clickable HTTPS URL on registered domain; never exposes raw accessKey or internal LAN IP
+        assertTrue("Expected https:// URL, got $httpsLink", httpsLink.startsWith("https://nyxora.app/connect?"))
+        assertFalse("Public HTTPS invite must never expose raw accessKey", httpsLink.contains(accessKey))
+        assertFalse("Public HTTPS invite must never expose 192.0.0.2 internal IP", httpsLink.contains("192.0.0.2"))
+        assertTrue(NyxoraConnectSecurity.isNyxoraConnectInvitationUrl(httpsLink))
+
+        // 2. Valid HTTPS invitation parses and validates against the room's accessKey
+        val parsed = NyxoraConnectSecurity.parseRoomInviteInput(httpsLink, nowMillis = now + 1000L)
         assertNotNull(parsed)
         assertEquals(roomId, parsed?.roomId)
-        assertEquals(accessKey, parsed?.accessKey)
-        assertEquals(endpoint, parsed?.endpointUrl)
         assertEquals("Cinema Room", parsed?.roomName)
+        assertEquals(InvitationValidationStatus.VALID, parsed?.validationStatus)
+        assertEquals(
+            InvitationValidationStatus.VALID,
+            NyxoraConnectSecurity.verifyInvitationTokenAgainstRoom(
+                parsed = parsed!!,
+                roomId = roomId,
+                roomAccessKey = accessKey,
+                requestingDeviceId = "device-joiner-1",
+                nowMillis = now + 1000L
+            )
+        )
+
+        // 3. Single-use invitation marked consumed by device-joiner-1 -> another device ("device-joiner-2") gets ALREADY_USED
+        assertTrue(NyxoraConnectSecurity.markSingleUseInvitationConsumed(parsed.tokenId, "device-joiner-1"))
+        assertEquals(
+            InvitationValidationStatus.ALREADY_USED,
+            NyxoraConnectSecurity.verifyInvitationTokenAgainstRoom(
+                parsed = parsed,
+                roomId = roomId,
+                roomAccessKey = accessKey,
+                requestingDeviceId = "device-joiner-2",
+                nowMillis = now + 2000L
+            )
+        )
+
+        // 4. Expired invitation token returns EXPIRED
+        val parsedExpired = NyxoraConnectSecurity.parseRoomInviteInput(httpsLink, nowMillis = now + 7_200_000L)
+        assertEquals(InvitationValidationStatus.EXPIRED, parsedExpired?.validationStatus)
+
+        // 5. Revoked invitation token returns REVOKED
+        val revocableToken = NyxoraConnectSecurity.issueRoomInvitationToken(
+            roomId = roomId,
+            accessKey = accessKey,
+            nowMillis = now,
+            singleUse = false
+        )
+        val revocableLink = NyxoraConnectSecurity.buildRoomInviteLink(
+            roomId = roomId,
+            accessKey = accessKey,
+            endpointUrl = internalLanEndpoint,
+            roomName = "Cinema Room",
+            explicitInviteToken = revocableToken,
+            nowMillis = now
+        )
+        NyxoraConnectSecurity.revokeInvitationToken(revocableToken)
+        val parsedRevoked = NyxoraConnectSecurity.parseRoomInviteInput(revocableLink, nowMillis = now + 500L)
+        assertEquals(InvitationValidationStatus.REVOKED, parsedRevoked?.validationStatus)
+
+        // 6. Tampered invitation token signature returns UNAUTHORIZED_SIGNATURE
+        val freshToken = NyxoraConnectSecurity.issueRoomInvitationToken(
+            roomId = roomId,
+            accessKey = accessKey,
+            nowMillis = now,
+            singleUse = false
+        )
+        val tamperedToken = freshToken.substringBeforeLast(".") + ".0000000000000000000000000000000000000000000000000000000000000000"
+        val tamperedLink = NyxoraConnectSecurity.buildRoomInviteLink(
+            roomId = roomId,
+            accessKey = accessKey,
+            endpointUrl = internalLanEndpoint,
+            roomName = "Cinema Room",
+            explicitInviteToken = tamperedToken,
+            nowMillis = now
+        )
+        val parsedTampered = NyxoraConnectSecurity.parseRoomInviteInput(tamperedLink, nowMillis = now + 500L)
+        assertNotNull(parsedTampered)
+        assertEquals(
+            InvitationValidationStatus.UNAUTHORIZED_SIGNATURE,
+            NyxoraConnectSecurity.verifyInvitationTokenAgainstRoom(
+                parsed = parsedTampered!!,
+                roomId = roomId,
+                roomAccessKey = accessKey,
+                requestingDeviceId = "device-joiner-1",
+                nowMillis = now + 500L
+            )
+        )
 
         // BoundedEventDeduplicator rejects duplicate event IDs
         val deduplicator = BoundedEventDeduplicator(maxCapacity = 8)
@@ -355,6 +448,158 @@ class NyxoraConnectTest {
     }
 
     @Test
+    fun `multi-device bidirectional URL sync reconnect deduplication consent gating and immediate stop on leave`() {
+        val hostManager = NyxoraConnectSessionManager(
+            scope = testScope,
+            localDeviceId = "device-host-1",
+            initialDeviceName = "Host Phone",
+            sharedRelayServer = relayServer
+        )
+        val participantA = NyxoraConnectSessionManager(
+            scope = testScope,
+            localDeviceId = "device-part-a",
+            initialDeviceName = "Participant A",
+            sharedRelayServer = relayServer
+        )
+        val participantB = NyxoraConnectSessionManager(
+            scope = testScope,
+            localDeviceId = "device-part-b",
+            initialDeviceName = "Participant B",
+            sharedRelayServer = relayServer
+        )
+
+        val hostCommands = CopyOnWriteArrayList<IncomingRemoteSyncCommand>()
+        val partACommands = CopyOnWriteArrayList<IncomingRemoteSyncCommand>()
+        val partBCommands = CopyOnWriteArrayList<IncomingRemoteSyncCommand>()
+
+        val jobHost = testScope.launch { hostManager.remoteSyncCommands.collect { hostCommands.add(it) } }
+        val jobA = testScope.launch { participantA.remoteSyncCommands.collect { partACommands.add(it) } }
+        val jobB = testScope.launch { participantB.remoteSyncCommands.collect { partBCommands.add(it) } }
+
+        try {
+            // 1. Host creates room and generates HTTPS shareable invitation link (no raw key or LAN IP)
+            hostManager.createRoom(
+                roomName = "Multi-Device Sync Room",
+                mode = RoomSyncMode.BROWSE_TOGETHER,
+                initialUrl = "https://example.com",
+                initialTitle = "Example"
+            )
+            assertTrue(awaitCondition { hostManager.connectionStatus.value == SyncConnectionStatus.SYNCED })
+            val httpsInvite = hostManager.currentShareableInviteUrl.value
+            assertTrue(httpsInvite.startsWith("https://nyxora.app/connect?"))
+            assertFalse(httpsInvite.contains("192.0.0.2"))
+
+            // 2. Both Participant A and Participant B join using only the HTTPS invitation link
+            assertTrue(participantA.joinRoom(httpsInvite))
+            assertTrue(participantB.joinRoom(httpsInvite))
+            assertTrue(
+                "Expected all 3 devices connected and synced in the same room",
+                awaitCondition {
+                    participantA.connectionStatus.value == SyncConnectionStatus.SYNCED &&
+                        participantB.connectionStatus.value == SyncConnectionStatus.SYNCED &&
+                        hostManager.roomState.value?.members?.size == 3
+                }
+            )
+
+            // 3. Direction 1 (Host -> Participants): Host navigates to kotlinlang.org -> both A and B receive it
+            partACommands.clear()
+            partBCommands.clear()
+            assertTrue(
+                hostManager.publishUrlNavigation(
+                    url = "https://kotlinlang.org",
+                    title = "Kotlin",
+                    isPrivateTab = false,
+                    isPrivateMode = false
+                )
+            )
+            assertTrue(
+                "Both Participant A and B must receive Host URL change",
+                awaitCondition {
+                    partACommands.any { it is IncomingRemoteSyncCommand.NavigateToUrl && it.url.trimEnd('/') == "https://kotlinlang.org" } &&
+                        partBCommands.any { it is IncomingRemoteSyncCommand.NavigateToUrl && it.url.trimEnd('/') == "https://kotlinlang.org" }
+                }
+            )
+
+            // 4. Direction 2 (Participant -> Host & other Participants): Participant A navigates to wikipedia.org -> Host and B receive it
+            hostCommands.clear()
+            partBCommands.clear()
+            assertTrue(
+                participantA.publishUrlNavigation(
+                    url = "https://www.wikipedia.org",
+                    title = "Wikipedia",
+                    isPrivateTab = false,
+                    isPrivateMode = false
+                )
+            )
+            assertTrue(
+                "Both Host and Participant B must receive Participant A's URL change (bidirectional sync)",
+                awaitCondition {
+                    hostCommands.any { it is IncomingRemoteSyncCommand.NavigateToUrl && it.url.trimEnd('/') == "https://www.wikipedia.org" } &&
+                        partBCommands.any { it is IncomingRemoteSyncCommand.NavigateToUrl && it.url.trimEnd('/') == "https://www.wikipedia.org" }
+                }
+            )
+
+            // 5. User consent check: When Participant A disables sharing consent, outgoing URL sync is blocked
+            participantA.setUserShareConsent(false)
+            assertFalse(
+                participantA.publishUrlNavigation(
+                    url = "https://unshared-local-page.org",
+                    title = "Unshared",
+                    isPrivateTab = false,
+                    isPrivateMode = false
+                )
+            )
+            participantA.setUserShareConsent(true)
+
+            // 6. Disconnect and reconnect Participant A -> verify no duplicate member entries (members.size stays 3)
+            participantA.simulateNetworkInterruptionForReconnect()
+            assertTrue(
+                awaitCondition(timeoutMs = 6000L) {
+                    participantA.connectionStatus.value == SyncConnectionStatus.SYNCED &&
+                        hostManager.roomState.value?.members?.size == 3
+                }
+            )
+            val distinctIds = hostManager.roomState.value!!.members.map { it.deviceId }.distinct()
+            assertEquals("Reconnecting must never create duplicate device entries", 3, distinctIds.size)
+
+            // 7. Participant B leaves the room -> immediately stops receiving any further synchronization
+            partBCommands.clear()
+            participantB.leaveOrCloseRoom(notifyServer = true)
+            assertEquals(SyncConnectionStatus.DISCONNECTED, participantB.connectionStatus.value)
+            assertNull(participantB.roomState.value)
+            assertTrue(
+                awaitCondition { hostManager.roomState.value?.members?.size == 2 }
+            )
+
+            partACommands.clear()
+            assertTrue(
+                hostManager.publishUrlNavigation(
+                    url = "https://developer.android.com/jetpack/compose",
+                    title = "Jetpack Compose",
+                    isPrivateTab = false,
+                    isPrivateMode = false
+                )
+            )
+            assertTrue(
+                awaitCondition {
+                    partACommands.any {
+                        it is IncomingRemoteSyncCommand.NavigateToUrl &&
+                            it.url == "https://developer.android.com/jetpack/compose"
+                    }
+                }
+            )
+            assertTrue("Departed Participant B must receive zero sync events after leaving", partBCommands.isEmpty())
+        } finally {
+            jobHost.cancel()
+            jobA.cancel()
+            jobB.cancel()
+            participantB.leaveOrCloseRoom()
+            participantA.leaveOrCloseRoom()
+            hostManager.leaveOrCloseRoom()
+        }
+    }
+
+    @Test
     fun `rejects invalid Room ID wrong access key expired room and participant overflow`() {
         val hostManager = NyxoraConnectSessionManager(
             scope = testScope,
@@ -457,6 +702,114 @@ class NyxoraConnectTest {
             guest1.leaveOrCloseRoom()
             intruderManager.leaveOrCloseRoom()
             hostManager.leaveOrCloseRoom()
+        }
+    }
+
+    @Test
+    fun `unreachable endpoint transitions cleanly from Reconnecting to Disconnected and remote relay bootstraps host room`() {
+        // Part A: Unreachable endpoint must never report CONNECTED and must exit RECONNECTING -> DISCONNECTED
+        val failingManager = NyxoraConnectSessionManager(
+            scope = testScope,
+            localDeviceId = "device-unreachable-test",
+            initialDeviceName = "Offline Test Phone",
+            sharedRelayServer = relayServer,
+            maxReconnectAttempts = 2,
+            baseReconnectDelayMs = 30L,
+            handshakeTimeoutMs = 200L
+        )
+
+        val validInvite = NyxoraConnectSecurity.buildRoomInviteLink(
+            roomId = "NYX-9B8C-7D6E",
+            accessKey = "ABCD-EFGH-JKLM-NPQR",
+            roomName = "Unreachable Room"
+        )
+
+        try {
+            assertTrue(
+                failingManager.joinRoom(
+                    rawRoomOrInvite = validInvite,
+                    explicitEndpointUrl = "ws://127.0.0.1:1/nyxora"
+                )
+            )
+            // Must never prematurely claim CONNECTED or SYNCED without server confirmation
+            assertNotEquals(SyncConnectionStatus.CONNECTED, failingManager.connectionStatus.value)
+            assertNotEquals(SyncConnectionStatus.SYNCED, failingManager.connectionStatus.value)
+
+            // Wait for bounded exponential backoff retries to exhaust and transition to DISCONNECTED
+            assertTrue(
+                "Unreachable endpoint must transition cleanly to DISCONNECTED instead of looping in RECONNECTING forever",
+                awaitCondition(timeoutMs = 5000L) {
+                    failingManager.connectionStatus.value == SyncConnectionStatus.DISCONNECTED &&
+                        failingManager.roomState.value == null
+                }
+            )
+            assertNotNull("Expected actionable error message after reconnect exhaustion", failingManager.lastSyncError.value)
+            assertTrue(
+                failingManager.lastSyncError.value!!.contains("Unable to reach NYXORA Connect server", ignoreCase = true)
+            )
+        } finally {
+            failingManager.leaveOrCloseRoom()
+        }
+
+        // Part B: Remote relay server (separate instance without local in-memory registerNewRoom) bootstraps room from Host JOIN_REQUEST
+        val remoteCloudRelay = NyxoraWebSocketRelayServer()
+        val remotePort = remoteCloudRelay.startIfNeeded()
+        val remoteEndpoint = "ws://127.0.0.1:$remotePort/nyxora"
+
+        val hostLocalRelay = NyxoraWebSocketRelayServer()
+        val guestLocalRelay = NyxoraWebSocketRelayServer()
+
+        val hostManager = NyxoraConnectSessionManager(
+            scope = testScope,
+            localDeviceId = "remote-host-1",
+            initialDeviceName = "Host Device",
+            sharedRelayServer = hostLocalRelay
+        )
+        val guestManager = NyxoraConnectSessionManager(
+            scope = testScope,
+            localDeviceId = "remote-guest-2",
+            initialDeviceName = "Guest Device",
+            sharedRelayServer = guestLocalRelay
+        )
+
+        try {
+            val created = hostManager.createRoom(
+                roomName = "Remote Cloud Room",
+                mode = RoomSyncMode.BROWSE_TOGETHER,
+                initialUrl = "https://kotlinlang.org",
+                initialTitle = "Kotlin",
+                customRelayEndpoint = remoteEndpoint
+            )
+            assertTrue(
+                "Host failed to bootstrap room on remote relay server",
+                awaitCondition { hostManager.connectionStatus.value == SyncConnectionStatus.SYNCED }
+            )
+
+            val inviteUrl = hostManager.currentShareableInviteUrl.value
+            assertTrue(
+                guestManager.joinRoom(
+                    rawRoomOrInvite = inviteUrl,
+                    explicitEndpointUrl = remoteEndpoint
+                )
+            )
+            assertTrue(
+                "Guest failed to join remote relay room",
+                awaitCondition {
+                    guestManager.connectionStatus.value == SyncConnectionStatus.SYNCED &&
+                        hostManager.roomState.value?.members?.size == 2
+                }
+            )
+
+            // Verify diagnostic logs never leak raw accessKey or inviteToken HMAC
+            val logsJoined = hostManager.diagnosticLogs.value.joinToString("\n")
+            assertFalse("Diagnostic logs must redact room accessKey", logsJoined.contains(created.accessKey))
+            assertTrue("Diagnostic logs must contain redacted placeholders", logsJoined.contains("[REDACTED]"))
+        } finally {
+            guestManager.leaveOrCloseRoom()
+            hostManager.leaveOrCloseRoom()
+            remoteCloudRelay.stopServer()
+            hostLocalRelay.stopServer()
+            guestLocalRelay.stopServer()
         }
     }
 }

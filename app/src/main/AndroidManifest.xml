@@ -49,7 +49,29 @@
                 <data android:scheme="http" />
                 <data android:scheme="https" />
             </intent-filter>
-            <!-- NYXORA Connect Room Invitation Deep Link -->
+            <!-- NYXORA Connect Verified Android App Links (HTTPS Room Invitations) -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="https"
+                    android:host="nyxora.app"
+                    android:pathPrefix="/connect" />
+                <data
+                    android:scheme="https"
+                    android:host="nyxora.app"
+                    android:pathPrefix="/invite" />
+                <data
+                    android:scheme="https"
+                    android:host="ais-pre-u42jr4njt6qbwei6oxmogw-667500831282.asia-east1.run.app"
+                    android:pathPrefix="/connect" />
+                <data
+                    android:scheme="https"
+                    android:host="ais-dev-u42jr4njt6qbwei6oxmogw-667500831282.asia-east1.run.app"
+                    android:pathPrefix="/connect" />
+            </intent-filter>
+            <!-- NYXORA Connect Room Invitation Deep Link (Legacy custom scheme fallback) -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />

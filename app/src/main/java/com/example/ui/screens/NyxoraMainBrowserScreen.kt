@@ -82,8 +82,10 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.domain.connect.IncomingRemoteSyncCommand
+import com.example.domain.connect.NyxoraConnectNotificationHelper
 import com.example.domain.connect.PlaybackCorrectionDecision
 import com.example.domain.connect.RoomSyncMode
+import com.example.domain.connect.SyncConnectionStatus
 import com.example.domain.connect.WatchTogetherMediaBridge
 import com.example.ui.theme.NyxoraElectricBlue
 import com.example.ui.theme.NyxoraIncognitoPurple
@@ -142,11 +144,19 @@ fun NyxoraMainBrowserScreen(
     val videoCompatibility by viewModel.connectManager.videoCompatibility.collectAsStateWithLifecycle()
     val lastSyncError by viewModel.connectManager.lastSyncError.collectAsStateWithLifecycle()
     val deviceDisplayName by viewModel.connectManager.deviceDisplayName.collectAsStateWithLifecycle()
+    val shareableInviteUrl by viewModel.connectManager.currentShareableInviteUrl.collectAsStateWithLifecycle()
+    val hasUserConsentedToShare by viewModel.connectManager.hasUserConsentedToShare.collectAsStateWithLifecycle()
 
     var addressInput by rememberSaveable { mutableStateOf("") }
     var isEditingAddress by remember { mutableStateOf(false) }
     var showOverflowMenu by remember { mutableStateOf(false) }
     var lastAutoSeekMillis by remember { mutableLongStateOf(0L) }
+
+    LaunchedEffect(activeTab.isHomePage) {
+        if (activeTab.isHomePage) {
+            isEditingAddress = false
+        }
+    }
 
     val primaryController = remember { WebViewControllerHandle() }
     val splitController = remember { WebViewControllerHandle() }
@@ -170,6 +180,15 @@ fun NyxoraMainBrowserScreen(
         viewModel.statusToast.collect { msg ->
             Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
         }
+    }
+
+    // Keep Android system status notification synchronized with active NYXORA Connect session
+    LaunchedEffect(connectRoomState, connectStatus) {
+        NyxoraConnectNotificationHelper.syncNotificationState(
+            context = context,
+            roomState = connectRoomState,
+            connectionStatus = connectStatus
+        )
     }
 
     // Bind local HTML5 video events from WebView to NYXORA Connect when in Watch Together mode
@@ -221,18 +240,20 @@ fun NyxoraMainBrowserScreen(
     // Collect incoming remote synchronization commands from NYXORA Connect
     LaunchedEffect(Unit) {
         viewModel.connectManager.remoteSyncCommands.collect { cmd ->
-            if (isPrivateMode) return@collect
+            if (viewModel.isPrivateMode.value) return@collect
+            val currentTab = viewModel.activeTab.value
+            if (currentTab.isPrivate) return@collect
             when (cmd) {
                 is IncomingRemoteSyncCommand.NavigateToUrl -> {
                     viewModel.applyRemoteSyncUrlNavigation(cmd.url, cmd.title)
                 }
                 IncomingRemoteSyncCommand.NavigateBack -> {
-                    val wvWentBack = !activeTab.isHomePage && primaryController.goBack()
+                    val wvWentBack = !currentTab.isHomePage && primaryController.goBack()
                     viewModel.navigateBackInActiveTab(webViewWentBack = wvWentBack)
                 }
                 IncomingRemoteSyncCommand.NavigateForward -> {
-                    if (activeTab.canGoForward || activeTab.forwardStack.isNotEmpty()) {
-                        val wvWentForward = !activeTab.isHomePage && primaryController.goForward()
+                    if (currentTab.canGoForward || currentTab.forwardStack.isNotEmpty()) {
+                        val wvWentForward = !currentTab.isHomePage && primaryController.goForward()
                         viewModel.navigateForwardInActiveTab(webViewWentForward = wvWentForward)
                     }
                 }
@@ -241,7 +262,7 @@ fun NyxoraMainBrowserScreen(
                 }
                 is IncomingRemoteSyncCommand.ApplyPlaybackState -> {
                     val state = cmd.state
-                    if (state.pageUrl.isNotBlank() && state.pageUrl != activeTab.url) {
+                    if (state.pageUrl.isNotBlank() && state.pageUrl != currentTab.url) {
                         viewModel.applyRemoteSyncUrlNavigation(state.pageUrl, "")
                     }
                     primaryController.probeWatchTogetherMedia { compat, localPos, _, localPaused, _ ->
@@ -429,62 +450,65 @@ fun NyxoraMainBrowserScreen(
         topBar = {
             if (!isFullscreenVideo) {
                 Column(modifier = Modifier.fillMaxWidth()) {
-                    // 1. Minimalist Top Bar: URL/Search Input & Real-Time Thin Progress Indicator
-                    NyxoraTopAddressBar(
-                    activeTab = activeTab,
-                    settings = settings,
-                    isPrivateMode = isPrivateMode,
-                    addressInput = addressInput,
-                    isEditingAddress = isEditingAddress,
-                    findInPageVisible = findInPageVisible,
-                    findInPageQuery = findInPageQuery,
-                    findInPageMatches = findInPageMatches,
-                    currentModeTabs = currentModeTabs,
-                    addressFocusRequester = addressFocusRequester,
-                    onAddressInputChange = {
-                        if (!isEditingAddress) isEditingAddress = true
-                        addressInput = it
-                    },
-                    onEditingChanged = { focused ->
-                        if (focused && !isEditingAddress) {
-                            addressInput = if (activeTab.isHomePage) "" else activeTab.url
-                            isEditingAddress = true
-                        } else if (!focused && isEditingAddress) {
-                            isEditingAddress = false
-                        }
-                    },
-                    onSubmitAddress = {
-                        val submitted = addressInput.trim()
-                        isEditingAddress = false
-                        focusManager.clearFocus()
-                        if (submitted.isNotEmpty()) {
-                            viewModel.navigateInActiveTab(submitted)
-                        }
-                    },
-                    onClearAddress = { addressInput = "" },
-                    onReloadOrStop = {
-                        if (activeTab.isLoading) {
-                            primaryController.stopLoading()
-                        } else {
-                            primaryController.reload()
-                        }
-                    },
-                    onSelectTab = { tabId ->
-                        viewModel.selectTab(tabId, isPrivateMode)
-                    },
-                    onFindQueryChange = { q ->
-                        viewModel.updateFindInPageQuery(q)
-                        primaryController.findInPage(q)
-                    },
-                    onFindNext = { forward -> primaryController.findNext(forward) },
-                    onCloseFindInPage = {
-                        primaryController.clearFindMatches()
-                        viewModel.setFindInPageVisible(false)
+                    // 1. Minimalist Top Bar: Shown only while browsing websites or searching in page.
+                    // On the homepage, only the primary search bar below the NYXORA logo is displayed.
+                    if (!activeTab.isHomePage || findInPageVisible) {
+                        NyxoraTopAddressBar(
+                            activeTab = activeTab,
+                            settings = settings,
+                            isPrivateMode = isPrivateMode,
+                            addressInput = addressInput,
+                            isEditingAddress = isEditingAddress,
+                            findInPageVisible = findInPageVisible,
+                            findInPageQuery = findInPageQuery,
+                            findInPageMatches = findInPageMatches,
+                            currentModeTabs = currentModeTabs,
+                            addressFocusRequester = addressFocusRequester,
+                            onAddressInputChange = {
+                                if (!isEditingAddress) isEditingAddress = true
+                                addressInput = it
+                            },
+                            onEditingChanged = { focused ->
+                                if (focused && !isEditingAddress) {
+                                    addressInput = if (activeTab.isHomePage) "" else activeTab.url
+                                    isEditingAddress = true
+                                } else if (!focused && isEditingAddress) {
+                                    isEditingAddress = false
+                                }
+                            },
+                            onSubmitAddress = {
+                                val submitted = addressInput.trim()
+                                isEditingAddress = false
+                                focusManager.clearFocus()
+                                if (submitted.isNotEmpty()) {
+                                    viewModel.navigateInActiveTab(submitted)
+                                }
+                            },
+                            onClearAddress = { addressInput = "" },
+                            onReloadOrStop = {
+                                if (activeTab.isLoading) {
+                                    primaryController.stopLoading()
+                                } else {
+                                    primaryController.reload()
+                                }
+                            },
+                            onSelectTab = { tabId ->
+                                viewModel.selectTab(tabId, isPrivateMode)
+                            },
+                            onFindQueryChange = { q ->
+                                viewModel.updateFindInPageQuery(q)
+                                primaryController.findInPage(q)
+                            },
+                            onFindNext = { forward -> primaryController.findNext(forward) },
+                            onCloseFindInPage = {
+                                primaryController.clearFindMatches()
+                                viewModel.setFindInPageVisible(false)
+                            }
+                        )
                     }
-                )
 
                     val activeRoom = connectRoomState
-                    if (activeRoom != null) {
+                    if (activeRoom != null && connectStatus != SyncConnectionStatus.DISCONNECTED) {
                         NyxoraConnectStatusBanner(
                             roomState = activeRoom,
                             localDeviceId = viewModel.connectManager.localDeviceId,
@@ -1162,6 +1186,12 @@ fun NyxoraMainBrowserScreen(
                 lastSyncError = lastSyncError,
                 isPrivateMode = isPrivateMode,
                 activePageUrl = activeTab.url,
+                shareableInviteUrl = shareableInviteUrl,
+                hasUserConsentedToShare = hasUserConsentedToShare,
+                onSetUserShareConsent = viewModel.connectManager::setUserShareConsent,
+                onRotateInviteLink = { singleUse ->
+                    viewModel.connectManager.revokeCurrentInviteAndRotate(singleUse = singleUse)
+                },
                 onUpdateDeviceName = viewModel.connectManager::updateDeviceDisplayName,
                 onClearError = viewModel.connectManager::clearSyncError,
                 onCreateRoom = { roomName, mode, perms, customEndpoint ->
@@ -1216,7 +1246,7 @@ fun NyxoraMainBrowserScreen(
                     if (sent) {
                         viewModel.emitToast("Synchronized current URL to room")
                     } else {
-                        viewModel.emitToast("Cannot sync private or non-web pages")
+                        viewModel.emitToast("Cannot sync private, unconsented, or non-web pages")
                     }
                 },
                 onHostPlaybackControl = { shouldPlay, seekDelta ->

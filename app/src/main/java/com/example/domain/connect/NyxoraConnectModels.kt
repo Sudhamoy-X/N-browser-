@@ -50,7 +50,8 @@ data class RoomPermissionsConfig(
     val syncBackForward: Boolean = true,
     val syncTabSelection: Boolean = false,
     val syncNewlyOpenedPages: Boolean = false,
-    val allowParticipantPlaybackControl: Boolean = false
+    val allowParticipantPlaybackControl: Boolean = false,
+    val allowParticipantNavigationSync: Boolean = true
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("maxParticipants", maxParticipants.coerceIn(2, 10))
@@ -60,6 +61,7 @@ data class RoomPermissionsConfig(
         put("syncTabSelection", syncTabSelection)
         put("syncNewlyOpenedPages", syncNewlyOpenedPages)
         put("allowParticipantPlaybackControl", allowParticipantPlaybackControl)
+        put("allowParticipantNavigationSync", allowParticipantNavigationSync)
     }
 
     companion object {
@@ -72,7 +74,8 @@ data class RoomPermissionsConfig(
                 syncBackForward = obj.optBoolean("syncBackForward", true),
                 syncTabSelection = obj.optBoolean("syncTabSelection", false),
                 syncNewlyOpenedPages = obj.optBoolean("syncNewlyOpenedPages", false),
-                allowParticipantPlaybackControl = obj.optBoolean("allowParticipantPlaybackControl", false)
+                allowParticipantPlaybackControl = obj.optBoolean("allowParticipantPlaybackControl", false),
+                allowParticipantNavigationSync = obj.optBoolean("allowParticipantNavigationSync", true)
             )
         }
     }

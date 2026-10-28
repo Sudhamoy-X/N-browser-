@@ -37,6 +37,7 @@ import com.example.domain.browser.EncryptedBackupManager
 import com.example.domain.browser.InputClassification
 import com.example.domain.browser.ReaderArticle
 import com.example.domain.browser.UrlAndSearchHandler
+import com.example.domain.connect.NyxoraConnectSecurity
 import com.example.domain.connect.NyxoraConnectSessionManager
 import com.example.domain.connect.RealtimeEventType
 import java.security.MessageDigest
@@ -204,6 +205,9 @@ class NyxoraBrowserViewModel(
 
     @Volatile
     private var isApplyingRemoteSyncNavigation: Boolean = false
+
+    @Volatile
+    private var lastRemoteSyncedUrl: String = ""
 
     @Volatile
     var hasInitializedWebViewEngine: Boolean = false
@@ -407,11 +411,9 @@ class NyxoraBrowserViewModel(
 
     fun navigateInActiveTab(rawInput: String) {
         val trimmedInput = rawInput.trim()
-        if (trimmedInput.startsWith("nyxora://connect", ignoreCase = true)) {
+        if (NyxoraConnectSecurity.isNyxoraConnectInvitationUrl(trimmedInput)) {
             _activeOverlay.value = OverlaySheet.NYXORA_CONNECT
-            if (trimmedInput.contains("room=", ignoreCase = true)) {
-                connectManager.joinRoom(trimmedInput)
-            }
+            connectManager.joinRoom(trimmedInput)
             return
         }
 
@@ -500,6 +502,7 @@ class NyxoraBrowserViewModel(
         val isHome = url.equals("nyxora://home", ignoreCase = true)
 
         isApplyingRemoteSyncNavigation = true
+        lastRemoteSyncedUrl = url
         try {
             updateTab(targetNormalId) { tab ->
                 if (tab.url == url) {
@@ -597,7 +600,14 @@ class NyxoraBrowserViewModel(
         }
 
         val tab = updatedTabRef ?: return
-        if (!tab.isPrivate && !_isPrivateMode.value && tab.id == _activeNormalTabId.value && !isApplyingRemoteSyncNavigation) {
+        val alreadyMatchesSynced = url.equals(lastRemoteSyncedUrl, ignoreCase = true) ||
+            url.equals(connectManager.roomState.value?.currentSyncedUrl, ignoreCase = true)
+        if (!tab.isPrivate &&
+            !_isPrivateMode.value &&
+            tab.id == _activeNormalTabId.value &&
+            !isApplyingRemoteSyncNavigation &&
+            !alreadyMatchesSynced
+        ) {
             connectManager.publishUrlNavigation(
                 url = url,
                 title = cleanTitle,
