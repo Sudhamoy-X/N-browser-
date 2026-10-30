@@ -82,7 +82,7 @@ class MainActivity : ComponentActivity() {
             }
 
             NyxoraTheme(themeMode = settings.themeMode) {
-                if (!splashCompleted) {
+                if (!splashCompleted && settings.launchAnimationEnabled) {
                     NyxoraLaunchSplash(
                         reducedMotion = settings.reducedMotion,
                         onSplashCompleted = { splashCompleted = true }

@@ -47,11 +47,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.ui.viewmodel.BrowserTab
 
 private val TAB_GROUPS = listOf("All", "Default", "Research", "Media", "Work")
@@ -389,6 +391,16 @@ private fun TabCompactCard(
     onCycleGroup: () -> Unit,
     onSplitView: () -> Unit
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val faviconTick by com.example.domain.browser.FaviconCacheManager.cacheUpdateTick.collectAsStateWithLifecycle()
+    val cachedFavicon = remember(tab.url, tab.isHomePage, tab.isPrivate, faviconTick) {
+        if (tab.isHomePage || tab.isPrivate) {
+            null
+        } else {
+            com.example.domain.browser.FaviconCacheManager.getCachedFavicon(context, tab.url)
+        }
+    }
+
     val borderColor = when {
         isSelected -> MaterialTheme.colorScheme.primary
         else -> MaterialTheme.colorScheme.outline
@@ -397,16 +409,20 @@ private fun TabCompactCard(
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .height(144.dp)
+            .height(152.dp)
             .border(
-                width = if (isSelected) 1.5.dp else 1.dp,
+                width = if (isSelected) 1.75.dp else 1.dp,
                 color = borderColor,
-                shape = RoundedCornerShape(14.dp)
+                shape = RoundedCornerShape(16.dp)
             )
             .clickable(onClick = onSelect)
             .testTag("tab_card_${tab.id}"),
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surface
+        shape = RoundedCornerShape(16.dp),
+        color = if (isSelected) {
+            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+        } else {
+            MaterialTheme.colorScheme.surface
+        }
     ) {
         Column(
             modifier = Modifier
@@ -414,15 +430,15 @@ private fun TabCompactCard(
                 .padding(12.dp),
             verticalArrangement = Arrangement.SpaceBetween
         ) {
-            // Card Header: Favicon initial + Title + Close button
+            // Card Header: Cached Favicon / Monogram + Title + Close button
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Surface(
-                    shape = RoundedCornerShape(6.dp),
+                    shape = RoundedCornerShape(8.dp),
                     color = MaterialTheme.colorScheme.surfaceVariant,
-                    modifier = Modifier.size(24.dp)
+                    modifier = Modifier.size(26.dp)
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         if (tab.isPrivate) {
@@ -431,6 +447,12 @@ private fun TabCompactCard(
                                 contentDescription = null,
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.size(14.dp)
+                            )
+                        } else if (cachedFavicon != null && !cachedFavicon.isRecycled) {
+                            androidx.compose.foundation.Image(
+                                bitmap = cachedFavicon.asImageBitmap(),
+                                contentDescription = "${tab.title} favicon",
+                                modifier = Modifier.size(16.dp)
                             )
                         } else {
                             val badgeChar = tab.host.firstOrNull()?.uppercaseChar()
@@ -457,7 +479,7 @@ private fun TabCompactCard(
                 IconButton(
                     onClick = onClose,
                     modifier = Modifier
-                        .size(28.dp)
+                        .size(32.dp)
                         .testTag("close_tab_${tab.id}")
                 ) {
                     Icon(
@@ -475,7 +497,7 @@ private fun TabCompactCard(
                     .fillMaxWidth()
                     .weight(1f)
                     .padding(vertical = 6.dp),
-                shape = RoundedCornerShape(8.dp),
+                shape = RoundedCornerShape(10.dp),
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
             ) {
                 Column(
@@ -485,21 +507,19 @@ private fun TabCompactCard(
                     verticalArrangement = Arrangement.Center
                 ) {
                     Text(
-                        text = if (tab.isHomePage) "Homepage" else tab.host.ifBlank { tab.url },
+                        text = if (tab.isHomePage) "NYXORA Homepage" else tab.host.ifBlank { tab.url },
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    if (!tab.isHomePage) {
-                        Text(
-                            text = tab.url,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
+                    Text(
+                        text = if (tab.isHomePage) "nyxora://home" else tab.url,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
             }
 
@@ -526,12 +546,19 @@ private fun TabCompactCard(
                         )
                     }
                     if (isSelected) {
-                        Text(
-                            text = "Active",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.Medium
-                        )
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+                            modifier = Modifier.testTag("active_tab_indicator_${tab.id}")
+                        ) {
+                            Text(
+                                text = "Active",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
                     }
                 }
 

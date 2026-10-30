@@ -762,6 +762,7 @@ fun NyxoraMainBrowserScreen(
                     },
                     onDeleteBookmark = { id -> viewModel.deleteBookmark(id) },
                     onMoveShortcut = viewModel::moveShortcut,
+                    onOpenBookmarks = { viewModel.setOverlaySheet(OverlaySheet.BOOKMARKS) },
                     onOpenHistory = { viewModel.setOverlaySheet(OverlaySheet.HISTORY) }
                 )
             } else {

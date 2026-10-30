@@ -344,7 +344,10 @@ class ExampleRobolectricTest {
 
     @Test
     fun `opening splash animation displays Crafted by Sudhamoy and transitions cleanly`() {
-        // Pause clock during initial splash window (< 200ms) to inspect the opening animation
+        assertEquals(2000L, com.example.ui.components.NYXORA_LAUNCH_ANIMATION_DURATION_MS)
+        assertEquals("CRAFTED BY SUDHAMOY", com.example.ui.components.CRAFTED_BY_SUDHAMOY_BRAND)
+
+        // Pause clock during initial splash window to inspect the glowing launch animation
         composeTestRule.mainClock.autoAdvance = false
         composeTestRule.mainClock.advanceTimeBy(80L)
 
@@ -353,7 +356,7 @@ class ExampleRobolectricTest {
                 .fetchSemanticsNodes().isNotEmpty()
         )
         assertTrue(
-            composeTestRule.onAllNodesWithText("Crafted by Sudhamoy", substring = false)
+            composeTestRule.onAllNodesWithText("CRAFTED BY SUDHAMOY", substring = false)
                 .fetchSemanticsNodes().isNotEmpty()
         )
 
@@ -362,6 +365,7 @@ class ExampleRobolectricTest {
         composeTestRule.waitForIdle()
 
         composeTestRule.onNodeWithTag("nyxora_main_browser_screen").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("home_creator_credit").assertIsDisplayed()
     }
 
     @Test
@@ -500,19 +504,38 @@ class ExampleRobolectricTest {
         composeTestRule.waitForIdle()
 
 
-        // 3. Open bottom menu -> Settings -> Verify Room Sync is removed from Settings and About NYXORA works
+        // Verify easy bookmark access directly below the homepage search bar
+        composeTestRule.onNodeWithTag("home_bookmarks_quick_access_button").assertIsDisplayed()
+
+        // Verify Version 2.0.0 build metadata
+        assertEquals("2.0.0", BuildConfig.VERSION_NAME)
+        assertEquals(2, BuildConfig.VERSION_CODE)
+
+        // 3. Open bottom menu -> Settings -> Verify 7 categories, Room Sync removed from Settings, and About NYXORA works
         composeTestRule.onNodeWithTag("toolbar_overflow_menu_button").performClick()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("menu_item_settings").performClick()
         composeTestRule.waitForIdle()
 
-        // Verify Settings Home has the 5 required categories and does NOT contain Room Sync button
+        // Verify Settings Home has all 7 required categories and does NOT contain Room Sync button
         composeTestRule.onNodeWithTag("settings_category_general").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("settings_category_customization").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("settings_category_privacy").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("settings_category_downloads").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("settings_category_media_video").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("settings_category_advanced").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("settings_category_about").performScrollTo().assertIsDisplayed()
 
+        // Verify dedicated Media & Video Assistant category
+        composeTestRule.onNodeWithTag("settings_category_media_video").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("settings_video_assistant_section").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("setting_video_assistant_toggle").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("video_assistant_max_zoom_label").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("settings_back_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+
+        // Verify Advanced category
         composeTestRule.onNodeWithTag("settings_category_advanced").performScrollTo().performClick()
         composeTestRule.waitForIdle()
         assertEquals(
@@ -520,17 +543,28 @@ class ExampleRobolectricTest {
             0,
             composeTestRule.onAllNodesWithTag("settings_open_connect_button").fetchSemanticsNodes().size
         )
+        composeTestRule.onNodeWithTag("settings_video_assistant_section").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("settings_back_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+
+        // Verify Appearance (Customization) controls for Launch Animation, Minimal Homepage Wallpaper, and disabling News Feeds / Promo Cards
+        composeTestRule.onNodeWithTag("settings_category_customization").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("setting_launch_animation_toggle").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("setting_home_wallpaper_toggle").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("setting_disable_news_feed_toggle").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("setting_disable_promo_cards_toggle").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("settings_back_button").performScrollTo().performClick()
         composeTestRule.waitForIdle()
 
         composeTestRule.onNodeWithTag("settings_search_input").performScrollTo().performTextReplacement("Sudhamoy")
         composeTestRule.waitForIdle()
 
-        composeTestRule.onNodeWithTag("about_nyxora_title").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("about_nyxora_tagline").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("about_nyxora_creator_credit").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("about_nyxora_title").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("about_nyxora_tagline").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("about_nyxora_creator_credit").performScrollTo().assertIsDisplayed()
         assertTrue(
-            composeTestRule.onAllNodesWithText("Crafted by Sudhamoy", substring = false)
+            composeTestRule.onAllNodesWithText("CRAFTED BY SUDHAMOY", substring = false)
                 .fetchSemanticsNodes().isNotEmpty()
         )
     }
@@ -720,20 +754,26 @@ class ExampleRobolectricTest {
         assertEquals("Fill Screen mode should scale custom view to 1.18f", 1.18f, secondPortraitVideoView.scaleX, 0.01f)
         assertEquals("Fill Screen mode should scale custom view to 1.18f", 1.18f, secondPortraitVideoView.scaleY, 0.01f)
 
-        // Reset back to Fit Screen (1.0f) and verify Video Zoom steps up to 1000% (10.0f) and resets cleanly to 100% (1.0f)
+        // Reset back to Fit Screen (1.0f) and verify Video Zoom steps up to 500% (5.0f), steps down via Zoom Out, and resets cleanly to 100% (1.0f)
         composeTestRule.onNodeWithTag("fullscreen_aspect_button").performClick()
         composeTestRule.waitForIdle()
         assertEquals(1.0f, secondPortraitVideoView.scaleX, 0.01f)
 
-        val expectedZoomSteps = listOf(1.15f, 1.30f, 1.50f, 2.0f, 3.0f, 5.0f, 7.5f, 10.0f)
+        val expectedZoomSteps = listOf(1.15f, 1.30f, 1.50f, 2.0f, 3.0f, 4.0f, 5.0f)
         for (expectedScale in expectedZoomSteps) {
             composeTestRule.onNodeWithTag("fullscreen_zoom_button").performClick()
             composeTestRule.waitForIdle()
-            assertEquals("Video zoom should step cleanly up to 1000% (10.0f)", expectedScale, secondPortraitVideoView.scaleX, 0.01f)
+            assertEquals("Video zoom should step cleanly up to 500% (5.0f)", expectedScale, secondPortraitVideoView.scaleX, 0.01f)
             assertEquals("Video zoom should preserve aspect ratio without stretching", expectedScale, secondPortraitVideoView.scaleY, 0.01f)
         }
 
-        // Verify 1-tap Reset Zoom button returns immediately from 1000% (10.0f) to 100% (1.0f)
+        // Verify convenient Zoom Out button steps down from 500% (5.0f) to 400% (4.0f)
+        composeTestRule.onNodeWithTag("fullscreen_zoom_out_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("fullscreen_zoom_out_button").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals("Zoom out button should step down from 5.0f to 4.0f", 4.0f, secondPortraitVideoView.scaleX, 0.01f)
+
+        // Verify 1-tap Reset Zoom button returns immediately to 100% (1.0f)
         composeTestRule.onNodeWithTag("fullscreen_zoom_reset_button").assertIsDisplayed()
         composeTestRule.onNodeWithTag("fullscreen_zoom_reset_button").performClick()
         composeTestRule.waitForIdle()
@@ -1433,14 +1473,14 @@ class ExampleRobolectricTest {
         )
 
         // =========================================================================
-        // 5. VERIFY VIDEO ZOOM UP TO 1000% (10.0x) WITH PINCH FOCAL POINT & PAN CLAMPING
+        // 5. VERIFY VIDEO ZOOM UP TO 500% (5.0x) WITH PINCH FOCAL POINT & PAN CLAMPING
         // =========================================================================
-        assertEquals(10.0f, com.example.ui.screens.MAX_VIDEO_ZOOM, 0.001f)
+        assertEquals(5.0f, com.example.ui.screens.MAX_VIDEO_ZOOM, 0.001f)
         val zoomedState = com.example.ui.screens.computeVideoZoomAndClampedPan(
             currentZoom = 1.0f,
             currentPanX = 0f,
             currentPanY = 0f,
-            zoomMultiplier = 12.0f, // Attempt above 10x should clamp cleanly to 10.0f (1000%)
+            zoomMultiplier = 8.0f,  // Attempt above 5x should clamp cleanly to 5.0f (500%)
             panDeltaX = 50000f,     // Attempt to pan far off-screen should clamp within bounds
             panDeltaY = -50000f,
             focalX = 540f,
@@ -1449,9 +1489,9 @@ class ExampleRobolectricTest {
             containerHeight = 1920f,
             baseAspectScale = 1.0f
         )
-        assertEquals("Pinch zoom must clamp at 10.0f (1000%)", 10.0f, zoomedState.zoom, 0.001f)
-        val maxAllowedPanX = (1080f * (10.0f - 1.0f)) / 2f
-        val maxAllowedPanY = (1920f * (10.0f - 1.0f)) / 2f
+        assertEquals("Pinch zoom must clamp at 5.0f (500%)", 5.0f, zoomedState.zoom, 0.001f)
+        val maxAllowedPanX = (1080f * (5.0f - 1.0f)) / 2f
+        val maxAllowedPanY = (1920f * (5.0f - 1.0f)) / 2f
         assertEquals("Horizontal pan must clamp so video never moves off-screen", maxAllowedPanX, zoomedState.panX, 0.5f)
         assertEquals("Vertical pan must clamp so video never moves off-screen", -maxAllowedPanY, zoomedState.panY, 0.5f)
 
@@ -1700,6 +1740,7 @@ class ExampleRobolectricTest {
         vm.createNewTab(url = "https://example.org/two", inPrivateMode = false, inBackground = true)
         composeTestRule.waitForIdle()
 
+        @Suppress("DEPRECATION")
         composeTestRule.activity.onTrimMemory(android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL)
         composeTestRule.waitForIdle()
 
@@ -1721,12 +1762,12 @@ class ExampleRobolectricTest {
         // 4. Verify Diagnostics UI in Settings > Advanced
         vm.setOverlaySheet(com.example.ui.viewmodel.OverlaySheet.SETTINGS)
         composeTestRule.waitForIdle()
-        composeTestRule.onNodeWithTag("settings_category_advanced").performClick()
+        composeTestRule.onNodeWithTag("settings_category_advanced").performScrollTo().performClick()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("settings_diagnostics_card").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("diagnostics_refresh_button").performScrollTo().performClick()
         composeTestRule.waitForIdle()
-        composeTestRule.onNodeWithTag("settings_back_button").performClick()
+        composeTestRule.onNodeWithTag("settings_back_button").performScrollTo().performClick()
         composeTestRule.waitForIdle()
 
         vm.closeAllTabs(inPrivateMode = false)

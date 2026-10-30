@@ -73,6 +73,10 @@ data class NyxoraSettingsState(
     val showHomeRecentActivity: Boolean = false,
     val showHomeQuickTools: Boolean = false,
     val showAmbientHomeBackground: Boolean = false,
+    val homeWallpaperStyle: String = "AURORA_BLUE",
+    val showHomeNewsFeed: Boolean = false,
+    val showHomePromotionalCards: Boolean = false,
+    val launchAnimationEnabled: Boolean = true,
     val globalTextZoom: Int = 100,
     val compactBottomToolbar: Boolean = false,
     val reducedMotion: Boolean = false,
@@ -113,7 +117,8 @@ data class NyxoraSettingsState(
     // Gestures
     val edgeSwipeBackForward: Boolean = true,
     val pullToRefreshEnabled: Boolean = true,
-    // Video
+    // Video Assistant & Playback
+    val videoAssistantEnabled: Boolean = true,
     val fullscreenOrientationMode: FullscreenOrientationMode = FullscreenOrientationMode.KEEP_CURRENT,
     val defaultVideoAspectMode: VideoAspectMode = VideoAspectMode.FIT,
     val pipEnabled: Boolean = true,
@@ -141,6 +146,10 @@ class NyxoraSettingsDataStore(private val context: Context) {
         val SHOW_HOME_RECENT = booleanPreferencesKey("show_home_recent")
         val SHOW_HOME_QUICK_TOOLS = booleanPreferencesKey("show_home_quick_tools")
         val SHOW_AMBIENT_BG = booleanPreferencesKey("show_ambient_bg")
+        val HOME_WALLPAPER_STYLE = stringPreferencesKey("home_wallpaper_style")
+        val SHOW_HOME_NEWS_FEED = booleanPreferencesKey("show_home_news_feed")
+        val SHOW_HOME_PROMO_CARDS = booleanPreferencesKey("show_home_promo_cards")
+        val LAUNCH_ANIMATION_ENABLED = booleanPreferencesKey("launch_animation_enabled")
         val GLOBAL_TEXT_ZOOM = intPreferencesKey("global_text_zoom")
         val COMPACT_TOOLBAR = booleanPreferencesKey("compact_toolbar")
         val REDUCED_MOTION = booleanPreferencesKey("reduced_motion")
@@ -182,6 +191,7 @@ class NyxoraSettingsDataStore(private val context: Context) {
         val EDGE_SWIPE = booleanPreferencesKey("edge_swipe")
         val PULL_TO_REFRESH = booleanPreferencesKey("pull_to_refresh")
 
+        val VIDEO_ASSISTANT_ENABLED = booleanPreferencesKey("video_assistant_enabled")
         val FULLSCREEN_ORIENTATION = stringPreferencesKey("fullscreen_orientation")
         val VIDEO_ASPECT_MODE = stringPreferencesKey("video_aspect_mode")
         val PIP_ENABLED = booleanPreferencesKey("pip_enabled")
@@ -220,6 +230,10 @@ class NyxoraSettingsDataStore(private val context: Context) {
             showHomeRecentActivity = prefs[Keys.SHOW_HOME_RECENT] ?: false,
             showHomeQuickTools = prefs[Keys.SHOW_HOME_QUICK_TOOLS] ?: false,
             showAmbientHomeBackground = prefs[Keys.SHOW_AMBIENT_BG] ?: false,
+            homeWallpaperStyle = (prefs[Keys.HOME_WALLPAPER_STYLE] ?: "AURORA_BLUE").ifBlank { "AURORA_BLUE" },
+            showHomeNewsFeed = prefs[Keys.SHOW_HOME_NEWS_FEED] ?: false,
+            showHomePromotionalCards = prefs[Keys.SHOW_HOME_PROMO_CARDS] ?: false,
+            launchAnimationEnabled = prefs[Keys.LAUNCH_ANIMATION_ENABLED] ?: true,
             globalTextZoom = (prefs[Keys.GLOBAL_TEXT_ZOOM] ?: 100).coerceIn(50, 250),
             compactBottomToolbar = prefs[Keys.COMPACT_TOOLBAR] ?: false,
             reducedMotion = prefs[Keys.REDUCED_MOTION] ?: false,
@@ -253,6 +267,7 @@ class NyxoraSettingsDataStore(private val context: Context) {
             downloadNotificationsEnabled = prefs[Keys.DOWNLOAD_NOTIFICATIONS] ?: true,
             edgeSwipeBackForward = prefs[Keys.EDGE_SWIPE] ?: true,
             pullToRefreshEnabled = prefs[Keys.PULL_TO_REFRESH] ?: true,
+            videoAssistantEnabled = prefs[Keys.VIDEO_ASSISTANT_ENABLED] ?: true,
             fullscreenOrientationMode = runCatching {
                 FullscreenOrientationMode.valueOf(prefs[Keys.FULLSCREEN_ORIENTATION] ?: FullscreenOrientationMode.KEEP_CURRENT.name)
             }.getOrDefault(FullscreenOrientationMode.KEEP_CURRENT),
@@ -284,6 +299,10 @@ class NyxoraSettingsDataStore(private val context: Context) {
             prefs[Keys.SHOW_HOME_RECENT] = updated.showHomeRecentActivity
             prefs[Keys.SHOW_HOME_QUICK_TOOLS] = updated.showHomeQuickTools
             prefs[Keys.SHOW_AMBIENT_BG] = updated.showAmbientHomeBackground
+            prefs[Keys.HOME_WALLPAPER_STYLE] = updated.homeWallpaperStyle.ifBlank { "AURORA_BLUE" }
+            prefs[Keys.SHOW_HOME_NEWS_FEED] = updated.showHomeNewsFeed
+            prefs[Keys.SHOW_HOME_PROMO_CARDS] = updated.showHomePromotionalCards
+            prefs[Keys.LAUNCH_ANIMATION_ENABLED] = updated.launchAnimationEnabled
             prefs[Keys.GLOBAL_TEXT_ZOOM] = updated.globalTextZoom.coerceIn(50, 250)
             prefs[Keys.COMPACT_TOOLBAR] = updated.compactBottomToolbar
             prefs[Keys.REDUCED_MOTION] = updated.reducedMotion
@@ -317,6 +336,7 @@ class NyxoraSettingsDataStore(private val context: Context) {
             prefs[Keys.DOWNLOAD_NOTIFICATIONS] = updated.downloadNotificationsEnabled
             prefs[Keys.EDGE_SWIPE] = updated.edgeSwipeBackForward
             prefs[Keys.PULL_TO_REFRESH] = updated.pullToRefreshEnabled
+            prefs[Keys.VIDEO_ASSISTANT_ENABLED] = updated.videoAssistantEnabled
             prefs[Keys.FULLSCREEN_ORIENTATION] = updated.fullscreenOrientationMode.name
             prefs[Keys.VIDEO_ASPECT_MODE] = updated.defaultVideoAspectMode.name
             prefs[Keys.PIP_ENABLED] = updated.pipEnabled

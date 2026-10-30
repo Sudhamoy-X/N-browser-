@@ -101,6 +101,7 @@ fun NyxoraHomePage(
     onAddShortcut: (title: String, url: String) -> Unit,
     onDeleteBookmark: (String) -> Unit,
     onMoveShortcut: (shortcutId: String, moveEarlier: Boolean) -> Unit = { _, _ -> },
+    onOpenBookmarks: () -> Unit = {},
     @Suppress("UNUSED_PARAMETER")
     onOpenHistory: () -> Unit = {}
 ) {
@@ -140,6 +141,10 @@ fun NyxoraHomePage(
             .background(MaterialTheme.colorScheme.background)
             .testTag("nyxora_minimal_homepage")
     ) {
+        if (settings.showAmbientHomeBackground) {
+            NyxoraMinimalHomeWallpaper(style = settings.homeWallpaperStyle)
+        }
+
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
@@ -148,35 +153,119 @@ fun NyxoraHomePage(
             contentPadding = PaddingValues(
                 start = 24.dp,
                 end = 24.dp,
-                top = if (hasShortcutsData) 48.dp else 96.dp,
+                top = if (hasShortcutsData) 48.dp else 88.dp,
                 bottom = 28.dp
             ),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(20.dp)
+            verticalArrangement = Arrangement.spacedBy(18.dp)
         ) {
             // 1. Center Area: Balanced NYXORA Logo
             item {
                 MinimalHomeBrandHeader(isPrivateMode = isPrivateMode)
             }
 
-            // 2. Clean Functional Search / URL Field below Logo
+            // 2. Clean Functional Search / URL Field below Logo + Easy Bookmark Access directly below
             item {
-                MinimalHomeSearchBox(
-                    query = searchQuery,
-                    searchEngineLabel = settings.searchEngine.label,
-                    isPrivateMode = isPrivateMode,
-                    focusRequester = searchFocusRequester,
-                    onQueryChange = { searchQuery = it },
-                    onClear = { searchQuery = "" },
-                    onSubmit = {
-                        val submitted = searchQuery.trim()
-                        if (submitted.isNotEmpty()) {
-                            focusManager.clearFocus()
-                            searchQuery = ""
-                            onNavigateToUrl(submitted)
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    MinimalHomeSearchBox(
+                        query = searchQuery,
+                        searchEngineLabel = settings.searchEngine.label,
+                        isPrivateMode = isPrivateMode,
+                        focusRequester = searchFocusRequester,
+                        onQueryChange = { searchQuery = it },
+                        onClear = { searchQuery = "" },
+                        onSubmit = {
+                            val submitted = searchQuery.trim()
+                            if (submitted.isNotEmpty()) {
+                                focusManager.clearFocus()
+                                searchQuery = ""
+                                onNavigateToUrl(submitted)
+                            }
+                        }
+                    )
+
+                    // Easy Bookmark Access directly below the search bar
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("home_below_search_actions_row"),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Surface(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .border(
+                                    width = 1.dp,
+                                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.65f),
+                                    shape = RoundedCornerShape(50)
+                                )
+                                .clickable(onClick = onOpenBookmarks)
+                                .testTag("home_bookmarks_quick_access_button"),
+                            shape = RoundedCornerShape(50),
+                            color = MaterialTheme.colorScheme.surface
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.BookmarkBorder,
+                                    contentDescription = "Bookmarks",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Text(
+                                    text = if (bookmarks.isNotEmpty()) {
+                                        "Bookmarks (${bookmarks.size})"
+                                    } else {
+                                        "Bookmarks"
+                                    },
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+
+                        if (!isPrivateMode) {
+                            Surface(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(50))
+                                    .border(
+                                        width = 1.dp,
+                                        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
+                                        shape = RoundedCornerShape(50)
+                                    )
+                                    .clickable { showAddShortcutDialog = true }
+                                    .testTag("home_customize_shortcuts_button"),
+                                shape = RoundedCornerShape(50),
+                                color = MaterialTheme.colorScheme.surface
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Outlined.Add,
+                                        contentDescription = "Add Shortcut",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Text(
+                                        text = "Add Shortcut",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
                         }
                     }
-                )
+                }
             }
 
             // Autocomplete Suggestions when typing
@@ -217,6 +306,14 @@ fun NyxoraHomePage(
                         onAddShortcutClick = { showAddShortcutDialog = true }
                     )
                 }
+            }
+
+            // 5. Understated Creator Branding: CRAFTED BY SUDHAMOY
+            item {
+                Spacer(modifier = Modifier.height(8.dp))
+                com.example.ui.components.NyxoraCreatorSignature(
+                    textTestTag = "home_creator_credit"
+                )
             }
         }
     }
@@ -637,15 +734,15 @@ private fun ShortcutCompactTile(
 
     Surface(
         modifier = modifier
-            .widthIn(min = 72.dp)
-            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp))
-            .clip(RoundedCornerShape(10.dp))
+            .widthIn(min = 74.dp)
+            .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.65f), RoundedCornerShape(16.dp))
+            .clip(RoundedCornerShape(16.dp))
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = onRemove
             )
             .testTag("shortcut_tile_${item.id}"),
-        shape = RoundedCornerShape(10.dp),
+        shape = RoundedCornerShape(16.dp),
         color = MaterialTheme.colorScheme.surface
     ) {
         Column(
@@ -655,9 +752,9 @@ private fun ShortcutCompactTile(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Surface(
-                shape = RoundedCornerShape(8.dp),
+                shape = RoundedCornerShape(12.dp),
                 color = MaterialTheme.colorScheme.surfaceVariant,
-                modifier = Modifier.size(32.dp)
+                modifier = Modifier.size(36.dp)
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     val bmp = faviconBitmap
@@ -668,7 +765,7 @@ private fun ShortcutCompactTile(
                             contentScale = ContentScale.Fit,
                             modifier = Modifier
                                 .size(22.dp)
-                                .clip(RoundedCornerShape(4.dp))
+                                .clip(RoundedCornerShape(6.dp))
                                 .testTag("shortcut_favicon_image_${item.id}")
                         )
                     } else {
@@ -741,3 +838,57 @@ private fun ShortcutCompactTile(
         }
     }
 }
+
+@Composable
+private fun NyxoraMinimalHomeWallpaper(style: String = "AURORA_BLUE") {
+    val primaryColor = MaterialTheme.colorScheme.primary
+    val secondaryColor = MaterialTheme.colorScheme.secondary
+    val (topColor, bottomColor) = when (style) {
+        "OBSIDIAN_GLOW" -> Pair(
+            primaryColor.copy(alpha = 0.09f),
+            primaryColor.copy(alpha = 0.06f)
+        )
+        "MIDNIGHT_SLATE" -> Pair(
+            secondaryColor.copy(alpha = 0.13f),
+            primaryColor.copy(alpha = 0.07f)
+        )
+        else -> Pair(
+            primaryColor.copy(alpha = 0.14f),
+            secondaryColor.copy(alpha = 0.09f)
+        )
+    }
+    androidx.compose.foundation.Canvas(
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("home_minimal_wallpaper_layer")
+    ) {
+        val w = size.width
+        val h = size.height
+        drawCircle(
+            brush = androidx.compose.ui.graphics.Brush.radialGradient(
+                colors = listOf(
+                    topColor,
+                    secondaryColor.copy(alpha = 0.04f),
+                    androidx.compose.ui.graphics.Color.Transparent
+                ),
+                center = androidx.compose.ui.geometry.Offset(w * 0.5f, h * 0.24f),
+                radius = w * 0.72f
+            ),
+            radius = w * 0.72f,
+            center = androidx.compose.ui.geometry.Offset(w * 0.5f, h * 0.24f)
+        )
+        drawCircle(
+            brush = androidx.compose.ui.graphics.Brush.radialGradient(
+                colors = listOf(
+                    bottomColor,
+                    androidx.compose.ui.graphics.Color.Transparent
+                ),
+                center = androidx.compose.ui.geometry.Offset(w * 0.82f, h * 0.76f),
+                radius = w * 0.55f
+            ),
+            radius = w * 0.55f,
+            center = androidx.compose.ui.geometry.Offset(w * 0.82f, h * 0.76f)
+        )
+    }
+}
+

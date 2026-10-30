@@ -1004,28 +1004,36 @@ fun NyxoraReaderModeSheet(
     }
 }
 
-// --- CLEAN 5-CATEGORY SETTINGS SCREEN ---
+// --- PROFESSIONAL 7-CATEGORY SETTINGS SCREEN (NYXORA 2.0) ---
 
 enum class SettingsCategory(val title: String, val subtitle: String) {
     GENERAL(
         title = "General",
-        subtitle = "Homepage, Default Search Engine, Site Settings, Downloads, Startup"
+        subtitle = "Homepage, Default Search Engine, Site Settings, Startup, Default Browser"
     ),
     CUSTOMIZATION(
-        title = "Customization",
-        subtitle = "Theme, Homepage shortcuts, Toolbar layout, Text size, Language"
+        title = "Appearance",
+        subtitle = "Theme, Minimal Wallpaper, Homepage Shortcuts, Launch Animation, Toolbar, Text Size"
     ),
     PRIVACY(
-        title = "Privacy",
-        subtitle = "Ad Blocking, Pop-ups, Incognito, Clear Browsing Data, Cookies, DNT"
+        title = "Privacy & Security",
+        subtitle = "Ad & Tracker Blocking, Pop-ups, Incognito PIN, Cookies, HTTPS-Only, Clear Data"
+    ),
+    DOWNLOADS(
+        title = "Downloads",
+        subtitle = "Download Manager, Risky File Warnings, Download Notifications, Storage"
+    ),
+    MEDIA_VIDEO_ASSISTANT(
+        title = "Media & Video Assistant",
+        subtitle = "Video Assistant, 500% Max Zoom, Fullscreen Orientation, Aspect Ratio, PiP"
     ),
     ADVANCED(
         title = "Advanced",
-        subtitle = "Gesture Navigation, Video Preferences, Accessibility, Cache, Reset"
+        subtitle = "Gesture Navigation, Accessibility, Cache, Reset Settings, Diagnostics"
     ),
     ABOUT(
         title = "About NYXORA",
-        subtitle = "App version, Engine capabilities, Open-source licenses"
+        subtitle = "NYXORA Browser 2.0, Automatic APK Updates, Engine Capabilities, Licenses"
     )
 }
 
@@ -1037,6 +1045,12 @@ private val SUPPORTED_LANGUAGES = listOf(
     "Deutsch",
     "हिन्दी",
     "日本語"
+)
+
+private val WALLPAPER_STYLES = listOf(
+    "AURORA_BLUE" to "Aurora Blue",
+    "OBSIDIAN_GLOW" to "Obsidian Glow",
+    "MIDNIGHT_SLATE" to "Midnight Slate"
 )
 
 @Composable
@@ -1066,9 +1080,11 @@ fun NyxoraSettingsScreen(
 ) {
     val context = LocalContext.current
     var selectedCategory by remember { mutableStateOf<SettingsCategory?>(null) }
+    val settingsScrollState = rememberScrollState()
 
     // Automatically check for new releases when the user opens Settings > About NYXORA
     LaunchedEffect(selectedCategory) {
+        settingsScrollState.scrollTo(0)
         if (selectedCategory == SettingsCategory.ABOUT) {
             onCheckForUpdates(false)
         }
@@ -1106,9 +1122,9 @@ fun NyxoraSettingsScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .widthIn(max = 700.dp)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 6.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+                .verticalScroll(settingsScrollState)
+                .padding(horizontal = 16.dp, vertical = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             // Header
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1152,7 +1168,7 @@ fun NyxoraSettingsScreen(
                 )
             }
 
-            // Settings Home: 5 clean categories when not searching
+            // Settings Home: 7 clean categories when not searching
             if (selectedCategory == null && !isSearching) {
                 SettingsCategoryRow(
                     icon = Icons.Outlined.Settings,
@@ -1171,6 +1187,18 @@ fun NyxoraSettingsScreen(
                     category = SettingsCategory.PRIVACY,
                     testTag = "settings_category_privacy",
                     onClick = { selectedCategory = SettingsCategory.PRIVACY }
+                )
+                SettingsCategoryRow(
+                    icon = Icons.Outlined.Download,
+                    category = SettingsCategory.DOWNLOADS,
+                    testTag = "settings_category_downloads",
+                    onClick = { selectedCategory = SettingsCategory.DOWNLOADS }
+                )
+                SettingsCategoryRow(
+                    icon = Icons.Outlined.PlayArrow,
+                    category = SettingsCategory.MEDIA_VIDEO_ASSISTANT,
+                    testTag = "settings_category_media_video",
+                    onClick = { selectedCategory = SettingsCategory.MEDIA_VIDEO_ASSISTANT }
                 )
                 SettingsCategoryRow(
                     icon = Icons.Outlined.Tune,
@@ -1272,30 +1300,6 @@ fun NyxoraSettingsScreen(
 
                     HorizontalDivider(color = MaterialTheme.colorScheme.outline)
 
-                    // Downloads
-                    SettingToggleItem(
-                        title = "Confirm Risky Downloads",
-                        subtitle = "Warn before downloading APK or executable files",
-                        checked = settings.downloadConfirmRiskyFiles,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(downloadConfirmRiskyFiles = v) } }
-                    )
-                    SettingToggleItem(
-                        title = "Download Notifications",
-                        subtitle = "Show progress and completion notifications",
-                        checked = settings.downloadNotificationsEnabled,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(downloadNotificationsEnabled = v) } }
-                    )
-                    OutlinedButton(
-                        onClick = onOpenDownloads,
-                        modifier = Modifier.testTag("settings_open_downloads_button")
-                    ) {
-                        Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Manage Downloads")
-                    }
-
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
-
                     // Restore Tabs on Startup
                     SettingToggleItem(
                         title = "Restore Tabs on Startup",
@@ -1303,6 +1307,17 @@ fun NyxoraSettingsScreen(
                         checked = settings.restoreTabsOnStartup,
                         onCheckedChange = { v -> onUpdateSettings { it.copy(restoreTabsOnStartup = v) } }
                     )
+
+                    if (selectedCategory == SettingsCategory.GENERAL) {
+                        OutlinedButton(
+                            onClick = onOpenDownloads,
+                            modifier = Modifier.testTag("settings_open_downloads_button")
+                        ) {
+                            Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Manage Downloads")
+                        }
+                    }
 
                     // Set as Default Browser
                     OutlinedButton(
@@ -1332,11 +1347,11 @@ fun NyxoraSettingsScreen(
                 }
             }
 
-            // 2. CUSTOMIZATION
+            // 2. APPEARANCE (CUSTOMIZATION)
             if (selectedCategory == SettingsCategory.CUSTOMIZATION ||
-                matchesSearch("Customization", "Appearance", "Theme", "Light", "Dark", "System", "Shortcuts", "Toolbar", "Text size", "Language")
+                matchesSearch("Customization", "Appearance", "Theme", "Light", "Dark", "System", "Shortcuts", "Wallpaper", "Animation", "Launch", "News", "Promo", "Cards", "Toolbar", "Text size", "Language")
             ) {
-                SettingsSectionCard(title = "Customization") {
+                SettingsSectionCard(title = "Appearance") {
                     Text("Theme", style = MaterialTheme.typography.bodyLarge)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         for (mode in ThemeMode.entries) {
@@ -1357,8 +1372,18 @@ fun NyxoraSettingsScreen(
                     }
 
                     SettingToggleItem(
+                        title = "Opening Launch Animation",
+                        subtitle = "Play the 2-second glowing NYXORA opening animation on subsequent launches",
+                        checked = settings.launchAnimationEnabled,
+                        onCheckedChange = { v ->
+                            onUpdateSettings { it.copy(launchAnimationEnabled = v) }
+                        },
+                        testTag = "setting_launch_animation_toggle"
+                    )
+
+                    SettingToggleItem(
                         title = "Homepage Shortcuts",
-                        subtitle = "Display saved shortcuts on the homepage",
+                        subtitle = "Display rounded website shortcuts with cached favicons on the homepage",
                         checked = settings.homepageShortcutsEnabled,
                         onCheckedChange = { v ->
                             onUpdateSettings {
@@ -1368,7 +1393,64 @@ fun NyxoraSettingsScreen(
                                     showHomeFreqVisited = false
                                 )
                             }
+                        },
+                        testTag = "setting_home_shortcuts_toggle"
+                    )
+
+                    SettingToggleItem(
+                        title = "Minimal Homepage Wallpaper",
+                        subtitle = "Show subtle atmospheric glow wallpaper on the NYXORA homepage",
+                        checked = settings.showAmbientHomeBackground,
+                        onCheckedChange = { v ->
+                            onUpdateSettings { it.copy(showAmbientHomeBackground = v) }
+                        },
+                        testTag = "setting_home_wallpaper_toggle"
+                    )
+
+                    if (settings.showAmbientHomeBackground) {
+                        Row(
+                            modifier = Modifier
+                                .horizontalScroll(rememberScrollState())
+                                .testTag("setting_home_wallpaper_style_row"),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            for ((styleKey, styleLabel) in WALLPAPER_STYLES) {
+                                FilterChip(
+                                    selected = settings.homeWallpaperStyle == styleKey,
+                                    onClick = {
+                                        onUpdateSettings { it.copy(homeWallpaperStyle = styleKey) }
+                                    },
+                                    label = { Text(styleLabel) }
+                                )
+                            }
                         }
+                    }
+
+                    SettingToggleItem(
+                        title = "Disable News Feeds & Extra Homepage Cards",
+                        subtitle = "Keep the homepage distraction-free without news feeds, discovery cards, or activity clutter",
+                        checked = !settings.showHomeNewsFeed && !settings.showHomeFreqVisited && !settings.showHomeRecentActivity,
+                        onCheckedChange = { disableExtras ->
+                            onUpdateSettings {
+                                it.copy(
+                                    showHomeNewsFeed = !disableExtras,
+                                    showHomeFreqVisited = false,
+                                    showHomeRecentActivity = !disableExtras,
+                                    showHomeGreeting = false
+                                )
+                            }
+                        },
+                        testTag = "setting_disable_news_feed_toggle"
+                    )
+
+                    SettingToggleItem(
+                        title = "Disable Promotional & Discovery Cards",
+                        subtitle = "Prevent promotional banners and sponsored cards from appearing on the homepage",
+                        checked = !settings.showHomePromotionalCards,
+                        onCheckedChange = { disablePromo ->
+                            onUpdateSettings { it.copy(showHomePromotionalCards = !disablePromo) }
+                        },
+                        testTag = "setting_disable_promo_cards_toggle"
                     )
 
                     SettingToggleItem(
@@ -1430,11 +1512,11 @@ fun NyxoraSettingsScreen(
                 }
             }
 
-            // 3. PRIVACY
+            // 3. PRIVACY & SECURITY
             if (selectedCategory == SettingsCategory.PRIVACY ||
                 matchesSearch("Privacy", "Security", "Ad", "Pop-up", "Incognito", "Clear", "Cookie", "Do Not Track", "HTTPS", "Backup")
             ) {
-                SettingsSectionCard(title = "Privacy") {
+                SettingsSectionCard(title = "Privacy & Security") {
                     SettingToggleItem(
                         title = "Ad & Tracker Blocking",
                         subtitle = "Block intrusive ads and trackers (${settings.totalAdsBlockedCount} blocked)",
@@ -1530,9 +1612,124 @@ fun NyxoraSettingsScreen(
                 }
             }
 
-            // 4. ADVANCED
+            // 4. DOWNLOADS
+            if (selectedCategory == SettingsCategory.DOWNLOADS ||
+                matchesSearch("Downloads", "Risky", "File", "Download Notifications")
+            ) {
+                SettingsSectionCard(title = "Downloads") {
+                    SettingToggleItem(
+                        title = "Confirm Risky Downloads",
+                        subtitle = "Warn before downloading APK or executable files",
+                        checked = settings.downloadConfirmRiskyFiles,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(downloadConfirmRiskyFiles = v) } },
+                        testTag = "setting_confirm_risky_downloads_toggle"
+                    )
+                    SettingToggleItem(
+                        title = "Download Notifications",
+                        subtitle = "Show progress and completion notifications in the system tray",
+                        checked = settings.downloadNotificationsEnabled,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(downloadNotificationsEnabled = v) } },
+                        testTag = "setting_download_notifications_toggle"
+                    )
+                    Text(
+                        text = "Storage Location: Android Public Downloads folder (scoped storage)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedButton(
+                        onClick = onOpenDownloads,
+                        modifier = Modifier.testTag("settings_open_downloads_button")
+                    ) {
+                        Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Open Download Manager")
+                    }
+                }
+            }
+
+            // 5. MEDIA & VIDEO ASSISTANT
+            if (selectedCategory == SettingsCategory.MEDIA_VIDEO_ASSISTANT ||
+                matchesSearch("Media", "Video", "Video Assistant", "Zoom", "500%", "Fullscreen", "Orientation", "Aspect", "PiP", "Picture-in-Picture", "Keep Screen On", "Background Audio")
+            ) {
+                SettingsSectionCard(title = "Media & Video Assistant") {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("settings_video_assistant_section"),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        SettingToggleItem(
+                            title = "Video Assistant",
+                            subtitle = "Enable fullscreen video assistant toolbar with orientation, fit/fill, zoom-out/reset, and up to 500% zoom",
+                            checked = settings.videoAssistantEnabled,
+                            onCheckedChange = { v -> onUpdateSettings { it.copy(videoAssistantEnabled = v) } },
+                            testTag = "setting_video_assistant_toggle"
+                        )
+                        Text(
+                            text = "Maximum Video Zoom: 500% (with Zoom-Out & 1-Tap Reset)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.testTag("video_assistant_max_zoom_label")
+                        )
+                        Text(
+                            text = "Fullscreen Orientation: ${settings.fullscreenOrientationMode.label}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            for (mode in FullscreenOrientationMode.entries) {
+                                FilterChip(
+                                    selected = settings.fullscreenOrientationMode == mode,
+                                    onClick = { onUpdateSettings { it.copy(fullscreenOrientationMode = mode) } },
+                                    label = { Text(mode.name) }
+                                )
+                            }
+                        }
+                        Text(
+                            text = "Default Video Aspect Ratio: ${settings.defaultVideoAspectMode.label}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            for (aspect in VideoAspectMode.entries) {
+                                FilterChip(
+                                    selected = settings.defaultVideoAspectMode == aspect,
+                                    onClick = { onUpdateSettings { it.copy(defaultVideoAspectMode = aspect) } },
+                                    label = { Text(aspect.label) }
+                                )
+                            }
+                        }
+                        SettingToggleItem(
+                            title = "Picture-in-Picture (PiP)",
+                            subtitle = "Allow supported fullscreen videos to continue in a floating PiP window",
+                            checked = settings.pipEnabled,
+                            onCheckedChange = { v -> onUpdateSettings { it.copy(pipEnabled = v) } }
+                        )
+                        SettingToggleItem(
+                            title = "Keep Screen On During Video",
+                            subtitle = "Prevent screen sleep while fullscreen video is playing",
+                            checked = settings.keepScreenOnWhilePlaying,
+                            onCheckedChange = { v -> onUpdateSettings { it.copy(keepScreenOnWhilePlaying = v) } }
+                        )
+                        SettingToggleItem(
+                            title = "Background Audio Playback",
+                            subtitle = "Allow supported HTML5 media audio to continue when tab is in the background",
+                            checked = settings.backgroundAudioEnabled,
+                            onCheckedChange = { v -> onUpdateSettings { it.copy(backgroundAudioEnabled = v) } }
+                        )
+                    }
+                }
+            }
+
+            // 6. ADVANCED
             if (selectedCategory == SettingsCategory.ADVANCED ||
-                matchesSearch("Advanced", "Gesture", "Swipe", "Video", "Fullscreen", "Orientation", "Accessibility", "Cache", "Reset", "Diagnostics", "Memory", "CPU", "Crash")
+                matchesSearch("Advanced", "Gesture", "Swipe", "Accessibility", "Cache", "Reset", "Diagnostics", "Memory", "CPU", "Crash")
             ) {
                 SettingsSectionCard(title = "Advanced") {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1585,44 +1782,48 @@ fun NyxoraSettingsScreen(
 
                     HorizontalDivider(color = MaterialTheme.colorScheme.outline)
 
-                    Text("Video Preferences", style = MaterialTheme.typography.labelLarge)
-                    Text(
-                        text = "Fullscreen Orientation: ${settings.fullscreenOrientationMode.label}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Row(
-                        modifier = Modifier.horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        for (mode in FullscreenOrientationMode.entries) {
-                            FilterChip(
-                                selected = settings.fullscreenOrientationMode == mode,
-                                onClick = { onUpdateSettings { it.copy(fullscreenOrientationMode = mode) } },
-                                label = { Text(mode.name) }
+                    if (selectedCategory == SettingsCategory.ADVANCED) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("settings_video_assistant_section"),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text("Video Assistant & Playback", style = MaterialTheme.typography.labelLarge)
+                            SettingToggleItem(
+                                title = "Video Assistant",
+                                subtitle = "Enable fullscreen video assistant toolbar with orientation, fit/fill, zoom-out/reset, and up to 500% zoom",
+                                checked = settings.videoAssistantEnabled,
+                                onCheckedChange = { v -> onUpdateSettings { it.copy(videoAssistantEnabled = v) } },
+                                testTag = "setting_video_assistant_toggle"
                             )
-                        }
-                    }
-                    Row(
-                        modifier = Modifier.horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        for (aspect in VideoAspectMode.entries) {
-                            FilterChip(
-                                selected = settings.defaultVideoAspectMode == aspect,
-                                onClick = { onUpdateSettings { it.copy(defaultVideoAspectMode = aspect) } },
-                                label = { Text(aspect.label) }
+                            Text(
+                                text = "Maximum Video Zoom: 500% (with Zoom-Out & 1-Tap Reset)",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.testTag("video_assistant_max_zoom_label")
                             )
+                            Text(
+                                text = "Fullscreen Orientation: ${settings.fullscreenOrientationMode.label}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Row(
+                                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                for (mode in FullscreenOrientationMode.entries) {
+                                    FilterChip(
+                                        selected = settings.fullscreenOrientationMode == mode,
+                                        onClick = { onUpdateSettings { it.copy(fullscreenOrientationMode = mode) } },
+                                        label = { Text(mode.name) }
+                                    )
+                                }
+                            }
                         }
-                    }
-                    SettingToggleItem(
-                        title = "Keep Screen On During Video",
-                        subtitle = "Prevent screen sleep while fullscreen video is playing",
-                        checked = settings.keepScreenOnWhilePlaying,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(keepScreenOnWhilePlaying = v) } }
-                    )
 
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                    }
 
                     Text("Accessibility", style = MaterialTheme.typography.labelLarge)
                     SettingToggleItem(
@@ -1709,9 +1910,9 @@ fun NyxoraSettingsScreen(
                 }
             }
 
-            // 5. ABOUT NYXORA
+            // 7. ABOUT NYXORA
             if (selectedCategory == SettingsCategory.ABOUT ||
-                matchesSearch("About", "NYXORA", "Sudhamoy", "Crafted", "Version", "Update", "APK", "Release", "Engine", "WebView", "Capability", "Licenses")
+                matchesSearch("About", "NYXORA", "Sudhamoy", "Crafted", "Version", "2.0", "Update", "APK", "Release", "Engine", "WebView", "Capability", "Licenses")
             ) {
                 SettingsSectionCard(title = "About NYXORA") {
                     Row(
@@ -1721,7 +1922,7 @@ fun NyxoraSettingsScreen(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "NYXORA Browser",
+                                text = "NYXORA Browser 2.0",
                                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                                 modifier = Modifier.testTag("about_nyxora_title")
                             )
@@ -1799,11 +2000,8 @@ fun NyxoraSettingsScreen(
 
                     HorizontalDivider(color = MaterialTheme.colorScheme.outline)
 
-                    Text(
-                        text = "Crafted by Sudhamoy",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.testTag("about_nyxora_creator_credit")
+                    com.example.ui.components.NyxoraCreatorSignature(
+                        textTestTag = "about_nyxora_creator_credit"
                     )
                 }
             }

@@ -137,8 +137,8 @@ internal const val DESKTOP_USER_AGENT =
 private const val MAX_LIVE_WEBVIEW_TABS = 3
 internal const val VIDEO_TOOLBAR_AUTO_HIDE_MS = 2500L
 internal const val MIN_VIDEO_ZOOM = 1.0f
-internal const val MAX_VIDEO_ZOOM = 10.0f
-internal val VIDEO_ZOOM_LEVELS = floatArrayOf(1.0f, 1.15f, 1.30f, 1.50f, 2.0f, 3.0f, 5.0f, 7.5f, 10.0f)
+internal const val MAX_VIDEO_ZOOM = 5.0f
+internal val VIDEO_ZOOM_LEVELS = floatArrayOf(1.0f, 1.15f, 1.30f, 1.50f, 2.0f, 3.0f, 4.0f, 5.0f)
 
 internal data class VideoZoomTransform(
     val zoom: Float,
@@ -148,7 +148,7 @@ internal data class VideoZoomTransform(
 
 /**
  * Computes two-finger pinch-to-zoom centered around the user's focal point and clamps pan offsets
- * so the video never moves completely off-screen while preserving aspect ratio (100% to 1000%).
+ * so the video never moves completely off-screen while preserving aspect ratio (100% to 500%).
  */
 internal fun computeVideoZoomAndClampedPan(
     currentZoom: Float,
@@ -1178,37 +1178,92 @@ fun NyxoraWebEngineView(
                     }
                 )
 
-                // Easy 1-tap Reset to 100% pill when zoomed in (> 100%)
-                if (isVideoToolbarVisible && currentVideoZoom > 1.005f) {
-                    Box(
+                // Convenient Zoom-Out & 1-tap Reset to 100% pill when zoomed in (> 100%)
+                if (isVideoToolbarVisible && settings.videoAssistantEnabled && currentVideoZoom > 1.005f) {
+                    Row(
                         modifier = Modifier
                             .align(Alignment.TopStart)
-                            .padding(top = 12.dp, start = 12.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(Color(0x990A0D14))
-                            .clickable {
-                                isVideoToolbarVisible = true
-                                videoToolbarInteractionTick++
-                                resetVideoZoomTo100()
-                                onToast("Video Zoom: 100%")
-                            }
-                            .padding(horizontal = 10.dp, vertical = 8.dp)
-                            .testTag("fullscreen_zoom_reset_button"),
-                        contentAlignment = Alignment.Center
+                            .padding(top = 12.dp, start = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = "${(currentVideoZoom * 100f).roundToInt()}% • Reset",
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Medium
-                            ),
-                            color = Color(0xFFE2E8F0)
-                        )
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(Color(0x990A0D14))
+                                .clickable {
+                                    isVideoToolbarVisible = true
+                                    videoToolbarInteractionTick++
+                                    val prevZoom = previousStepVideoZoom(currentVideoZoom)
+                                    if (prevZoom <= 1.005f) {
+                                        resetVideoZoomTo100()
+                                    } else {
+                                        val prevTransform = computeVideoZoomAndClampedPan(
+                                            currentZoom = currentVideoZoom,
+                                            currentPanX = currentVideoPanX,
+                                            currentPanY = currentVideoPanY,
+                                            zoomMultiplier = prevZoom / currentVideoZoom,
+                                            panDeltaX = 0f,
+                                            panDeltaY = 0f,
+                                            focalX = fullscreenContainerSize.width / 2f,
+                                            focalY = fullscreenContainerSize.height / 2f,
+                                            containerWidth = fullscreenContainerSize.width.toFloat(),
+                                            containerHeight = fullscreenContainerSize.height.toFloat(),
+                                            baseAspectScale = baseAspectScale
+                                        )
+                                        currentVideoZoom = prevTransform.zoom
+                                        currentVideoPanX = prevTransform.panX
+                                        currentVideoPanY = prevTransform.panY
+                                        controllerHandle.applyHtml5VideoZoomTransform(
+                                            scale = prevTransform.zoom * baseAspectScale,
+                                            panX = prevTransform.panX,
+                                            panY = prevTransform.panY
+                                        )
+                                    }
+                                    onToast("Video Zoom: ${(currentVideoZoom * 100f).roundToInt()}%")
+                                }
+                                .padding(horizontal = 10.dp, vertical = 8.dp)
+                                .testTag("fullscreen_zoom_out_button"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "− Zoom Out",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium
+                                ),
+                                color = Color(0xFFE2E8F0)
+                            )
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(Color(0x990A0D14))
+                                .clickable {
+                                    isVideoToolbarVisible = true
+                                    videoToolbarInteractionTick++
+                                    resetVideoZoomTo100()
+                                    onToast("Video Zoom: 100%")
+                                }
+                                .padding(horizontal = 10.dp, vertical = 8.dp)
+                                .testTag("fullscreen_zoom_reset_button"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "${(currentVideoZoom * 100f).roundToInt()}% • Reset",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium
+                                ),
+                                color = Color(0xFFE2E8F0)
+                            )
+                        }
                     }
                 }
 
-                // Minimal Monochrome Auto-Hiding Video Toolbar (Orientation, Fit/Fill, Video Zoom, Exit)
-                if (isVideoToolbarVisible) {
+                // Minimal Monochrome Auto-Hiding Video Toolbar (Orientation, Fit/Fill, Video Zoom up to 500%, Exit)
+                if (isVideoToolbarVisible && settings.videoAssistantEnabled) {
                     Row(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
@@ -1262,7 +1317,7 @@ fun NyxoraWebEngineView(
                             }
                         )
 
-                        // 3. Video Zoom (cycles up to 1000% / 10x and wraps back to 100%)
+                        // 3. Video Zoom (cycles up to 500% / 5x and wraps back to 100%)
                         MonochromeVideoToolbarButton(
                             icon = Icons.Outlined.ZoomIn,
                             contentDescription = "Video Zoom",
@@ -1324,6 +1379,15 @@ internal fun nextStepVideoZoom(currentZoom: Float): Float {
     }
     val nextHigher = VIDEO_ZOOM_LEVELS.firstOrNull { it > currentZoom + 0.02f }
     return nextHigher ?: 1.0f
+}
+
+internal fun previousStepVideoZoom(currentZoom: Float): Float {
+    val exactIdx = VIDEO_ZOOM_LEVELS.indexOfFirst { abs(it - currentZoom) < 0.02f }
+    if (exactIdx > 0) {
+        return VIDEO_ZOOM_LEVELS[exactIdx - 1]
+    }
+    val prevLower = VIDEO_ZOOM_LEVELS.lastOrNull { it < currentZoom - 0.02f }
+    return prevLower ?: 1.0f
 }
 
 @Composable
