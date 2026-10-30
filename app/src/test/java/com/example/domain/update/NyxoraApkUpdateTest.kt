@@ -565,28 +565,50 @@ class NyxoraApkUpdateTest {
 
     @Test
     fun `github actions workflow and robolectric config support JDK 17 SDK 34 and APK artifact upload`() {
-        val workflowCandidates = listOf(
+        val releaseWorkflowCandidates = listOf(
             File("../.github/workflows/android-release.yml"),
             File(".github/workflows/android-release.yml")
         )
-        val workflowFile = workflowCandidates.firstOrNull { it.exists() }
-        assertNotNull("Expected .github/workflows/android-release.yml to exist", workflowFile)
-        val workflowContent = workflowFile!!.readText()
+        val releaseWorkflowFile = releaseWorkflowCandidates.firstOrNull { it.exists() }
+        assertNotNull("Expected .github/workflows/android-release.yml to exist", releaseWorkflowFile)
+        val releaseWorkflowContent = releaseWorkflowFile!!.readText()
 
-        assertTrue(workflowContent.contains("branches:"))
-        assertTrue(workflowContent.contains("- main"))
-        assertTrue(workflowContent.contains("workflow_dispatch:"))
-        assertTrue(workflowContent.contains("java-version: '17'"))
-        assertTrue(workflowContent.contains("sdkmanager"))
-        assertTrue(workflowContent.contains("--licenses"))
-        assertTrue(workflowContent.contains("platforms;android-36"))
-        assertTrue(workflowContent.contains("build-tools;36.0.0"))
-        assertTrue(workflowContent.contains(":app:testDebugUnitTest"))
-        assertTrue(workflowContent.contains("-Drobolectric.enabledSdks=34"))
-        assertTrue(workflowContent.contains(":app:assembleDebug"))
-        assertTrue(workflowContent.contains("app/build/outputs/apk/debug/app-debug.apk"))
-        assertTrue(workflowContent.contains("actions/upload-artifact@v4"))
-        assertTrue(workflowContent.contains("softprops/action-gh-release@v2"))
+        assertTrue(releaseWorkflowContent.contains("branches:"))
+        assertTrue(releaseWorkflowContent.contains("- main"))
+        assertTrue(releaseWorkflowContent.contains("workflow_dispatch:"))
+        assertTrue(releaseWorkflowContent.contains("java-version: '17'"))
+        assertTrue(releaseWorkflowContent.contains("sdkmanager"))
+        assertTrue(releaseWorkflowContent.contains("--licenses"))
+        assertTrue(releaseWorkflowContent.contains("platforms;android-36"))
+        assertTrue(releaseWorkflowContent.contains("build-tools;36.0.0"))
+        assertTrue(releaseWorkflowContent.contains(":app:testDebugUnitTest"))
+        assertTrue(releaseWorkflowContent.contains("-Drobolectric.enabledSdks=34"))
+        assertTrue(releaseWorkflowContent.contains(":app:assembleDebug"))
+        assertTrue(releaseWorkflowContent.contains("app/build/outputs/apk/debug/app-debug.apk"))
+        assertTrue(releaseWorkflowContent.contains("actions/upload-artifact@v4"))
+        assertTrue(releaseWorkflowContent.contains("softprops/action-gh-release@v2"))
+
+        val androidWorkflowCandidates = listOf(
+            File("../.github/workflows/android.yml"),
+            File(".github/workflows/android.yml")
+        )
+        val androidWorkflowFile = androidWorkflowCandidates.firstOrNull { it.exists() }
+        assertNotNull("Expected .github/workflows/android.yml to exist", androidWorkflowFile)
+        val androidWorkflowContent = androidWorkflowFile!!.readText()
+
+        assertTrue(androidWorkflowContent.contains("branches:"))
+        assertTrue(androidWorkflowContent.contains("- main"))
+        assertTrue(androidWorkflowContent.contains("java-version: '17'"))
+        assertTrue(androidWorkflowContent.contains("sdkmanager"))
+        assertTrue(androidWorkflowContent.contains("--licenses"))
+        assertTrue(androidWorkflowContent.contains("platforms;android-36"))
+        assertTrue(androidWorkflowContent.contains("platforms;android-36.1"))
+        assertTrue(androidWorkflowContent.contains("build-tools;36.0.0"))
+        assertTrue(androidWorkflowContent.contains(":app:testDebugUnitTest"))
+        assertTrue(androidWorkflowContent.contains("-Drobolectric.enabledSdks=34"))
+        assertTrue(androidWorkflowContent.contains(":app:assembleDebug"))
+        assertTrue(androidWorkflowContent.contains("app/build/outputs/apk/debug/app-debug.apk"))
+        assertTrue(androidWorkflowContent.contains("actions/upload-artifact@v4"))
 
         val roboPropsStream = javaClass.classLoader?.getResourceAsStream("robolectric.properties")
         assertNotNull("Expected robolectric.properties on test classpath", roboPropsStream)
