@@ -88,6 +88,7 @@ import com.example.domain.connect.PlaybackCorrectionDecision
 import com.example.domain.connect.RoomSyncMode
 import com.example.domain.connect.SyncConnectionStatus
 import com.example.domain.connect.WatchTogetherMediaBridge
+import com.example.domain.update.ApkUpdateUiState
 import com.example.ui.theme.NyxoraElectricBlue
 import com.example.ui.theme.NyxoraIncognitoPurple
 import com.example.ui.viewmodel.NyxoraBrowserViewModel
@@ -152,6 +153,13 @@ fun NyxoraMainBrowserScreen(
     val isChatOverlayExpanded by viewModel.connectManager.isChatOverlayExpanded.collectAsStateWithLifecycle()
     val isChatBubbleDismissed by viewModel.connectManager.isChatBubbleDismissed.collectAsStateWithLifecycle()
     val participantControlsDisabledNotice by viewModel.connectManager.participantControlsDisabledNotice.collectAsStateWithLifecycle()
+
+    val updateMgr = viewModel.apkUpdateManager
+    val apkUpdateState by if (updateMgr != null) {
+        updateMgr.uiState.collectAsStateWithLifecycle()
+    } else {
+        remember { mutableStateOf<ApkUpdateUiState>(ApkUpdateUiState.Idle) }
+    }
 
     var addressInput by rememberSaveable { mutableStateOf("") }
     var isEditingAddress by remember { mutableStateOf(false) }
@@ -629,6 +637,7 @@ fun NyxoraMainBrowserScreen(
                     isPrivateMode = isPrivateMode,
                     compactMode = settings.compactBottomToolbar,
                     showOverflowMenu = showOverflowMenu,
+                    hasUpdateAvailable = apkUpdateState.hasUpdateIndicator,
                     onBack = { triggerBrowserBackNavigation() },
                     onForward = { triggerBrowserForwardNavigation() },
                     onHome = { viewModel.navigateHome() },
@@ -1111,6 +1120,7 @@ fun NyxoraMainBrowserScreen(
                 isDesktopMode = activeTab.desktopMode,
                 isCurrentPageBookmarked = isActivePageBookmarked,
                 isRoomSyncActive = connectRoomState != null && connectStatus != SyncConnectionStatus.DISCONNECTED,
+                hasUpdateAvailable = apkUpdateState.hasUpdateIndicator,
                 onDismiss = { showOverflowMenu = false },
                 onOpenBookmarks = { viewModel.setOverlaySheet(OverlaySheet.BOOKMARKS) },
                 onOpenHistory = { viewModel.setOverlaySheet(OverlaySheet.HISTORY) },
@@ -1243,6 +1253,11 @@ fun NyxoraMainBrowserScreen(
             NyxoraSettingsScreen(
                 settings = settings,
                 customFilterRules = customFilterRules,
+                apkUpdateState = apkUpdateState,
+                onCheckForUpdates = { force -> viewModel.checkForApkUpdates(force = force) },
+                onDownloadUpdateNow = { viewModel.downloadApkUpdateNow() },
+                onCancelUpdateDownload = { viewModel.cancelApkUpdateDownload() },
+                onInstallUpdateNow = { ctx -> viewModel.installDownloadedApkUpdate(ctx) },
                 onUpdateSettings = viewModel::updateSettings,
                 onRefreshFilterList = viewModel::refreshRemoteFilterList,
                 onAddCustomFilterRule = viewModel::addCustomFilterRule,

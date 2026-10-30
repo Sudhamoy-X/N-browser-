@@ -42,6 +42,10 @@ import com.example.domain.connect.NyxoraConnectSecurity
 import com.example.domain.connect.NyxoraConnectSessionManager
 import com.example.domain.connect.RealtimeEventType
 import com.example.domain.connect.VideoCompatibilityState
+import com.example.domain.update.ApkUpdateUiState
+import com.example.domain.update.GitHubReleaseApkInfo
+import com.example.domain.update.InstallHandoffResult
+import com.example.domain.update.NyxoraApkUpdateManager
 import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
@@ -198,8 +202,12 @@ class NyxoraBrowserViewModel(
     private val downloadDao: DownloadDao,
     private val filterRuleDao: FilterRuleDao,
     private val settingsDataStore: NyxoraSettingsDataStore,
-    val downloadEngine: DownloadEngine
+    val downloadEngine: DownloadEngine,
+    initialApkUpdateManager: NyxoraApkUpdateManager? = null
 ) : ViewModel() {
+
+    var apkUpdateManager: NyxoraApkUpdateManager? = initialApkUpdateManager
+        internal set
 
     val settings: StateFlow<NyxoraSettingsState> = settingsDataStore.settingsFlow
         .stateIn(
@@ -422,6 +430,41 @@ class NyxoraBrowserViewModel(
                 Log.w(TAG, "Error restoring local tabs", e)
             }
         }
+
+        // Automatic background check for new stable GitHub APK releases on browser startup
+        apkUpdateManager?.checkForUpdates(force = false)
+    }
+
+    fun checkForApkUpdates(force: Boolean = true) {
+        apkUpdateManager?.checkForUpdates(force = force)
+    }
+
+    fun downloadApkUpdateNow(explicitRelease: GitHubReleaseApkInfo? = null) {
+        apkUpdateManager?.downloadUpdateNow(explicitRelease = explicitRelease)
+    }
+
+    fun cancelApkUpdateDownload() {
+        apkUpdateManager?.cancelActiveDownload()
+    }
+
+    fun refreshApkInstallPermission(context: Context): Boolean {
+        return apkUpdateManager?.refreshInstallPermissionState(context) ?: false
+    }
+
+    fun installDownloadedApkUpdate(context: Context): InstallHandoffResult {
+        val manager = apkUpdateManager
+            ?: return InstallHandoffResult.Failed("Update manager is not initialized.")
+        val result = manager.initiateInstallOrRequestPermission(context)
+        when (result) {
+            is InstallHandoffResult.PermissionSettingsLaunched -> {
+                emitToast("Grant 'Install unknown apps' for NYXORA Browser, then tap Install Update")
+            }
+            is InstallHandoffResult.Failed -> {
+                emitToast(result.errorMessage)
+            }
+            is InstallHandoffResult.InstallerLaunched -> Unit
+        }
+        return result
     }
 
     // --- NAVIGATION & ADDRESS BAR ---
@@ -2185,6 +2228,7 @@ class NyxoraBrowserViewModel(
                 val settingsStore = NyxoraSettingsDataStore(app)
                 val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO)
                 val dlEngine = DownloadEngine(app, localDb.downloadDao(), scope)
+                val updateMgr = NyxoraApkUpdateManager(context = app, scope = scope)
 
                 NyxoraBrowserViewModel(
                     bookmarkDao = localDb.bookmarkDao(),
@@ -2194,7 +2238,8 @@ class NyxoraBrowserViewModel(
                     downloadDao = localDb.downloadDao(),
                     filterRuleDao = localDb.filterRuleDao(),
                     settingsDataStore = settingsStore,
-                    downloadEngine = dlEngine
+                    downloadEngine = dlEngine,
+                    initialApkUpdateManager = updateMgr
                 )
             }
         }

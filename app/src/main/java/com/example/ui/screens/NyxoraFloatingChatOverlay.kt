@@ -96,8 +96,7 @@ fun NyxoraFloatingChatOverlay(
     onSendMessage: (String) -> Boolean,
     modifier: Modifier = Modifier
 ) {
-    val isConnectedRoomActive = roomState != null && connectionStatus != SyncConnectionStatus.DISCONNECTED
-    if (!isConnectedRoomActive || roomState == null) {
+    if (roomState == null || connectionStatus == SyncConnectionStatus.DISCONNECTED) {
         return
     }
 

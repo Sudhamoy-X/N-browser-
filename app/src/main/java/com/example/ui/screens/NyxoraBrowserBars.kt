@@ -462,6 +462,7 @@ fun NyxoraBottomTabManagementBar(
     isPrivateMode: Boolean,
     compactMode: Boolean,
     showOverflowMenu: Boolean,
+    hasUpdateAvailable: Boolean = false,
     onBack: () -> Unit,
     onForward: () -> Unit,
     onHome: () -> Unit,
@@ -592,19 +593,31 @@ fun NyxoraBottomTabManagementBar(
                     }
                 }
 
-                // 5. Menu: Three thin horizontal lines
+                // 5. Menu: Three thin horizontal lines + small update indicator dot when a newer APK release is available
                 IconButton(
                     onClick = { onToggleOverflowMenu(!showOverflowMenu) },
                     modifier = Modifier
                         .minimumInteractiveComponentSize()
                         .testTag("toolbar_overflow_menu_button")
                 ) {
-                    Icon(
-                        imageVector = threeLineMenuIcon,
-                        contentDescription = stringResource(R.string.nav_menu),
-                        tint = enabledIconTint,
-                        modifier = Modifier.size(20.dp)
-                    )
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = threeLineMenuIcon,
+                            contentDescription = stringResource(R.string.nav_menu),
+                            tint = enabledIconTint,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        if (hasUpdateAvailable) {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .size(7.dp)
+                                    .clip(RoundedCornerShape(50))
+                                    .background(NyxoraElectricBlue)
+                                    .testTag("toolbar_update_indicator_dot")
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -720,6 +733,7 @@ fun NyxoraBottomMenuSheet(
     isDesktopMode: Boolean,
     isCurrentPageBookmarked: Boolean,
     isRoomSyncActive: Boolean = false,
+    hasUpdateAvailable: Boolean = false,
     onDismiss: () -> Unit,
     onOpenBookmarks: () -> Unit,
     onOpenHistory: () -> Unit,
@@ -916,6 +930,8 @@ fun NyxoraBottomMenuSheet(
                                 icon = Icons.Outlined.Settings,
                                 label = "Settings",
                                 isActive = false,
+                                showBadgeDot = hasUpdateAvailable,
+                                badgeTestTag = "menu_settings_update_indicator",
                                 testTag = "menu_item_settings",
                                 onClick = {
                                     onDismiss()
@@ -937,7 +953,9 @@ private fun BottomMenuGridItem(
     isActive: Boolean,
     testTag: String,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    showBadgeDot: Boolean = false,
+    badgeTestTag: String? = null
 ) {
     val bgColor = if (isActive) {
         MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
@@ -967,12 +985,24 @@ private fun BottomMenuGridItem(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = label,
-            tint = contentTint,
-            modifier = Modifier.size(20.dp)
-        )
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                imageVector = icon,
+                contentDescription = label,
+                tint = contentTint,
+                modifier = Modifier.size(20.dp)
+            )
+            if (showBadgeDot) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .size(7.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(NyxoraElectricBlue)
+                        .let { base -> if (badgeTestTag != null) base.testTag(badgeTestTag) else base }
+                )
+            }
+        }
         Text(
             text = label,
             style = MaterialTheme.typography.labelSmall.copy(

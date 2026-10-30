@@ -6,6 +6,8 @@
     <files-path name="downloads" path="downloads/" />
     <files-path name="internal_files_root" path="." />
     <cache-path name="exports" path="exports/" />
+    <cache-path name="apk_updates" path="updates/" />
+    <files-path name="apk_updates_files" path="updates/" />
     <cache-path name="cache_root" path="." />
 </paths>
 

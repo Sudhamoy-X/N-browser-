@@ -56,7 +56,7 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [36])
 class ExampleRobolectricTest {
 
     private val testStartNano: Long = System.nanoTime()
@@ -2148,6 +2148,136 @@ class ExampleRobolectricTest {
         }
     }
 
+    @Test
+    fun `settings about nyxora checks for updates shows indicator downloads apk and triggers package installer`() {
+        composeTestRule.mainClock.advanceTimeBy(350L)
+        composeTestRule.waitForIdle()
+
+        val vm = checkNotNull(composeTestRule.activity.activeBrowserViewModel)
+        val updateManager = checkNotNull(vm.apkUpdateManager)
+
+        val outBytes = java.io.ByteArrayOutputStream().also { baos ->
+            java.util.zip.ZipOutputStream(baos).use { zos ->
+                zos.putNextEntry(java.util.zip.ZipEntry("AndroidManifest.xml"))
+                zos.write("NYXORA_COMPOSE_UPDATE_TEST_APK".repeat(128).toByteArray())
+                zos.closeEntry()
+            }
+        }.toByteArray()
+        val sha256 = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(outBytes)
+            .joinToString("") { "%02x".format(it) }
+
+        val releaseUrl = "https://api.github.com/repos/sudhamoy-nyxora/nyxora-browser/releases/latest"
+        val apkUrl = "https://github.com/sudhamoy-nyxora/nyxora-browser/releases/download/v1.4.0/nyxora-browser-v1.4.0.apk"
+        val releasePayload = """
+            {
+              "tag_name": "v1.4.0",
+              "name": "NYXORA Browser v1.4.0",
+              "body": "Automatic in-app APK updates.",
+              "draft": false,
+              "prerelease": false,
+              "assets": [
+                {
+                  "name": "nyxora-browser-v1.4.0.apk",
+                  "browser_download_url": "$apkUrl",
+                  "size": ${outBytes.size},
+                  "state": "uploaded",
+                  "digest": "sha256:$sha256"
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val jsonMediaType = with(okhttp3.MediaType) { "application/json".toMediaType() }
+        val apkMediaType = with(okhttp3.MediaType) { "application/vnd.android.package-archive".toMediaType() }
+        val testClient = okhttp3.OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val url = chain.request().url.toString()
+                val body = if (url == releaseUrl) {
+                    with(okhttp3.ResponseBody) { releasePayload.toResponseBody(jsonMediaType) }
+                } else {
+                    with(okhttp3.ResponseBody) { outBytes.toResponseBody(apkMediaType) }
+                }
+                okhttp3.Response.Builder()
+                    .request(chain.request())
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(body)
+                    .build()
+            }
+            .build()
+
+        val testInspector = object : com.example.domain.update.ApkArchiveInspector {
+            override fun inspectApkArchive(context: Context, apkFile: java.io.File) =
+                com.example.domain.update.ParsedApkArchiveMetadata(
+                    packageName = context.packageName,
+                    versionName = "1.4.0",
+                    versionCode = 4L,
+                    signingCertSha256Fingerprints = setOf("nyxora_cert")
+                )
+
+            override fun getInstalledSigningCertSha256Fingerprints(context: Context) = setOf("nyxora_cert")
+            override fun canRequestPackageInstalls(context: Context) = true
+        }
+
+        com.example.domain.update.NyxoraApkUpdateManager.getUpdatesDirectory(composeTestRule.activity).deleteRecursively()
+        updateManager.configureForTesting(
+            httpClient = testClient,
+            archiveInspector = testInspector,
+            releaseApiUrlProvider = { releaseUrl },
+            installedVersionNameProvider = { "1.0" },
+            installedVersionCodeProvider = { 1 },
+            ioDispatcher = kotlinx.coroutines.Dispatchers.Unconfined
+        )
+
+        // Open Settings -> About NYXORA triggers automatic version check
+        vm.setOverlaySheet(com.example.ui.viewmodel.OverlaySheet.SETTINGS)
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("settings_category_about").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+
+        assertTrue(
+            "Expected UpdateAvailable state, got ${updateManager.uiState.value}",
+            updateManager.uiState.value is com.example.domain.update.ApkUpdateUiState.UpdateAvailable
+        )
+
+        composeTestRule.onNodeWithTag("about_apk_update_section").performScrollTo()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("about_apk_update_section").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("about_update_available_indicator").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("about_update_now_button").performScrollTo()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("about_update_now_button").assertIsDisplayed()
+
+        // Tap Update Now -> Downloads and verifies APK, then shows Install Update button
+        composeTestRule.onNodeWithTag("about_update_now_button").performClick()
+        composeTestRule.waitForIdle()
+
+        assertTrue(
+            "Expected ReadyToInstall state after clicking Update Now, got ${updateManager.uiState.value}",
+            updateManager.uiState.value is com.example.domain.update.ApkUpdateUiState.ReadyToInstall
+        )
+
+        composeTestRule.onNodeWithTag("about_install_update_button").performScrollTo()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("about_install_update_button").assertIsDisplayed()
+        shadowOf(composeTestRule.activity.application).clearNextStartedActivities()
+        composeTestRule.onNodeWithTag("about_install_update_button").performClick()
+        composeTestRule.waitForIdle()
+
+        val installerIntent = shadowOf(composeTestRule.activity.application).nextStartedActivity
+        assertNotNull(
+            "Expected official package installer intent after tapping Install Update (state=${updateManager.uiState.value})",
+            installerIntent
+        )
+        assertEquals(android.content.Intent.ACTION_VIEW, installerIntent.action)
+        assertEquals(com.example.domain.update.NyxoraApkUpdateManager.APK_MIME_TYPE, installerIntent.type)
+
+        vm.setOverlaySheet(com.example.ui.viewmodel.OverlaySheet.NONE)
+        composeTestRule.waitForIdle()
+    }
+
     private fun findFirstWebView(root: View?): WebView? {
         if (root == null) return null
         if (root is WebView) return root
@@ -2160,5 +2290,6 @@ class ExampleRobolectricTest {
         return null
     }
 }
+
 
 

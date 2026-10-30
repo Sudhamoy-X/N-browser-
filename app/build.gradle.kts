@@ -72,6 +72,20 @@ android {
   }
 }
 
+val existingUncaughtHandler = Thread.getDefaultUncaughtExceptionHandler()
+Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+  val isKspAwtTeardownNpe =
+    thread.name.startsWith("AWT-EventQueue") &&
+      throwable is NullPointerException &&
+      (throwable.message?.contains("ksp.com.intellij.openapi.application.Application") == true ||
+        throwable.stackTrace.any {
+          it.className.contains("ksp.com.intellij")
+        })
+  if (!isKspAwtTeardownNpe) {
+    existingUncaughtHandler?.uncaughtException(thread, throwable)
+  }
+}
+
 tasks.withType<Test> {
   failFast = true
   timeout.set(Duration.ofMinutes(2))
@@ -151,6 +165,7 @@ dependencies {
   androidTestImplementation(libs.androidx.runner)
   debugImplementation(libs.androidx.compose.ui.test.manifest)
   debugImplementation(libs.androidx.compose.ui.tooling)
-  "ksp"(libs.androidx.room.compiler)
+  "kspDebug"(libs.androidx.room.compiler)
+  "kspRelease"(libs.androidx.room.compiler)
   // "ksp"(libs.moshi.kotlin.codegen)
 }
