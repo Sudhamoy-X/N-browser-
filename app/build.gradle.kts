@@ -89,8 +89,27 @@ Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
 tasks.withType<Test> {
   failFast = true
   timeout.set(Duration.ofMinutes(2))
+  val offlineSdk36Jar =
+    file(
+      "${System.getProperty("user.home")}/.m2/repository/org/robolectric/android-all-instrumented/16-robolectric-13921718-i7/android-all-instrumented-16-robolectric-13921718-i7.jar"
+    )
+  val enabledRobolectricSdk =
+    System.getProperty("robolectric.enabledSdks")
+      ?: if (
+        JavaVersion.current().isCompatibleWith(JavaVersion.VERSION_21) &&
+          offlineSdk36Jar.exists()
+      ) {
+        "36"
+      } else {
+        "34"
+      }
+  systemProperty("robolectric.enabledSdks", enabledRobolectricSdk)
   testLogging {
     events("passed", "failed", "skipped")
+    exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    showExceptions = true
+    showCauses = true
+    showStackTraces = true
   }
 }
 

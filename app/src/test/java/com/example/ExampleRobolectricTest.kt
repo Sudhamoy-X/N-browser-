@@ -56,7 +56,7 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+@Config(sdk = [34, 36])
 class ExampleRobolectricTest {
 
     private val testStartNano: Long = System.nanoTime()

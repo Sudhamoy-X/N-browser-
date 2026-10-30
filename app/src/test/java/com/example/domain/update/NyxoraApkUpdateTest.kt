@@ -37,7 +37,7 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+@Config(sdk = [34, 36])
 class NyxoraApkUpdateTest {
 
     private lateinit var context: Context
@@ -561,6 +561,37 @@ class NyxoraApkUpdateTest {
         )
         assertTrue(certMismatchCheck is ApkVerificationResult.Invalid)
         assertTrue((certMismatchCheck as ApkVerificationResult.Invalid).reason.contains("signing certificate", ignoreCase = true))
+    }
+
+    @Test
+    fun `github actions workflow and robolectric config support JDK 17 SDK 34 and APK artifact upload`() {
+        val workflowCandidates = listOf(
+            File("../.github/workflows/android-release.yml"),
+            File(".github/workflows/android-release.yml")
+        )
+        val workflowFile = workflowCandidates.firstOrNull { it.exists() }
+        assertNotNull("Expected .github/workflows/android-release.yml to exist", workflowFile)
+        val workflowContent = workflowFile!!.readText()
+
+        assertTrue(workflowContent.contains("branches:"))
+        assertTrue(workflowContent.contains("- main"))
+        assertTrue(workflowContent.contains("workflow_dispatch:"))
+        assertTrue(workflowContent.contains("java-version: '17'"))
+        assertTrue(workflowContent.contains("sdkmanager"))
+        assertTrue(workflowContent.contains("--licenses"))
+        assertTrue(workflowContent.contains("platforms;android-36"))
+        assertTrue(workflowContent.contains("build-tools;36.0.0"))
+        assertTrue(workflowContent.contains(":app:testDebugUnitTest"))
+        assertTrue(workflowContent.contains("-Drobolectric.enabledSdks=34"))
+        assertTrue(workflowContent.contains(":app:assembleDebug"))
+        assertTrue(workflowContent.contains("app/build/outputs/apk/debug/app-debug.apk"))
+        assertTrue(workflowContent.contains("actions/upload-artifact@v4"))
+        assertTrue(workflowContent.contains("softprops/action-gh-release@v2"))
+
+        val roboPropsStream = javaClass.classLoader?.getResourceAsStream("robolectric.properties")
+        assertNotNull("Expected robolectric.properties on test classpath", roboPropsStream)
+        val roboPropsText = roboPropsStream!!.bufferedReader().use { it.readText() }
+        assertTrue(roboPropsText.contains("sdk=34,36"))
     }
 
     private fun buildValidZipApkBytes(payloadText: String): ByteArray {
