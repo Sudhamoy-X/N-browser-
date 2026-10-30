@@ -96,7 +96,8 @@ tasks.withType<Test> {
   val enabledRobolectricSdk =
     System.getProperty("robolectric.enabledSdks")
       ?: if (
-        JavaVersion.current().isCompatibleWith(JavaVersion.VERSION_21) &&
+        javaVersion.isCompatibleWith(JavaVersion.VERSION_21) &&
+          JavaVersion.current().isCompatibleWith(JavaVersion.VERSION_21) &&
           offlineSdk36Jar.exists()
       ) {
         "36"
