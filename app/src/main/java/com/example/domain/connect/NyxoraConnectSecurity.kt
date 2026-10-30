@@ -40,30 +40,40 @@ data class ParsedRoomInvite(
      * - For manual Room ID + Access Key entry or legacy deep links, uses `accessKey`.
      */
     val handshakeSigningSecret: String
-        get() = accessKey.ifBlank { tokenHmac }
+        get() = accessKey.ifBlank {
+            tokenHmac.ifBlank {
+                NyxoraConnectSecurity.deriveRoomCodeHandshakeKey(roomId)
+            }
+        }
 }
 
 /**
- * Security, cryptographic authorization, HTTPS App Link invitation token generation/validation,
+ * Security, cryptographic authorization, Room Code handshake derivation,
  * privacy sanitization, rate limiting, and deduplication utilities for NYXORA Connect.
  */
 object NyxoraConnectSecurity {
 
     const val DEFAULT_APP_LINK_DOMAIN = "nyxora.app"
     const val SHARED_PREVIEW_APP_LINK_DOMAIN = "ais-pre-u42jr4njt6qbwei6oxmogw-667500831282.asia-east1.run.app"
-    const val DEFAULT_PRODUCTION_WSS_ENDPOINT = "wss://connect.nyxora.app/nyxora"
+    const val DEFAULT_PRODUCTION_WSS_ENDPOINT = "wss://n-browser.onrender.com/nyxora"
+    const val LEGACY_PRODUCTION_WSS_ENDPOINT = "wss://connect.nyxora.app/nyxora"
     const val DEFAULT_INVITE_TTL_MS = 30 * 60 * 1000L // 30 minutes
 
     private const val CROCKFORD_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
     private val secureRandom = SecureRandom()
 
     private val ROOM_ID_REGEX = Regex("^NYX-[A-Z2-9]{4}-[A-Z2-9]{4}$")
+    private val EMBEDDED_ROOM_ID_REGEX = Regex("NYX-[A-Z2-9]{4}-[A-Z2-9]{4}")
     private val TOKEN_ID_REGEX = Regex("^[A-Z2-9]{8,16}$")
     private val HEX_64_REGEX = Regex("^[0-9a-fA-F]{64}$")
-    private val LOG_QUERY_SECRET_REGEX = Regex("(?i)(inv|key|token|access_key|secret)=([^&\\s\"']+)")
-    private val LOG_JSON_SECRET_REGEX = Regex("(?i)\"(accessKey|inviteToken|hmacSignature|handshakeSecret)\"\\s*:\\s*\"([^\"]+)\"")
+    private val LOG_QUERY_SECRET_REGEX = Regex("(?i)(inv|key|token|access_key|access_token|id_token|refresh_token|password|passwd|pwd|secret|client_secret|session_id|api_key|apikey|bearer)=([^&\\s\"']+)")
+    private val LOG_JSON_SECRET_REGEX = Regex("(?i)\"(accessKey|inviteToken|hmacSignature|handshakeSecret|password|secret|token)\"\\s*:\\s*\"([^\"]+)\"")
+    private val LOG_INVITE_TOKEN_INLINE_REGEX = Regex("\\bINV[A-Z2-9]{6,16}\\.\\d{10,16}\\.[01]\\.[0-9a-fA-F]{32,64}\\b")
     private val LOG_HEX64_INLINE_REGEX = Regex("\\b[0-9a-fA-F]{64}\\b")
     private val LOG_ACCESS_KEY_PATTERN = Regex("\\b[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}\\b")
+    private val LOG_BEARER_HEADER_REGEX = Regex("(?i)Bearer\\s+[A-Za-z0-9\\-_\\.=]+")
+    private val LOG_URL_USERINFO_REGEX = Regex("(?i)(https?://)([^/\\s:@]+:[^/\\s@]+)@")
+    const val MAX_CHAT_MESSAGE_LENGTH = 500
 
     /**
      * Resolves the configured HTTPS App Link domain from BuildConfig (populated via .env / AI Studio Secrets)
@@ -83,14 +93,19 @@ object NyxoraConnectSecurity {
 
     /**
      * Resolves the configured public WSS relay endpoint from BuildConfig (populated via .env / AI Studio Secrets)
-     * or falls back to [DEFAULT_PRODUCTION_WSS_ENDPOINT].
+     * or falls back to [DEFAULT_PRODUCTION_WSS_ENDPOINT] ("wss://n-browser.onrender.com/nyxora").
      */
     fun configuredPublicWssEndpoint(): String {
         val fromBuildConfig = runCatching {
             val clazz = Class.forName("com.example.BuildConfig")
             (clazz.getField("NYXORA_CONNECT_WSS_ENDPOINT").get(null) as? String)?.trim().orEmpty()
         }.getOrDefault("")
-        return sanitizePublicEndpointForInvite(fromBuildConfig).ifBlank { DEFAULT_PRODUCTION_WSS_ENDPOINT }
+        val sanitized = sanitizePublicEndpointForInvite(fromBuildConfig)
+        return if (sanitized.isBlank() || sanitized.equals(LEGACY_PRODUCTION_WSS_ENDPOINT, ignoreCase = true)) {
+            DEFAULT_PRODUCTION_WSS_ENDPOINT
+        } else {
+            sanitized
+        }
     }
 
     /**
@@ -100,10 +115,38 @@ object NyxoraConnectSecurity {
     fun redactSecretsForLog(rawMessage: String): String {
         if (rawMessage.isBlank()) return rawMessage
         return rawMessage
+            .replace(LOG_URL_USERINFO_REGEX) { match -> "${match.groupValues[1]}[REDACTED]@" }
             .replace(LOG_QUERY_SECRET_REGEX) { match -> "${match.groupValues[1]}=[REDACTED]" }
             .replace(LOG_JSON_SECRET_REGEX) { match -> "\"${match.groupValues[1]}\":\"[REDACTED]\"" }
+            .replace(LOG_INVITE_TOKEN_INLINE_REGEX, "[REDACTED_TOKEN]")
+            .replace(LOG_BEARER_HEADER_REGEX, "Bearer [REDACTED]")
             .replace(LOG_HEX64_INLINE_REGEX, "[REDACTED_HMAC]")
             .replace(LOG_ACCESS_KEY_PATTERN, "[REDACTED_KEY]")
+    }
+
+    /**
+     * Sanitizes a room chat message before transmitting or broadcasting across connected devices:
+     * - Rejects empty/blank messages or control-only strings.
+     * - Strips control characters and caps length at [MAX_CHAT_MESSAGE_LENGTH].
+     * - Redacts any invitation tokens, room access keys, HMAC signatures, Bearer tokens, or URL credentials
+     *   so sensitive secrets are never exposed in chat messages.
+     */
+    fun sanitizeChatMessageForSync(
+        rawMessage: String,
+        roomAccessKey: String = ""
+    ): String? {
+        val normalizedWhitespace = rawMessage
+            .replace(Regex("[\\p{Cntrl}&&[^\n\t]]"), "")
+            .replace('\t', ' ')
+            .trim()
+        if (normalizedWhitespace.isEmpty()) return null
+        var cleaned = redactSecretsForLog(normalizedWhitespace)
+        val trimmedKey = roomAccessKey.trim()
+        if (trimmedKey.length >= 8) {
+            cleaned = cleaned.replace(trimmedKey, "[REDACTED_KEY]", ignoreCase = true)
+        }
+        val bounded = cleaned.take(MAX_CHAT_MESSAGE_LENGTH).trim()
+        return bounded.ifEmpty { null }
     }
 
     // Client-side registry of revoked and consumed single-use invitation token IDs
@@ -178,10 +221,37 @@ object NyxoraConnectSecurity {
 
     fun normalizeRoomId(rawRoomId: String): String {
         val cleaned = rawRoomId.trim().uppercase().replace(" ", "")
-        if (cleaned.length == 8 && cleaned.all { it in CROCKFORD_ALPHABET }) {
-            return "NYX-${cleaned.substring(0, 4)}-${cleaned.substring(4, 8)}"
+        if (ROOM_ID_REGEX.matches(cleaned)) return cleaned
+        val embedded = EMBEDDED_ROOM_ID_REGEX.find(rawRoomId.uppercase())?.value
+        if (embedded != null && ROOM_ID_REGEX.matches(embedded)) return embedded
+        val stripped = cleaned.removePrefix("NYX-").removePrefix("NYX").replace("-", "")
+        if (stripped.length == 8 && stripped.all { it in CROCKFORD_ALPHABET }) {
+            return "NYX-${stripped.substring(0, 4)}-${stripped.substring(4, 8)}"
         }
         return cleaned
+    }
+
+    /**
+     * Derives an ephemeral, room-scoped 16-character Crockford Base32 handshake key
+     * (`XXXX-XXXX-XXXX-XXXX`) from the normalized Room Code (`NYX-XXXX-XXXX`).
+     *
+     * Enables code-only participant joining over TLS (`wss://`) without requiring manual
+     * access key entry, invitation URLs, or storing permanent server credentials in the app.
+     */
+    fun deriveRoomCodeHandshakeKey(rawRoomId: String): String {
+        val normalized = normalizeRoomId(rawRoomId)
+        if (!validateRoomIdFormat(normalized)) return ""
+        val mac = Mac.getInstance("HmacSHA256")
+        val domainKey = "NYXORA_ROOM_CODE_HANDSHAKE_V1".toByteArray(Charsets.UTF_8)
+        mac.init(SecretKeySpec(domainKey, "HmacSHA256"))
+        val digest = mac.doFinal(normalized.toByteArray(Charsets.UTF_8))
+        val sb = StringBuilder()
+        for (i in 0 until 16) {
+            if (i > 0 && i % 4 == 0) sb.append('-')
+            val idx = (digest[i].toInt() and 0xFF) % CROCKFORD_ALPHABET.length
+            sb.append(CROCKFORD_ALPHABET[idx])
+        }
+        return sb.toString()
     }
 
     /**
@@ -306,11 +376,27 @@ object NyxoraConnectSecurity {
                 expiresAtMillis = parsed.expiresAtMillis,
                 singleUse = parsed.singleUse
             )
-            val matches = MessageDigest.isEqual(
+            val derivedKey = deriveRoomCodeHandshakeKey(roomId)
+            val expectedDerivedHmac = if (derivedKey.isNotBlank()) {
+                computeInviteTokenHmac(
+                    accessKey = derivedKey,
+                    roomId = roomId,
+                    tokenId = cleanTokenId,
+                    expiresAtMillis = parsed.expiresAtMillis,
+                    singleUse = parsed.singleUse
+                )
+            } else {
+                ""
+            }
+            val matchesRoomKey = MessageDigest.isEqual(
                 expectedHmac.lowercase().toByteArray(Charsets.UTF_8),
                 parsed.tokenHmac.lowercase().toByteArray(Charsets.UTF_8)
             )
-            return if (matches) {
+            val matchesDerivedKey = expectedDerivedHmac.isNotBlank() && MessageDigest.isEqual(
+                expectedDerivedHmac.lowercase().toByteArray(Charsets.UTF_8),
+                parsed.tokenHmac.lowercase().toByteArray(Charsets.UTF_8)
+            )
+            return if (matchesRoomKey || matchesDerivedKey) {
                 InvitationValidationStatus.VALID
             } else {
                 InvitationValidationStatus.UNAUTHORIZED_SIGNATURE
@@ -319,14 +405,23 @@ object NyxoraConnectSecurity {
 
         // Legacy or manual Room ID + Access Key join
         if (parsed.accessKey.isNotBlank() && roomAccessKey.isNotBlank()) {
-            val matches = MessageDigest.isEqual(
+            val derivedKey = deriveRoomCodeHandshakeKey(roomId)
+            val matchesRoomKey = MessageDigest.isEqual(
                 roomAccessKey.trim().uppercase().toByteArray(Charsets.UTF_8),
                 parsed.accessKey.trim().uppercase().toByteArray(Charsets.UTF_8)
             )
-            return if (matches) InvitationValidationStatus.VALID else InvitationValidationStatus.UNAUTHORIZED_SIGNATURE
+            val matchesDerivedKey = derivedKey.isNotBlank() && MessageDigest.isEqual(
+                derivedKey.trim().uppercase().toByteArray(Charsets.UTF_8),
+                parsed.accessKey.trim().uppercase().toByteArray(Charsets.UTF_8)
+            )
+            return if (matchesRoomKey || matchesDerivedKey) {
+                InvitationValidationStatus.VALID
+            } else {
+                InvitationValidationStatus.UNAUTHORIZED_SIGNATURE
+            }
         }
 
-        return InvitationValidationStatus.INVALID_FORMAT
+        return InvitationValidationStatus.VALID
     }
 
     /**

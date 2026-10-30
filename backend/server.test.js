@@ -6,6 +6,7 @@ const net = require('node:net');
 const crypto = require('node:crypto');
 const {
   createNyxoraConnectServer,
+  deriveRoomCodeHandshakeKey,
   computeInviteTokenHmac,
   computeEventHmac,
   redactSecretsForLog,
@@ -293,3 +294,459 @@ test('NYXORA Connect Backend: Multi-device WebSocket room creation, token join, 
     await server.close();
   }
 });
+
+test('NYXORA Connect Backend: Code-only participant join, invalid room codes, non-existent room rejection, reconnection, and URL sync', async () => {
+  const server = createNyxoraConnectServer();
+  const { httpServer } = server;
+  await new Promise((r) => httpServer.listen(0, '127.0.0.1', r));
+  const port = httpServer.address().port;
+
+  const roomId = 'NYX-6M4P-8R2T';
+  const roomCodeDerivedKey = deriveRoomCodeHandshakeKey(roomId);
+  assert.match(roomCodeDerivedKey, /^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/);
+
+  const hostDeviceId = 'host-dev-100';
+  const participantDeviceId = 'participant-dev-200';
+
+  const hostWs = await openRawWebSocket(port, roomId, hostDeviceId);
+  const participantWs = await openRawWebSocket(port, roomId, participantDeviceId);
+  const badWs = await openRawWebSocket(port, 'NYX-9999-8888', 'bad-dev-300');
+
+  try {
+    // 1. Joining a non-existent room returns ROOM_NOT_FOUND
+    const nonExistentJoin = createSignedEnvelope({
+      roomId: 'NYX-9999-8888',
+      type: 'JOIN_REQUEST',
+      senderDeviceId: 'bad-dev-300',
+      senderRole: 'PARTICIPANT',
+      sequenceNumber: 1,
+      signingSecret: deriveRoomCodeHandshakeKey('NYX-9999-8888'),
+      payloadObj: { deviceName: 'Unknown Room Joiner' }
+    });
+    badWs.sendEnvelope(nonExistentJoin);
+    const notFoundReject = await badWs.nextMessage();
+    assert.equal(notFoundReject.type, 'JOIN_REJECTED');
+    assert.equal(JSON.parse(notFoundReject.payloadJson).code, 'ROOM_NOT_FOUND');
+
+    // 2. Joining with an invalid room code format returns INVALID_ROOM_ID
+    const invalidFormatJoin = createSignedEnvelope({
+      roomId: 'BAD-CODE',
+      type: 'JOIN_REQUEST',
+      senderDeviceId: 'bad-dev-300',
+      senderRole: 'PARTICIPANT',
+      sequenceNumber: 2,
+      signingSecret: 'ANY-KEY',
+      payloadObj: { deviceName: 'Invalid Code Joiner' }
+    });
+    badWs.sendEnvelope(invalidFormatJoin);
+    const invalidReject = await badWs.nextMessage();
+    assert.equal(invalidReject.type, 'JOIN_REJECTED');
+    assert.equal(JSON.parse(invalidReject.payloadJson).code, 'INVALID_ROOM_ID');
+
+    // 3. Host creates room using Room Code derived key
+    const hostJoin = createSignedEnvelope({
+      roomId,
+      type: 'JOIN_REQUEST',
+      senderDeviceId: hostDeviceId,
+      senderRole: 'HOST',
+      sequenceNumber: 1,
+      signingSecret: roomCodeDerivedKey,
+      payloadObj: {
+        deviceName: 'Host Device',
+        hostRoomSnapshot: {
+          roomId,
+          roomName: 'Code-Only Room',
+          accessKey: roomCodeDerivedKey,
+          hostDeviceId,
+          mode: 'BROWSE_TOGETHER',
+          isSyncActive: true,
+          currentSyncedUrl: 'https://developer.android.com/'
+        }
+      }
+    });
+    hostWs.sendEnvelope(hostJoin);
+    assert.equal((await hostWs.nextMessage()).type, 'JOIN_ACCEPTED');
+    assert.equal((await hostWs.nextMessage()).type, 'ROOM_STATE_SNAPSHOT');
+
+    // 4. Participant joins using ONLY the Room Code (no inviteToken or manual key entry)
+    const participantJoin = createSignedEnvelope({
+      roomId,
+      type: 'JOIN_REQUEST',
+      senderDeviceId: participantDeviceId,
+      senderRole: 'PARTICIPANT',
+      sequenceNumber: 1,
+      signingSecret: deriveRoomCodeHandshakeKey(roomId),
+      payloadObj: {
+        deviceName: 'Participant Device'
+      }
+    });
+    participantWs.sendEnvelope(participantJoin);
+
+    const partAccepted = await participantWs.nextMessage();
+    assert.equal(partAccepted.type, 'JOIN_ACCEPTED');
+    const acceptedSnapshot = JSON.parse(partAccepted.payloadJson);
+    assert.equal(acceptedSnapshot.members.length, 2);
+    assert.equal(acceptedSnapshot.currentSyncedUrl, 'https://developer.android.com/');
+
+    // Drain snapshots
+    assert.equal((await participantWs.nextMessage()).type, 'ROOM_STATE_SNAPSHOT');
+    assert.equal((await hostWs.nextMessage()).type, 'ROOM_STATE_SNAPSHOT');
+
+    // 5. Reconnect participant on a new socket and verify duplicate session replacement (members count stays 2)
+    const reconnectedWs = await openRawWebSocket(port, roomId, participantDeviceId);
+    try {
+      const reconnectJoin = createSignedEnvelope({
+        roomId,
+        type: 'JOIN_REQUEST',
+        senderDeviceId: participantDeviceId,
+        senderRole: 'PARTICIPANT',
+        sequenceNumber: 2,
+        signingSecret: deriveRoomCodeHandshakeKey(roomId),
+        payloadObj: { deviceName: 'Participant Device' }
+      });
+      reconnectedWs.sendEnvelope(reconnectJoin);
+      const reconnAccepted = await reconnectedWs.nextMessage();
+      assert.equal(reconnAccepted.type, 'JOIN_ACCEPTED');
+      assert.equal(JSON.parse(reconnAccepted.payloadJson).members.length, 2);
+      assert.equal((await reconnectedWs.nextMessage()).type, 'ROOM_STATE_SNAPSHOT');
+      assert.equal((await hostWs.nextMessage()).type, 'ROOM_STATE_SNAPSHOT');
+
+      // 6. Participant broadcasts URL navigation back to Host
+      const partNav = createSignedEnvelope({
+        roomId,
+        type: 'NAVIGATE_URL',
+        senderDeviceId: participantDeviceId,
+        senderRole: 'PARTICIPANT',
+        sequenceNumber: 3,
+        signingSecret: deriveRoomCodeHandshakeKey(roomId),
+        payloadObj: {
+          url: 'https://www.wikipedia.org/',
+          title: 'Wikipedia'
+        }
+      });
+      reconnectedWs.sendEnvelope(partNav);
+      const hostReceivedNav = await hostWs.nextMessage();
+      assert.equal(hostReceivedNav.type, 'NAVIGATE_URL');
+      assert.equal(JSON.parse(hostReceivedNav.payloadJson).url, 'https://www.wikipedia.org/');
+      const echoedPartNav = await reconnectedWs.nextMessage();
+      assert.equal(echoedPartNav.type, 'NAVIGATE_URL');
+
+      // 7. Unified mode: Host broadcasts PLAYBACK_ACTION in the same room and Participant receives it
+      const hostPlayback = createSignedEnvelope({
+        roomId,
+        type: 'PLAYBACK_ACTION',
+        senderDeviceId: hostDeviceId,
+        senderRole: 'HOST',
+        sequenceNumber: 2,
+        signingSecret: roomCodeDerivedKey,
+        payloadObj: {
+          pageUrl: 'https://www.wikipedia.org/',
+          isPlaying: true,
+          positionSeconds: 42.5,
+          durationSeconds: 180.0,
+          playbackRate: 1.0,
+          updatedAtEpochMs: Date.now()
+        }
+      });
+      hostWs.sendEnvelope(hostPlayback);
+      const partReceivedPlayback = await reconnectedWs.nextMessage();
+      assert.equal(partReceivedPlayback.type, 'PLAYBACK_ACTION');
+      assert.equal(JSON.parse(partReceivedPlayback.payloadJson).positionSeconds, 42.5);
+
+      // 8. Reconnect when payload carries an inviteToken but frame is signed with room accessKey (fixes INVITE_UNAUTHORIZED bug)
+      const tokenReconnectWs = await openRawWebSocket(port, roomId, participantDeviceId);
+      try {
+        const tokenId = 'INV55556666';
+        const expiresAt = Date.now() + 600000;
+        const tokenHmac = computeInviteTokenHmac(roomCodeDerivedKey, roomId, tokenId, expiresAt, false);
+        const inviteToken = `${tokenId}.${expiresAt}.0.${tokenHmac}`;
+        const mixedReconnectJoin = createSignedEnvelope({
+          roomId,
+          type: 'JOIN_REQUEST',
+          senderDeviceId: participantDeviceId,
+          senderRole: 'PARTICIPANT',
+          sequenceNumber: 4,
+          signingSecret: roomCodeDerivedKey,
+          payloadObj: {
+            deviceName: 'Participant Device',
+            inviteToken
+          }
+        });
+        tokenReconnectWs.sendEnvelope(mixedReconnectJoin);
+        const mixedAccepted = await tokenReconnectWs.nextMessage();
+        assert.equal(mixedAccepted.type, 'JOIN_ACCEPTED');
+      } finally {
+        tokenReconnectWs.close();
+      }
+
+      // 9. Temporary Host socket drop (e.g., Host switches apps to share Room Code) must NOT delete the room
+      hostWs.close();
+      await new Promise((r) => setTimeout(r, 80));
+      assert.equal(server.rooms.has(roomId), true, 'Room must remain alive when Host socket temporarily drops');
+
+      // New participant joins by Room Code while Host is temporarily disconnected
+      const secondGuestId = 'guest-device-9999';
+      const secondGuestWs = await openRawWebSocket(port, roomId, secondGuestId);
+      try {
+        const guestJoin = createSignedEnvelope({
+          roomId,
+          type: 'JOIN_REQUEST',
+          senderDeviceId: secondGuestId,
+          senderRole: 'PARTICIPANT',
+          sequenceNumber: 1,
+          signingSecret: deriveRoomCodeHandshakeKey(roomId),
+          payloadObj: {
+            deviceName: 'Second Guest Phone'
+          }
+        });
+        secondGuestWs.sendEnvelope(guestJoin);
+        const guestAccepted = await secondGuestWs.nextMessage();
+        assert.equal(guestAccepted.type, 'JOIN_ACCEPTED');
+
+        // Host reconnects and restores session
+        const hostReconnectWs = await openRawWebSocket(port, roomId, hostDeviceId);
+        try {
+          const hostRejoin = createSignedEnvelope({
+            roomId,
+            type: 'JOIN_REQUEST',
+            senderDeviceId: hostDeviceId,
+            senderRole: 'HOST',
+            sequenceNumber: 10,
+            signingSecret: roomCodeDerivedKey,
+            payloadObj: {
+              deviceName: 'Host Device'
+            }
+          });
+          hostReconnectWs.sendEnvelope(hostRejoin);
+          const hostRejoinedMsg = await hostReconnectWs.nextMessage();
+          assert.equal(hostRejoinedMsg.type, 'JOIN_ACCEPTED');
+        } finally {
+          hostReconnectWs.close();
+        }
+      } finally {
+        secondGuestWs.close();
+      }
+    } finally {
+      reconnectedWs.close();
+    }
+  } finally {
+    badWs.close();
+    participantWs.close();
+    hostWs.close();
+    await server.close();
+  }
+});
+
+test('NYXORA Backend: real-time chat, secret redaction, member verification, and Allow Participant Controls switch', async () => {
+  const server = createNyxoraConnectServer();
+  const { httpServer } = server;
+  await new Promise((r) => httpServer.listen(0, '127.0.0.1', r));
+  const port = httpServer.address().port;
+
+  const roomId = 'NYX-CHAT-7788';
+  const hostDeviceId = 'host-chat-1';
+  const partDeviceId = 'part-chat-2';
+  const outsiderDeviceId = 'outsider-99';
+  const roomKey = deriveRoomCodeHandshakeKey(roomId);
+
+  const hostWs = await openRawWebSocket(port, roomId, hostDeviceId);
+  const partWs = await openRawWebSocket(port, roomId, partDeviceId);
+  const outsiderWs = await openRawWebSocket(port, roomId, outsiderDeviceId);
+
+  try {
+    // 1. Host creates room (shared controls enabled by default)
+    hostWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'JOIN_REQUEST',
+      senderDeviceId: hostDeviceId,
+      senderRole: 'HOST',
+      sequenceNumber: 1,
+      signingSecret: roomKey,
+      payloadObj: {
+        deviceName: 'Host Alpha',
+        hostRoomSnapshot: {
+          roomId,
+          roomName: 'Chat & Controls Room',
+          accessKey: roomKey,
+          hostDeviceId,
+          authorityEpoch: 1,
+          mode: 'BROWSE_TOGETHER',
+          isSyncActive: true,
+          currentSyncedUrl: 'https://example.com',
+          currentSyncedTitle: 'Example'
+        }
+      }
+    }));
+    const hostAccepted = await hostWs.nextMessage();
+    assert.equal(hostAccepted.type, 'JOIN_ACCEPTED');
+    const initialSnap = JSON.parse(hostAccepted.payloadJson);
+    assert.equal(initialSnap.permissions.allowParticipantControls, true);
+    const hostInitialBroadcastSnap = await hostWs.nextMessage();
+    assert.equal(hostInitialBroadcastSnap.type, 'ROOM_STATE_SNAPSHOT');
+
+    // 2. Participant joins room
+    partWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'JOIN_REQUEST',
+      senderDeviceId: partDeviceId,
+      senderRole: 'PARTICIPANT',
+      sequenceNumber: 1,
+      signingSecret: roomKey,
+      payloadObj: { deviceName: 'Participant Beta' }
+    }));
+    const partAccepted = await partWs.nextMessage();
+    assert.equal(partAccepted.type, 'JOIN_ACCEPTED');
+    const partJoinSnap = await partWs.nextMessage();
+    assert.equal(partJoinSnap.type, 'ROOM_STATE_SNAPSHOT');
+    const hostJoinSnap = await hostWs.nextMessage();
+    assert.equal(hostJoinSnap.type, 'ROOM_STATE_SNAPSHOT');
+
+    // 3. Unauthenticated outsider attempting to send chat or control events is rejected with NOT_ROOM_MEMBER
+    outsiderWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'CHAT_MESSAGE',
+      senderDeviceId: outsiderDeviceId,
+      senderRole: 'PARTICIPANT',
+      sequenceNumber: 1,
+      signingSecret: roomKey,
+      payloadObj: {
+        messageId: 'msg-outsider-1',
+        senderName: 'Outsider',
+        text: 'Unauthorized message'
+      }
+    }));
+    const outsiderRejected = await outsiderWs.nextMessage();
+    assert.equal(outsiderRejected.type, 'JOIN_REJECTED');
+    assert.equal(JSON.parse(outsiderRejected.payloadJson).code, 'NOT_ROOM_MEMBER');
+
+    // 4. Real-time chat with automatic secret redaction
+    partWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'CHAT_MESSAGE',
+      senderDeviceId: partDeviceId,
+      senderRole: 'PARTICIPANT',
+      sequenceNumber: 2,
+      signingSecret: roomKey,
+      payloadObj: {
+        messageId: 'msg-part-1',
+        senderName: 'Participant Beta',
+        text: `Hello Host! My room key is ${roomKey} and token INV12345678.999999.0.abcdef1234567890abcdef`
+      }
+    }));
+
+    const hostChatFrame = await hostWs.nextMessage();
+    const partChatEcho = await partWs.nextMessage();
+    assert.equal(hostChatFrame.type, 'CHAT_MESSAGE');
+    assert.equal(partChatEcho.type, 'CHAT_MESSAGE');
+    const chatPayload = JSON.parse(hostChatFrame.payloadJson);
+    assert.equal(chatPayload.messageId, 'msg-part-1');
+    assert.equal(chatPayload.senderName, 'Participant Beta');
+    assert.equal(chatPayload.text.includes(roomKey), false, 'Room access key must never be exposed in chat messages');
+    assert.equal(chatPayload.text.includes('INV12345678'), false, 'Invitation token must never be exposed in chat messages');
+    assert.equal(chatPayload.text.includes('Hello Host!'), true);
+
+    // 5. Host disables Allow Participant Controls -> Server immediately enforces it
+    hostWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'UPDATE_ROOM_CONFIG',
+      senderDeviceId: hostDeviceId,
+      senderRole: 'HOST',
+      sequenceNumber: 2,
+      signingSecret: roomKey,
+      payloadObj: {
+        permissions: {
+          allowParticipantControls: false,
+          allowParticipantPlaybackControl: false,
+          allowParticipantNavigationSync: false,
+          syncUrlNavigation: true,
+          syncBackForward: true,
+          syncTabSelection: true,
+          syncNewlyOpenedPages: true,
+          maxParticipants: 8
+        }
+      }
+    }));
+    const hostPermSnap = await hostWs.nextMessage();
+    const partPermSnap = await partWs.nextMessage();
+    assert.equal(hostPermSnap.type, 'ROOM_STATE_SNAPSHOT');
+    assert.equal(partPermSnap.type, 'ROOM_STATE_SNAPSHOT');
+    assert.equal(JSON.parse(partPermSnap.payloadJson).permissions.allowParticipantControls, false);
+
+    // 6. Participant attempts NAVIGATE_URL and PLAYBACK_ACTION while disabled -> Server rejects with PERMISSION_DENIED
+    partWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'NAVIGATE_URL',
+      senderDeviceId: partDeviceId,
+      senderRole: 'PARTICIPANT',
+      sequenceNumber: 3,
+      signingSecret: roomKey,
+      payloadObj: { url: 'https://blocked-by-host.example.com', title: 'Blocked' }
+    }));
+    const navDenied = await partWs.nextMessage();
+    assert.equal(navDenied.type, 'PERMISSION_DENIED');
+    assert.equal(JSON.parse(navDenied.payloadJson).code, 'PARTICIPANT_CONTROLS_DISABLED');
+
+    partWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'PLAYBACK_ACTION',
+      senderDeviceId: partDeviceId,
+      senderRole: 'PARTICIPANT',
+      sequenceNumber: 4,
+      signingSecret: roomKey,
+      payloadObj: {
+        pageUrl: 'https://example.com/video.mp4',
+        isPlaying: true,
+        positionSeconds: 88.0,
+        durationSeconds: 120.0,
+        playbackRate: 1.0
+      }
+    }));
+    const playbackDenied = await partWs.nextMessage();
+    assert.equal(playbackDenied.type, 'PERMISSION_DENIED');
+    assert.equal(JSON.parse(playbackDenied.payloadJson).code, 'PARTICIPANT_CONTROLS_DISABLED');
+
+    // 7. Host re-enables Allow Participant Controls -> Participant controls restored without reconnecting
+    hostWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'UPDATE_ROOM_CONFIG',
+      senderDeviceId: hostDeviceId,
+      senderRole: 'HOST',
+      sequenceNumber: 3,
+      signingSecret: roomKey,
+      payloadObj: {
+        permissions: {
+          allowParticipantControls: true,
+          allowParticipantPlaybackControl: true,
+          allowParticipantNavigationSync: true
+        }
+      }
+    }));
+    await hostWs.nextMessage();
+    const partReenabledSnap = await partWs.nextMessage();
+    assert.equal(JSON.parse(partReenabledSnap.payloadJson).permissions.allowParticipantControls, true);
+
+    partWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'NAVIGATE_URL',
+      senderDeviceId: partDeviceId,
+      senderRole: 'PARTICIPANT',
+      sequenceNumber: 5,
+      signingSecret: roomKey,
+      payloadObj: { url: 'https://restored-controls.example.com', title: 'Restored' }
+    }));
+    const hostNavAfterRestore = await hostWs.nextMessage();
+    const partNavAfterRestore = await partWs.nextMessage();
+    assert.equal(hostNavAfterRestore.type, 'NAVIGATE_URL');
+    assert.equal(JSON.parse(hostNavAfterRestore.payloadJson).url, 'https://restored-controls.example.com/');
+    assert.equal(partNavAfterRestore.type, 'NAVIGATE_URL');
+  } finally {
+    outsiderWs.close();
+    partWs.close();
+    hostWs.close();
+    await server.close();
+  }
+});
+
+
+
+

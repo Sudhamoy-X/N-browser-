@@ -23,10 +23,13 @@ enum class SyncConnectionStatus(val label: String) {
     DISCONNECTED("Disconnected"),
     CONNECTING("Connecting"),
     CONNECTED("Connected"),
-    SYNCHRONIZING("Synchronizing"),
-    SYNCED("Synced"),
+    SYNCHRONIZING("Connected"),
+    SYNCED("Connected"),
     RECONNECTING("Reconnecting"),
-    PAUSED_FOLLOWING("Paused")
+    PAUSED_FOLLOWING("Paused");
+
+    val isConnectedOrSynced: Boolean
+        get() = this == CONNECTED || this == SYNCED || this == SYNCHRONIZING
 }
 
 enum class VideoCompatibilityState(val label: String, val supportsDirectSync: Boolean) {
@@ -49,10 +52,19 @@ data class RoomPermissionsConfig(
     val syncUrlNavigation: Boolean = true,
     val syncBackForward: Boolean = true,
     val syncTabSelection: Boolean = false,
-    val syncNewlyOpenedPages: Boolean = false,
-    val allowParticipantPlaybackControl: Boolean = false,
-    val allowParticipantNavigationSync: Boolean = true
+    val syncNewlyOpenedPages: Boolean = true,
+    val allowParticipantPlaybackControl: Boolean = true,
+    val allowParticipantNavigationSync: Boolean = true,
+    val allowParticipantControls: Boolean = allowParticipantPlaybackControl && allowParticipantNavigationSync
 ) {
+    fun withParticipantControls(allowed: Boolean): RoomPermissionsConfig {
+        return copy(
+            allowParticipantControls = allowed,
+            allowParticipantPlaybackControl = allowed,
+            allowParticipantNavigationSync = allowed
+        )
+    }
+
     fun toJson(): JSONObject = JSONObject().apply {
         put("maxParticipants", maxParticipants.coerceIn(2, 10))
         put("isRoomLocked", isRoomLocked)
@@ -60,22 +72,79 @@ data class RoomPermissionsConfig(
         put("syncBackForward", syncBackForward)
         put("syncTabSelection", syncTabSelection)
         put("syncNewlyOpenedPages", syncNewlyOpenedPages)
-        put("allowParticipantPlaybackControl", allowParticipantPlaybackControl)
-        put("allowParticipantNavigationSync", allowParticipantNavigationSync)
+        put("allowParticipantPlaybackControl", allowParticipantPlaybackControl && allowParticipantControls)
+        put("allowParticipantNavigationSync", allowParticipantNavigationSync && allowParticipantControls)
+        put("allowParticipantControls", allowParticipantControls && allowParticipantPlaybackControl && allowParticipantNavigationSync)
     }
 
     companion object {
         fun fromJson(obj: JSONObject?): RoomPermissionsConfig {
             if (obj == null) return RoomPermissionsConfig()
+            val hasMasterKey = obj.has("allowParticipantControls")
+            val masterAllowed = obj.optBoolean("allowParticipantControls", true)
+            val pbAllowed = if (hasMasterKey && !obj.has("allowParticipantPlaybackControl")) {
+                masterAllowed
+            } else {
+                obj.optBoolean("allowParticipantPlaybackControl", masterAllowed) && (!hasMasterKey || masterAllowed)
+            }
+            val navAllowed = if (hasMasterKey && !obj.has("allowParticipantNavigationSync")) {
+                masterAllowed
+            } else {
+                obj.optBoolean("allowParticipantNavigationSync", masterAllowed) && (!hasMasterKey || masterAllowed)
+            }
+            val effectiveControls = masterAllowed && pbAllowed && navAllowed
             return RoomPermissionsConfig(
                 maxParticipants = obj.optInt("maxParticipants", 5).coerceIn(2, 10),
                 isRoomLocked = obj.optBoolean("isRoomLocked", false),
                 syncUrlNavigation = obj.optBoolean("syncUrlNavigation", true),
                 syncBackForward = obj.optBoolean("syncBackForward", true),
                 syncTabSelection = obj.optBoolean("syncTabSelection", false),
-                syncNewlyOpenedPages = obj.optBoolean("syncNewlyOpenedPages", false),
-                allowParticipantPlaybackControl = obj.optBoolean("allowParticipantPlaybackControl", false),
-                allowParticipantNavigationSync = obj.optBoolean("allowParticipantNavigationSync", true)
+                syncNewlyOpenedPages = obj.optBoolean("syncNewlyOpenedPages", true),
+                allowParticipantPlaybackControl = pbAllowed,
+                allowParticipantNavigationSync = navAllowed,
+                allowParticipantControls = effectiveControls
+            )
+        }
+    }
+}
+
+data class RoomChatMessage(
+    val messageId: String,
+    val roomId: String,
+    val senderDeviceId: String,
+    val senderName: String,
+    val senderRole: RoomRole,
+    val text: String,
+    val timestampMillis: Long
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("messageId", messageId)
+        put("roomId", roomId)
+        put("senderDeviceId", senderDeviceId)
+        put("senderName", senderName)
+        put("senderRole", senderRole.name)
+        put("text", text)
+        put("timestampMillis", timestampMillis)
+    }
+
+    companion object {
+        const val MAX_CHAT_HISTORY = 100
+
+        fun fromJson(obj: JSONObject?): RoomChatMessage? {
+            if (obj == null) return null
+            val id = obj.optString("messageId", "").trim()
+            val text = obj.optString("text", "").trim()
+            if (id.isEmpty() || text.isEmpty()) return null
+            val roleStr = obj.optString("senderRole", RoomRole.PARTICIPANT.name)
+            val role = runCatching { RoomRole.valueOf(roleStr) }.getOrDefault(RoomRole.PARTICIPANT)
+            return RoomChatMessage(
+                messageId = id,
+                roomId = obj.optString("roomId", ""),
+                senderDeviceId = obj.optString("senderDeviceId", ""),
+                senderName = obj.optString("senderName", "Participant").trim().ifBlank { "Participant" },
+                senderRole = role,
+                text = text,
+                timestampMillis = obj.optLong("timestampMillis", 0L)
             )
         }
     }
@@ -171,6 +240,7 @@ data class NyxoraConnectRoomState(
     val currentSyncedUrl: String = "",
     val currentSyncedTitle: String = "",
     val playbackState: WatchTogetherPlaybackState? = null,
+    val chatMessages: List<RoomChatMessage> = emptyList(),
     val createdAtMillis: Long = System.currentTimeMillis(),
     val expiresAtMillis: Long = System.currentTimeMillis() + DEFAULT_ROOM_TTL_MS,
     val lastSequenceNumber: Long = 0L
@@ -197,6 +267,11 @@ data class NyxoraConnectRoomState(
         if (playbackState != null) {
             put("playbackState", playbackState.toJson())
         }
+        val chatArr = JSONArray()
+        for (msg in chatMessages.takeLast(RoomChatMessage.MAX_CHAT_HISTORY)) {
+            chatArr.put(msg.toJson())
+        }
+        put("chatMessages", chatArr)
         put("createdAtMillis", createdAtMillis)
         put("expiresAtMillis", expiresAtMillis)
         put("lastSequenceNumber", lastSequenceNumber)
@@ -216,6 +291,16 @@ data class NyxoraConnectRoomState(
                     }
                 }
             }
+            val chatArr = obj.optJSONArray("chatMessages")
+            val chatList = mutableListOf<RoomChatMessage>()
+            if (chatArr != null) {
+                for (i in 0 until chatArr.length()) {
+                    val item = chatArr.optJSONObject(i)
+                    if (item != null) {
+                        RoomChatMessage.fromJson(item)?.let { chatList.add(it) }
+                    }
+                }
+            }
             return NyxoraConnectRoomState(
                 roomId = obj.optString("roomId", ""),
                 roomName = obj.optString("roomName", "NYXORA Room"),
@@ -231,6 +316,7 @@ data class NyxoraConnectRoomState(
                 currentSyncedUrl = obj.optString("currentSyncedUrl", ""),
                 currentSyncedTitle = obj.optString("currentSyncedTitle", ""),
                 playbackState = WatchTogetherPlaybackState.fromJson(obj.optJSONObject("playbackState")),
+                chatMessages = chatList.takeLast(RoomChatMessage.MAX_CHAT_HISTORY),
                 createdAtMillis = obj.optLong("createdAtMillis", 0L),
                 expiresAtMillis = obj.optLong("expiresAtMillis", 0L),
                 lastSequenceNumber = obj.optLong("lastSequenceNumber", 0L)
@@ -259,7 +345,10 @@ enum class RealtimeEventType {
     NEW_PAGE_OPENED,
     PLAYBACK_ACTION,
     PLAYBACK_BEACON,
-    REQUEST_RESYNC
+    REQUEST_RESYNC,
+    CHAT_MESSAGE,
+    PERMISSION_DENIED,
+    ERROR_EVENT
 }
 
 data class RealtimeEventEnvelope(
@@ -289,7 +378,7 @@ data class RealtimeEventEnvelope(
 
     companion object {
         fun fromJsonString(raw: String): RealtimeEventEnvelope? {
-            if (raw.isBlank() || raw.length > 8192) return null
+            if (raw.isBlank() || raw.length > 32768) return null
             return runCatching {
                 val obj = JSONObject(raw)
                 val typeStr = obj.optString("type", "")

@@ -9,6 +9,7 @@ import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -31,6 +32,7 @@ object FaviconCacheManager {
     private const val NEGATIVE_LOOKUP_COOLDOWN_MS = 10L * 60L * 1000L // 10 minutes
 
     private val memoryCache = object : LruCache<String, Bitmap>(64) {}
+    private val hostFileNameCache = ConcurrentHashMap<String, String>(64)
     private val failedFetchTimestamps = HashMap<String, Long>()
     private val fetchMutex = Mutex()
 
@@ -49,11 +51,16 @@ object FaviconCacheManager {
     }
 
     private fun hostToFileName(hostKey: String): String {
+        hostFileNameCache[hostKey]?.let { return it }
         val digest = MessageDigest.getInstance("SHA-256")
             .digest(hostKey.toByteArray(Charsets.UTF_8))
             .joinToString("") { "%02x".format(it) }
             .take(32)
-        return "fav_$digest.png"
+        val fileName = "fav_$digest.png"
+        if (hostFileNameCache.size < 512) {
+            hostFileNameCache[hostKey] = fileName
+        }
+        return fileName
     }
 
     fun getFaviconFile(context: Context, urlOrHost: String): File? {
@@ -212,11 +219,18 @@ object FaviconCacheManager {
         }.getOrNull()
     }
 
+    fun trimMemory() {
+        synchronized(memoryCache) {
+            memoryCache.trimToSize(16)
+        }
+    }
+
     fun clearMemoryAndDiskCacheForTest(context: Context) {
         synchronized(memoryCache) {
             memoryCache.evictAll()
             failedFetchTimestamps.clear()
         }
+        hostFileNameCache.clear()
         runCatching {
             File(context.applicationContext.filesDir, FAVICON_DIR_NAME).deleteRecursively()
         }

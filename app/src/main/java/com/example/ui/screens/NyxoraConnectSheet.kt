@@ -23,24 +23,25 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.outlined.CastConnected
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Devices
+import androidx.compose.material.icons.outlined.ExpandLess
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Forward10
-import androidx.compose.material.icons.outlined.Lock
+import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PersonRemove
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Replay10
-import androidx.compose.material.icons.outlined.Security
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.SwapHoriz
 import androidx.compose.material.icons.outlined.Sync
@@ -48,14 +49,14 @@ import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.FilterChip
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -63,7 +64,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -72,7 +72,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
@@ -83,7 +82,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.domain.connect.ConnectedDeviceMember
 import com.example.domain.connect.NyxoraConnectRoomState
-import com.example.domain.connect.NyxoraConnectSecurity
 import com.example.domain.connect.RoomPermissionsConfig
 import com.example.domain.connect.RoomRole
 import com.example.domain.connect.RoomSyncMode
@@ -97,10 +95,13 @@ import com.example.ui.theme.NyxoraWarningAmber
 import kotlin.math.roundToInt
 
 /**
- * Compact status indicator bar displayed beneath the Top Address Bar whenever a NYXORA Connect
- * session is active. Clearly indicates whether URL or playback synchronization is active,
- * displays connection status (Connected, Synchronizing, Synced, Reconnecting), provides a
- * manual resync action, and allows stopping/leaving immediately.
+ * Compact, collapsible synchronization indicator displayed beneath the Top Address Bar whenever
+ * a NYXORA Connect session is active.
+ *
+ * - Default compact mode shows a small status icon, connection dot, and room code with a compact
+ *   menu for Pause/Resume, Resync, and Leave.
+ * - Expanded mode reveals full host/participant counts and quick actions, and can be manually
+ *   hidden or automatically collapsed when scrolling or entering fullscreen video.
  */
 @Composable
 fun NyxoraConnectStatusBanner(
@@ -109,17 +110,22 @@ fun NyxoraConnectStatusBanner(
     connectionStatus: SyncConnectionStatus,
     isFollowingPaused: Boolean,
     isPrivateMode: Boolean,
+    isExpanded: Boolean = false,
+    onExpandedChange: (Boolean) -> Unit = {},
+    unreadChatCount: Int = 0,
+    onOpenChatOverlay: () -> Unit = {},
     onOpenConnectSheet: () -> Unit,
     onManualResync: () -> Unit,
     onTogglePauseOrSync: () -> Unit,
     onStopOrLeaveImmediate: () -> Unit
 ) {
     val isHost = roomState.hostDeviceId == localDeviceId
+    var showCompactMenu by remember { mutableStateOf(false) }
+
     val statusColor = when {
         isPrivateMode -> NyxoraVibrantViolet
         !roomState.isSyncActive || isFollowingPaused -> NyxoraWarningAmber
-        connectionStatus == SyncConnectionStatus.SYNCED || connectionStatus == SyncConnectionStatus.CONNECTED -> NyxoraSuccessGreen
-        connectionStatus == SyncConnectionStatus.SYNCHRONIZING -> NyxoraElectricBlue
+        connectionStatus.isConnectedOrSynced -> NyxoraSuccessGreen
         connectionStatus == SyncConnectionStatus.RECONNECTING || connectionStatus == SyncConnectionStatus.CONNECTING -> NyxoraWarningAmber
         else -> NyxoraDangerRed
     }
@@ -128,111 +134,454 @@ fun NyxoraConnectStatusBanner(
         isPrivateMode -> "Incognito Isolated (Sync Paused)"
         !roomState.isSyncActive -> "Sharing Paused by Host"
         isFollowingPaused -> "Following Paused"
+        !isHost && !roomState.permissions.allowParticipantControls ->
+            "Host Only Controls"
+        !isHost && connectionStatus.isConnectedOrSynced && roomState.playbackState == null ->
+            "Waiting for host media…"
         else -> connectionStatus.label
     }
 
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onOpenConnectSheet)
             .testTag("nyxora_connect_status_banner"),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.92f),
-        tonalElevation = 3.dp
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.94f),
+        tonalElevation = 1.dp
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.weight(1f)
-            ) {
-                Box(
+        Column(modifier = Modifier.fillMaxWidth()) {
+            if (!isExpanded) {
+                // Compact single-line indicator: small status icon, room code, restore/expand button, and compact menu
+                Row(
                     modifier = Modifier
-                        .size(8.dp)
-                        .clip(CircleShape)
-                        .background(statusColor)
-                )
-                Spacer(Modifier.width(8.dp))
-                Column {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = "${roomState.mode.label} • ${if (isHost) "Host" else "Participant"}",
-                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                            color = MaterialTheme.colorScheme.onSurface,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                        .fillMaxWidth()
+                        .height(32.dp)
+                        .padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable(onClick = onOpenConnectSheet)
+                            .padding(vertical = 4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.CastConnected,
+                            contentDescription = "Room Sync Status",
+                            tint = statusColor,
+                            modifier = Modifier
+                                .size(14.dp)
+                                .testTag("connect_banner_status_icon")
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Box(
+                            modifier = Modifier
+                                .size(6.dp)
+                                .clip(CircleShape)
+                                .background(statusColor)
                         )
                         Spacer(Modifier.width(6.dp))
                         Text(
-                            text = "(${roomState.members.size}/${roomState.permissions.maxParticipants})",
+                            text = roomState.roomId,
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.SemiBold
+                            ),
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.testTag("connect_banner_room_code")
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = "• $statusLabel",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = statusColor,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.testTag("connect_banner_status_text")
                         )
                     }
-                    Text(
-                        text = "$statusLabel • ${roomState.roomId}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = statusColor,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.testTag("connect_banner_status_text")
-                    )
-                }
-            }
 
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                if (!isHost) {
-                    TextButton(
-                        onClick = onManualResync,
-                        modifier = Modifier.testTag("connect_banner_resync_button")
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        IconButton(
+                            onClick = onOpenChatOverlay,
+                            modifier = Modifier
+                                .size(28.dp)
+                                .testTag("connect_banner_chat_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Outlined.Chat,
+                                contentDescription = "Open Room Chat",
+                                tint = if (unreadChatCount > 0) NyxoraElectricBlue else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(15.dp)
+                            )
+                        }
+
+                        IconButton(
+                            onClick = { onExpandedChange(true) },
+                            modifier = Modifier
+                                .size(28.dp)
+                                .testTag("connect_banner_expand_toggle")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.ExpandMore,
+                                contentDescription = "Expand sync status bar",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+
+                        Box {
+                            IconButton(
+                                onClick = { showCompactMenu = true },
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .testTag("connect_banner_menu_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.MoreVert,
+                                    contentDescription = "Room Sync actions",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+
+                            ConnectBannerCompactDropdownMenu(
+                                expanded = showCompactMenu,
+                                isHost = isHost,
+                                isSyncActive = roomState.isSyncActive,
+                                isBannerExpanded = false,
+                                onDismiss = { showCompactMenu = false },
+                                onTogglePauseOrSync = onTogglePauseOrSync,
+                                onManualResync = onManualResync,
+                                onOpenChatOverlay = onOpenChatOverlay,
+                                onOpenConnectSheet = onOpenConnectSheet,
+                                onToggleExpand = { onExpandedChange(true) },
+                                onStopOrLeaveImmediate = onStopOrLeaveImmediate
+                            )
+                        }
+                    }
+                }
+            } else {
+                // Expanded status bar: shows full details, quick actions, and a Hide button to collapse while browsing
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onOpenConnectSheet)
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .testTag("connect_banner_expanded_row"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
                     ) {
                         Icon(
-                            imageVector = Icons.Outlined.Sync,
-                            contentDescription = "Manual Resync",
-                            modifier = Modifier.size(15.dp)
+                            imageVector = Icons.Outlined.CastConnected,
+                            contentDescription = "Room Sync Status",
+                            tint = statusColor,
+                            modifier = Modifier
+                                .size(15.dp)
+                                .testTag("connect_banner_status_icon")
                         )
-                        Spacer(Modifier.width(4.dp))
-                        Text("Resync", style = MaterialTheme.typography.labelSmall)
+                        Spacer(Modifier.width(8.dp))
+                        Column {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = "Room Sync • ${if (isHost) "Host" else "Participant"}",
+                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    text = "(${roomState.members.size}/${roomState.permissions.maxParticipants})",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Text(
+                                text = "$statusLabel • ${roomState.roomId}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = statusColor,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.testTag("connect_banner_status_text")
+                            )
+                        }
                     }
-                } else {
-                    TextButton(
-                        onClick = onTogglePauseOrSync,
-                        modifier = Modifier.testTag("connect_banner_pause_toggle")
-                    ) {
-                        Text(
-                            text = if (roomState.isSyncActive) "Pause" else "Resume",
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                    }
-                }
 
-                TextButton(
-                    onClick = onStopOrLeaveImmediate,
-                    colors = ButtonDefaults.textButtonColors(contentColor = NyxoraDangerRed),
-                    modifier = Modifier.testTag("connect_banner_stop_button")
-                ) {
-                    Text(
-                        text = if (isHost) "Close" else "Leave",
-                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        if (!isHost) {
+                            TextButton(
+                                onClick = onManualResync,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                modifier = Modifier
+                                    .height(30.dp)
+                                    .testTag("connect_banner_resync_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.Sync,
+                                    contentDescription = "Manual Resync",
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text("Resync", style = MaterialTheme.typography.labelSmall)
+                            }
+                        } else {
+                            TextButton(
+                                onClick = onTogglePauseOrSync,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                modifier = Modifier
+                                    .height(30.dp)
+                                    .testTag("connect_banner_pause_toggle")
+                            ) {
+                                Text(
+                                    text = if (roomState.isSyncActive) "Pause" else "Resume",
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                        }
+
+                        TextButton(
+                            onClick = onStopOrLeaveImmediate,
+                            colors = ButtonDefaults.textButtonColors(contentColor = NyxoraDangerRed),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                            modifier = Modifier
+                                .height(30.dp)
+                                .testTag("connect_banner_stop_button")
+                        ) {
+                            Text(
+                                text = "Leave",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
+                            )
+                        }
+
+                        IconButton(
+                            onClick = { onExpandedChange(false) },
+                            modifier = Modifier
+                                .size(28.dp)
+                                .testTag("connect_banner_collapse_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.ExpandLess,
+                                contentDescription = "Hide expanded sync status bar",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+
+                        Box {
+                            IconButton(
+                                onClick = { showCompactMenu = true },
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .testTag("connect_banner_menu_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.MoreVert,
+                                    contentDescription = "Room Sync actions",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+
+                            ConnectBannerCompactDropdownMenu(
+                                expanded = showCompactMenu,
+                                isHost = isHost,
+                                isSyncActive = roomState.isSyncActive,
+                                isBannerExpanded = true,
+                                onDismiss = { showCompactMenu = false },
+                                onTogglePauseOrSync = onTogglePauseOrSync,
+                                onManualResync = onManualResync,
+                                onOpenChatOverlay = onOpenChatOverlay,
+                                onOpenConnectSheet = onOpenConnectSheet,
+                                onToggleExpand = { onExpandedChange(false) },
+                                onStopOrLeaveImmediate = onStopOrLeaveImmediate
+                            )
+                        }
+                    }
                 }
             }
         }
     }
 }
 
+@Composable
+private fun ConnectBannerCompactDropdownMenu(
+    expanded: Boolean,
+    isHost: Boolean,
+    isSyncActive: Boolean,
+    isBannerExpanded: Boolean,
+    onDismiss: () -> Unit,
+    onTogglePauseOrSync: () -> Unit,
+    onManualResync: () -> Unit,
+    onOpenChatOverlay: () -> Unit = {},
+    onOpenConnectSheet: () -> Unit,
+    onToggleExpand: () -> Unit,
+    onStopOrLeaveImmediate: () -> Unit
+) {
+    DropdownMenu(
+        expanded = expanded,
+        onDismissRequest = onDismiss,
+        modifier = Modifier.testTag("connect_banner_compact_menu")
+    ) {
+        DropdownMenuItem(
+            text = {
+                Text(
+                    text = "Room Chat",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            leadingIcon = {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Outlined.Chat,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+            },
+            onClick = {
+                onDismiss()
+                onOpenChatOverlay()
+            },
+            modifier = Modifier.testTag("connect_banner_menu_chat_item")
+        )
+        if (isHost) {
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        text = if (isSyncActive) "Pause" else "Resume",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                },
+                leadingIcon = {
+                    Icon(
+                        imageVector = if (isSyncActive) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                },
+                onClick = {
+                    onDismiss()
+                    onTogglePauseOrSync()
+                },
+                modifier = Modifier.testTag(
+                    if (!isBannerExpanded) "connect_banner_pause_toggle" else "connect_banner_menu_pause_item"
+                )
+            )
+        } else {
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        text = "Resync",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Outlined.Sync,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                },
+                onClick = {
+                    onDismiss()
+                    onManualResync()
+                },
+                modifier = Modifier.testTag(
+                    if (!isBannerExpanded) "connect_banner_resync_button" else "connect_banner_menu_resync_item"
+                )
+            )
+        }
+
+        DropdownMenuItem(
+            text = {
+                Text(
+                    text = if (isBannerExpanded) "Hide Status Details" else "Show Status Details",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            leadingIcon = {
+                Icon(
+                    imageVector = if (isBannerExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+            },
+            onClick = {
+                onDismiss()
+                onToggleExpand()
+            },
+            modifier = Modifier.testTag("connect_banner_menu_toggle_expand")
+        )
+
+        DropdownMenuItem(
+            text = {
+                Text(
+                    text = "Room Sync Panel",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            leadingIcon = {
+                Icon(
+                    imageVector = Icons.Outlined.CastConnected,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+            },
+            onClick = {
+                onDismiss()
+                onOpenConnectSheet()
+            },
+            modifier = Modifier.testTag("connect_banner_menu_open_sheet")
+        )
+
+        HorizontalDivider()
+
+        DropdownMenuItem(
+            text = {
+                Text(
+                    text = "Leave",
+                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = NyxoraDangerRed
+                )
+            },
+            leadingIcon = {
+                Icon(
+                    imageVector = Icons.Outlined.Close,
+                    contentDescription = null,
+                    tint = NyxoraDangerRed,
+                    modifier = Modifier.size(18.dp)
+                )
+            },
+            onClick = {
+                onDismiss()
+                onStopOrLeaveImmediate()
+            },
+            modifier = Modifier.testTag(
+                if (!isBannerExpanded) "connect_banner_stop_button" else "connect_banner_menu_leave_item"
+            )
+        )
+    }
+}
+
 /**
- * Full-screen NYXORA Connect overlay sheet for creating rooms, joining rooms, managing connected
- * devices, switching between Browse Together and Watch Together, and configuring room permissions.
+ * Simple, compact NYXORA Connect screen.
+ * One person creates a room as Host; other users join directly using a Room Code.
+ * Uses the permanent configured WSS endpoint internally without manual endpoint or key fields.
  */
 @Composable
+@Suppress("UNUSED_PARAMETER")
 fun NyxoraConnectSheet(
     roomState: NyxoraConnectRoomState?,
     localDeviceId: String,
@@ -267,6 +616,8 @@ fun NyxoraConnectSheet(
     onManualResync: () -> Unit,
     onBroadcastCurrentUrlNow: () -> Unit,
     onHostPlaybackControl: (play: Boolean, seekDeltaSec: Double?) -> Unit,
+    onSetAllowParticipantControls: (Boolean) -> Unit = {},
+    participantControlsDisabledNotice: String? = null,
     onRemoveParticipant: (String) -> Unit,
     onTransferHost: (String) -> Unit,
     onSimulateNetworkDrop: () -> Unit,
@@ -289,10 +640,10 @@ fun NyxoraConnectSheet(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .widthIn(max = 680.dp)
+                    .widthIn(max = 560.dp)
                     .padding(horizontal = 16.dp, vertical = 12.dp)
             ) {
-                // Top Header
+                // Header: Back button, NYXORA Connect title, and Connection status pill
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -321,129 +672,115 @@ fun NyxoraConnectSheet(
                             modifier = Modifier.size(20.dp)
                         )
                         Spacer(Modifier.width(8.dp))
-                        Column {
-                            Text(
-                                text = "NYXORA Connect",
-                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                text = "Multi-Device Room Sync & Watch Together",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
+                        Text(
+                            text = "NYXORA Connect",
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.testTag("connect_title_text")
+                        )
                     }
 
                     Spacer(Modifier.width(8.dp))
                     StatusPillBadge(status = connectionStatus)
                 }
 
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(12.dp))
 
-            // Private Mode Isolation Warning
-            if (isPrivateMode) {
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 10.dp),
-                    shape = MaterialTheme.shapes.medium,
-                    color = NyxoraVibrantViolet.copy(alpha = 0.16f)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.VisibilityOff,
-                            contentDescription = null,
-                            tint = NyxoraVibrantViolet
-                        )
-                        Spacer(Modifier.width(10.dp))
-                        Text(
-                            text = "Incognito Isolation Active: Private tabs, cookies, and private history are never transmitted or synchronized with any room.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                    }
-                }
-            }
-
-            // Error Banner if any
-            if (!lastSyncError.isNullOrBlank()) {
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 10.dp)
-                        .testTag("connect_error_banner"),
-                    shape = MaterialTheme.shapes.medium,
-                    color = NyxoraDangerRed.copy(alpha = 0.16f)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
+                // Incognito Isolation Notice
+                if (isPrivateMode) {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 10.dp),
+                        shape = RoundedCornerShape(10.dp),
+                        color = NyxoraVibrantViolet.copy(alpha = 0.14f)
                     ) {
                         Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(
-                                imageVector = Icons.Outlined.WarningAmber,
+                                imageVector = Icons.Outlined.VisibilityOff,
                                 contentDescription = null,
-                                tint = NyxoraDangerRed
+                                tint = NyxoraVibrantViolet,
+                                modifier = Modifier.size(18.dp)
                             )
                             Spacer(Modifier.width(10.dp))
                             Text(
-                                text = lastSyncError,
+                                text = "Private tabs are isolated and never synchronized with any room.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                         }
-                        IconButton(onClick = onClearError) {
-                            Icon(Icons.Outlined.Close, contentDescription = "Dismiss error")
+                    }
+                }
+
+                // Error Banner
+                if (!lastSyncError.isNullOrBlank()) {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 10.dp)
+                            .testTag("connect_error_banner"),
+                        shape = RoundedCornerShape(10.dp),
+                        color = NyxoraDangerRed.copy(alpha = 0.14f)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.WarningAmber,
+                                    contentDescription = null,
+                                    tint = NyxoraDangerRed,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    text = lastSyncError,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            IconButton(
+                                onClick = onClearError,
+                                modifier = Modifier.minimumInteractiveComponentSize()
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.Close,
+                                    contentDescription = "Dismiss error",
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
                         }
                     }
                 }
-            }
 
-            if (roomState == null) {
-                NyxoraConnectLobbyContent(
-                    deviceDisplayName = deviceDisplayName,
-                    hasUserConsentedToShare = hasUserConsentedToShare,
-                    onSetUserShareConsent = onSetUserShareConsent,
-                    onUpdateDeviceName = onUpdateDeviceName,
-                    onCreateRoom = onCreateRoom,
-                    onJoinRoom = onJoinRoom
-                )
-            } else {
-                NyxoraConnectActiveRoomContent(
-                    context = context,
-                    room = roomState,
-                    localDeviceId = localDeviceId,
-                    connectionStatus = connectionStatus,
-                    isFollowingPaused = isFollowingPaused,
-                    videoCompatibility = videoCompatibility,
-                    activePageUrl = activePageUrl,
-                    shareableInviteUrl = shareableInviteUrl,
-                    hasUserConsentedToShare = hasUserConsentedToShare,
-                    onSetUserShareConsent = onSetUserShareConsent,
-                    onRotateInviteLink = onRotateInviteLink,
-                    onUpdateRoomConfig = onUpdateRoomConfig,
-                    onSetFollowingPaused = onSetFollowingPaused,
-                    onManualResync = onManualResync,
-                    onBroadcastCurrentUrlNow = onBroadcastCurrentUrlNow,
-                    onHostPlaybackControl = onHostPlaybackControl,
-                    onRemoveParticipant = onRemoveParticipant,
-                    onTransferHost = onTransferHost,
-                    onSimulateNetworkDrop = onSimulateNetworkDrop,
-                    onLeaveOrCloseRoom = onLeaveOrCloseRoom,
-                    onToast = onToast
-                )
-            }
+                if (roomState == null) {
+                    NyxoraConnectSimpleLobby(
+                        onCreateRoom = onCreateRoom,
+                        onJoinRoom = onJoinRoom
+                    )
+                } else {
+                    NyxoraConnectSimpleActiveRoom(
+                        context = context,
+                        room = roomState,
+                        localDeviceId = localDeviceId,
+                        connectionStatus = connectionStatus,
+                        videoCompatibility = videoCompatibility,
+                        participantControlsDisabledNotice = participantControlsDisabledNotice,
+                        onSetAllowParticipantControls = onSetAllowParticipantControls,
+                        onHostPlaybackControl = onHostPlaybackControl,
+                        onLeaveOrCloseRoom = onLeaveOrCloseRoom,
+                        onToast = onToast
+                    )
+                }
             }
         }
     }
@@ -451,15 +788,15 @@ fun NyxoraConnectSheet(
 
 @Composable
 private fun StatusPillBadge(status: SyncConnectionStatus) {
-    val badgeColor = when (status) {
-        SyncConnectionStatus.SYNCED, SyncConnectionStatus.CONNECTED -> NyxoraSuccessGreen
-        SyncConnectionStatus.SYNCHRONIZING, SyncConnectionStatus.CONNECTING -> NyxoraElectricBlue
-        SyncConnectionStatus.RECONNECTING, SyncConnectionStatus.PAUSED_FOLLOWING -> NyxoraWarningAmber
-        SyncConnectionStatus.DISCONNECTED -> MaterialTheme.colorScheme.onSurfaceVariant
+    val badgeColor = when {
+        status.isConnectedOrSynced -> NyxoraSuccessGreen
+        status == SyncConnectionStatus.CONNECTING -> NyxoraElectricBlue
+        status == SyncConnectionStatus.RECONNECTING || status == SyncConnectionStatus.PAUSED_FOLLOWING -> NyxoraWarningAmber
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
     Surface(
         shape = RoundedCornerShape(50),
-        color = badgeColor.copy(alpha = 0.16f),
+        color = badgeColor.copy(alpha = 0.14f),
         modifier = Modifier.testTag("connect_status_pill")
     ) {
         Row(
@@ -476,317 +813,121 @@ private fun StatusPillBadge(status: SyncConnectionStatus) {
             Text(
                 text = status.label,
                 style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
-                color = badgeColor
+                color = badgeColor,
+                modifier = Modifier.testTag("connect_status_text")
             )
         }
     }
 }
 
 @Composable
-private fun NyxoraConnectLobbyContent(
-    deviceDisplayName: String,
-    hasUserConsentedToShare: Boolean,
-    onSetUserShareConsent: (Boolean) -> Unit,
-    onUpdateDeviceName: (String) -> Unit,
+private fun NyxoraConnectSimpleLobby(
     onCreateRoom: (String, RoomSyncMode, RoomPermissionsConfig, String) -> Unit,
     onJoinRoom: (String, String, String) -> Unit
 ) {
-    var editedDeviceName by rememberSaveable(deviceDisplayName) { mutableStateOf(deviceDisplayName) }
-    var roomNameInput by rememberSaveable { mutableStateOf("NYXORA Sync Room") }
-    var selectedMode by rememberSaveable { mutableStateOf(RoomSyncMode.BROWSE_TOGETHER) }
-    var maxParticipants by rememberSaveable { mutableIntStateOf(5) }
-    var syncUrls by rememberSaveable { mutableStateOf(true) }
-    var allowParticipantNavSync by rememberSaveable { mutableStateOf(true) }
-    var syncBackForward by rememberSaveable { mutableStateOf(true) }
-    var syncTabSelect by rememberSaveable { mutableStateOf(false) }
-    var syncNewPages by rememberSaveable { mutableStateOf(false) }
-    var allowParticipantPlayback by rememberSaveable { mutableStateOf(false) }
-    var customRelayEndpoint by rememberSaveable { mutableStateOf("") }
-
-    var joinRoomInput by rememberSaveable { mutableStateOf("") }
-    var joinAccessKeyInput by rememberSaveable { mutableStateOf("") }
-    var joinEndpointInput by rememberSaveable { mutableStateOf("") }
+    var roomCodeInput by rememberSaveable { mutableStateOf("") }
 
     LazyColumn(
         modifier = Modifier
-            .fillMaxSize()
+            .fillMaxWidth()
             .testTag("connect_lobby_list"),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // 1. Create Room Card (Primary Action)
+        // 1. Host Section: Create Room
         item {
             Surface(
-                shape = MaterialTheme.shapes.medium,
+                shape = RoundedCornerShape(12.dp),
                 color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.28f)),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(
-                    modifier = Modifier.padding(16.dp),
+                    modifier = Modifier.padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Text(
-                        text = "Create a Room",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-
-                    OutlinedTextField(
-                        value = roomNameInput,
-                        onValueChange = { roomNameInput = it },
-                        label = { Text("Room Name") },
-                        singleLine = true,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("connect_room_name_input")
-                    )
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        for (mode in RoomSyncMode.entries) {
-                            FilterChip(
-                                selected = selectedMode == mode,
-                                onClick = { selectedMode = mode },
-                                label = { Text(mode.label) },
-                                modifier = Modifier.testTag("connect_mode_chip_${mode.name.lowercase()}")
-                            )
-                        }
-                    }
-                    Text(
-                        text = selectedMode.subtitle,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    ConnectOptionToggleRow(
-                        title = "Consent to Share My Browsing Activity",
-                        subtitle = "Required before transmitting your active tab URL or playback state to room members",
-                        checked = hasUserConsentedToShare,
-                        onCheckedChange = onSetUserShareConsent
-                    )
-
                     Button(
                         onClick = {
                             onCreateRoom(
-                                roomNameInput,
-                                selectedMode,
-                                RoomPermissionsConfig(
-                                    maxParticipants = maxParticipants,
-                                    isRoomLocked = false,
-                                    syncUrlNavigation = syncUrls,
-                                    syncBackForward = syncBackForward,
-                                    syncTabSelection = syncTabSelect,
-                                    syncNewlyOpenedPages = syncNewPages,
-                                    allowParticipantPlaybackControl = allowParticipantPlayback,
-                                    allowParticipantNavigationSync = allowParticipantNavSync
-                                ),
-                                customRelayEndpoint
+                                "NYXORA Sync Room",
+                                RoomSyncMode.BROWSE_TOGETHER,
+                                RoomPermissionsConfig(),
+                                ""
                             )
                         },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = NyxoraElectricBlue,
+                            contentColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(10.dp),
                         modifier = Modifier
                             .fillMaxWidth()
+                            .height(48.dp)
                             .testTag("connect_create_room_button")
                     ) {
-                        Icon(Icons.Outlined.CastConnected, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Icon(
+                            imageVector = Icons.Outlined.CastConnected,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
                         Spacer(Modifier.width(8.dp))
-                        Text("Create ${selectedMode.label} Room")
-                    }
-
-                    Column {
                         Text(
-                            text = "Participant Limit: $maxParticipants devices (Default: 5)",
-                            style = MaterialTheme.typography.labelMedium
-                        )
-                        Slider(
-                            value = maxParticipants.toFloat(),
-                            onValueChange = { maxParticipants = it.roundToInt().coerceIn(2, 10) },
-                            valueRange = 2f..10f,
-                            steps = 7
+                            text = "Create Room",
+                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold)
                         )
                     }
-
-                    ConnectOptionToggleRow(
-                        title = "Synchronize URL Navigation",
-                        subtitle = "Share current URL and page transitions across connected devices",
-                        checked = syncUrls,
-                        onCheckedChange = { syncUrls = it }
-                    )
-                    ConnectOptionToggleRow(
-                        title = "Bidirectional URL Sync (Participants Can Navigate Room)",
-                        subtitle = "Allow participants to share URL and navigation changes with the room",
-                        checked = allowParticipantNavSync,
-                        onCheckedChange = { allowParticipantNavSync = it }
-                    )
-                    ConnectOptionToggleRow(
-                        title = "Synchronize Back & Forward",
-                        subtitle = "Mirror Back and Forward navigation actions",
-                        checked = syncBackForward,
-                        onCheckedChange = { syncBackForward = it }
-                    )
-                    ConnectOptionToggleRow(
-                        title = "Synchronize Selected-Tab Navigation",
-                        subtitle = "Navigate participants when switching active normal tabs",
-                        checked = syncTabSelect,
-                        onCheckedChange = { syncTabSelect = it }
-                    )
-                    ConnectOptionToggleRow(
-                        title = "Auto-Sync Newly Opened Pages",
-                        subtitle = "Automatically synchronize newly opened tabs/pages",
-                        checked = syncNewPages,
-                        onCheckedChange = { syncNewPages = it }
-                    )
-                    if (selectedMode == RoomSyncMode.WATCH_TOGETHER) {
-                        ConnectOptionToggleRow(
-                            title = "Allow Participant Playback Controls",
-                            subtitle = "Permit participants to trigger Play, Pause, and Seek",
-                            checked = allowParticipantPlayback,
-                            onCheckedChange = { allowParticipantPlayback = it }
-                        )
-                    }
-
-                    OutlinedTextField(
-                        value = customRelayEndpoint,
-                        onValueChange = { customRelayEndpoint = it },
-                        label = { Text("Optional Cloud WSS Relay URL (leave empty for Direct LAN/Local WS)") },
-                        placeholder = { Text("wss://relay.example.com/nyxora") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
                 }
             }
         }
 
-        // 3. Join Room Card
+        // 2. Participant Section: Room Code Input + Join Room Button
         item {
             Surface(
-                shape = MaterialTheme.shapes.medium,
+                shape = RoundedCornerShape(12.dp),
                 color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.28f)),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Text(
-                        text = "Join an Existing Room",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-
                     OutlinedTextField(
-                        value = joinRoomInput,
-                        onValueChange = { input ->
-                            joinRoomInput = input
-                            // Auto-populate key & endpoint if user pasted a full invitation link
-                            val parsed = NyxoraConnectSecurity.parseRoomInviteInput(input)
-                            if (parsed != null) {
-                                if (parsed.accessKey.isNotBlank()) {
-                                    joinAccessKeyInput = parsed.accessKey
-                                }
-                                if (parsed.endpointUrl.isNotBlank()) {
-                                    joinEndpointInput = parsed.endpointUrl
-                                }
-                            }
-                        },
-                        label = { Text("Room ID (NYX-XXXX-XXXX) or Invitation Link") },
+                        value = roomCodeInput,
+                        onValueChange = { roomCodeInput = it.uppercase() },
+                        label = { Text("Room Code") },
+                        placeholder = { Text("NYX-XXXX-XXXX") },
                         singleLine = true,
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("connect_join_room_input")
                     )
 
-                    OutlinedTextField(
-                        value = joinAccessKeyInput,
-                        onValueChange = { joinAccessKeyInput = it },
-                        label = { Text("Room Access Key (auto-filled from invite link)") },
-                        singleLine = true,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("connect_join_key_input")
-                    )
-
-                    OutlinedTextField(
-                        value = joinEndpointInput,
-                        onValueChange = { joinEndpointInput = it },
-                        label = { Text("Host WebSocket Endpoint (auto-filled from invite link)") },
-                        placeholder = { Text("ws://192.168.1.x:port/nyxora") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
                     Button(
                         onClick = {
-                            onJoinRoom(joinRoomInput, joinAccessKeyInput, joinEndpointInput)
+                            onJoinRoom(roomCodeInput.trim(), "", "")
                         },
-                        enabled = joinRoomInput.isNotBlank(),
+                        enabled = roomCodeInput.isNotBlank(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = NyxoraElectricBlue,
+                            contentColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(10.dp),
                         modifier = Modifier
                             .fillMaxWidth()
+                            .height(48.dp)
                             .testTag("connect_join_room_button")
                     ) {
-                        Icon(Icons.Outlined.Devices, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Join Room")
-                    }
-                }
-            }
-        }
-
-        // 3. Device Identity Card
-        item {
-            Surface(
-                shape = MaterialTheme.shapes.medium,
-                color = MaterialTheme.colorScheme.surface,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text(
-                        text = "Your Device Name",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    OutlinedTextField(
-                        value = editedDeviceName,
-                        onValueChange = {
-                            editedDeviceName = it
-                            onUpdateDeviceName(it)
-                        },
-                        label = { Text("Visible to room members") },
-                        singleLine = true,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("connect_device_name_input")
-                    )
-                }
-            }
-        }
-
-        // 4. Security & Compatibility Scope Card
-        item {
-            Surface(
-                shape = MaterialTheme.shapes.medium,
-                color = MaterialTheme.colorScheme.surface,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Outlined.Security, contentDescription = null, tint = NyxoraElectricBlue)
+                        Icon(
+                            imageVector = Icons.Outlined.Devices,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            text = "Privacy, Security & Compatibility Scope",
-                            style = MaterialTheme.typography.titleSmall
+                            text = "Join Room",
+                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold)
                         )
                     }
-                    Text(
-                        text = "• Zero Credential Leakage: Passwords, cookies, form inputs, auth tokens, and Private/Incognito tabs are never transmitted.\n" +
-                            "• Cryptographic Room Auth: Every WebSocket frame is signed with HMAC-SHA256 using the room's ephemeral Access Key.\n" +
-                            "• Watch Together Scope: Synchronizes standard HTML5 <video> players where allowed by the website. DRM-protected streams (Widevine/EME) and cross-origin restricted embeds are never bypassed and automatically offer Synchronized URL Navigation as a fallback.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
                 }
             }
         }
@@ -794,52 +935,39 @@ private fun NyxoraConnectLobbyContent(
 }
 
 @Composable
-private fun NyxoraConnectActiveRoomContent(
+private fun NyxoraConnectSimpleActiveRoom(
     context: Context,
     room: NyxoraConnectRoomState,
     localDeviceId: String,
     connectionStatus: SyncConnectionStatus,
-    isFollowingPaused: Boolean,
     videoCompatibility: VideoCompatibilityState,
-    activePageUrl: String,
-    shareableInviteUrl: String,
-    hasUserConsentedToShare: Boolean,
-    onSetUserShareConsent: (Boolean) -> Unit,
-    onRotateInviteLink: (Boolean) -> String,
-    onUpdateRoomConfig: (String?, RoomSyncMode?, Boolean?, RoomPermissionsConfig?) -> Unit,
-    onSetFollowingPaused: (Boolean) -> Unit,
-    onManualResync: () -> Unit,
-    onBroadcastCurrentUrlNow: () -> Unit,
+    participantControlsDisabledNotice: String? = null,
+    onSetAllowParticipantControls: (Boolean) -> Unit = {},
     onHostPlaybackControl: (Boolean, Double?) -> Unit,
-    onRemoveParticipant: (String) -> Unit,
-    onTransferHost: (String) -> Unit,
-    onSimulateNetworkDrop: () -> Unit,
     onLeaveOrCloseRoom: () -> Unit,
     onToast: (String) -> Unit
 ) {
     val isHost = room.hostDeviceId == localDeviceId
-    val inviteLink = remember(shareableInviteUrl, room.roomId, room.accessKey, room.endpointUrl, room.roomName) {
-        shareableInviteUrl.ifBlank {
-            NyxoraConnectSecurity.buildRoomInviteLink(
-                roomId = room.roomId,
-                accessKey = room.accessKey,
-                endpointUrl = room.endpointUrl,
-                roomName = room.roomName
-            )
-        }
-    }
+    val pb = room.playbackState
+    val isUnsupportedOrProtected =
+        videoCompatibility == VideoCompatibilityState.DRM_PROTECTED_UNSUPPORTED ||
+            videoCompatibility == VideoCompatibilityState.IFRAME_OR_EMBED_RESTRICTED
+    val hasSupportedMedia = !isUnsupportedOrProtected &&
+        (videoCompatibility == VideoCompatibilityState.COMPATIBLE_HTML5 || pb != null)
+    val canControlPlayback = hasSupportedMedia &&
+        (isHost || (room.permissions.allowParticipantControls && room.permissions.allowParticipantPlaybackControl))
 
     LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-        contentPadding = PaddingValues(bottom = 20.dp)
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(bottom = 16.dp)
     ) {
-        // 1. Room Header, Readable Room ID / Invite URL & Compact 4-Action Row
+        // 1. Compact Active Room Card: Room Code, Connection Status, Copy Code, Share Code, Leave Room
         item {
             Surface(
                 shape = RoundedCornerShape(12.dp),
                 color = MaterialTheme.colorScheme.surface,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(
@@ -853,61 +981,36 @@ private fun NyxoraConnectActiveRoomContent(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = room.roomName,
-                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                text = if (isHost) "Role: Room Host (Source of Truth)" else "Role: Participant",
+                                text = "Room Code",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = if (isHost) NyxoraElectricBlue else MaterialTheme.colorScheme.onSurfaceVariant
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                        }
-                        if (room.permissions.isRoomLocked) {
-                            Icon(
-                                imageVector = Icons.Outlined.Lock,
-                                contentDescription = "Room Locked",
-                                tint = NyxoraWarningAmber,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                    }
-
-                    // Readable Room ID & HTTPS Invitation Link container
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
+                            Spacer(Modifier.height(2.dp))
                             Text(
-                                text = "Room ID: ${room.roomId}",
-                                style = MaterialTheme.typography.bodyMedium.copy(
+                                text = room.roomId,
+                                style = MaterialTheme.typography.titleLarge.copy(
                                     fontFamily = FontFamily.Monospace,
-                                    fontWeight = FontWeight.SemiBold
+                                    fontWeight = FontWeight.Bold
                                 ),
                                 color = MaterialTheme.colorScheme.onSurface,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.testTag("connect_active_room_id")
                             )
-                            Text(
-                                text = "HTTPS Share Link: $inviteLink",
-                                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.testTag("connect_shareable_https_invite_text")
-                            )
                         }
+                        val roleLabel = if (isHost) "Host" else "Participant"
+                        val summaryLabel = if (connectionStatus.isConnectedOrSynced) {
+                            "$roleLabel • ${connectionStatus.label}"
+                        } else {
+                            "$roleLabel • ${connectionStatus.label}"
+                        }
+                        Text(
+                            text = summaryLabel,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (connectionStatus.isConnectedOrSynced) NyxoraElectricBlue else NyxoraWarningAmber
+                        )
                     }
 
-                    // Single Compact, Consistent Row for Copy, Share, Refresh, and Close
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -915,641 +1018,296 @@ private fun NyxoraConnectActiveRoomContent(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        CompactConnectActionButton(
-                            label = "Copy",
-                            icon = Icons.Outlined.ContentCopy,
-                            contentDescription = "Copy room invitation link",
-                            accentColor = NyxoraElectricBlue,
-                            isPrimary = true,
-                            testTag = "connect_copy_invite_button",
+                        OutlinedButton(
                             onClick = {
                                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                clipboard.setPrimaryClip(ClipData.newPlainText("NYXORA Room Invite", inviteLink))
-                                onToast("HTTPS room invitation link copied to clipboard")
+                                clipboard.setPrimaryClip(ClipData.newPlainText("NYXORA Room Code", room.roomId))
+                                onToast("Room code ${room.roomId} copied")
                             },
-                            modifier = Modifier.weight(1f)
-                        )
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, NyxoraElectricBlue.copy(alpha = 0.65f)),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = NyxoraElectricBlue.copy(alpha = 0.12f),
+                                contentColor = NyxoraElectricBlue
+                            ),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .semantics { contentDescription = "Copy Room Code" }
+                                .testTag("connect_copy_code_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.ContentCopy,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.width(5.dp))
+                            Text(
+                                text = "Copy Code",
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
 
-                        CompactConnectActionButton(
-                            label = "Share",
-                            icon = Icons.Outlined.Share,
-                            contentDescription = "Share room invitation link",
-                            accentColor = MaterialTheme.colorScheme.onSurface,
-                            isPrimary = false,
-                            testTag = "connect_share_invite_button",
+                        OutlinedButton(
                             onClick = {
-                                val shareText = "Join my NYXORA Connect room (${room.roomName}):\n$inviteLink"
-                                val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                                val shareIntent = Intent(Intent.ACTION_SEND).apply {
                                     type = "text/plain"
-                                    putExtra(Intent.EXTRA_SUBJECT, "Join NYXORA Room: ${room.roomName}")
-                                    putExtra(Intent.EXTRA_TEXT, shareText)
+                                    putExtra(Intent.EXTRA_SUBJECT, "NYXORA Room Code")
+                                    putExtra(Intent.EXTRA_TEXT, room.roomId)
                                 }
                                 runCatching {
                                     context.startActivity(
-                                        Intent.createChooser(sendIntent, "Share Room Invitation")
-                                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        Intent.createChooser(shareIntent, "Share Room Code").apply {
+                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        }
                                     )
+                                }.onFailure {
+                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    clipboard.setPrimaryClip(ClipData.newPlainText("NYXORA Room Code", room.roomId))
+                                    onToast("Room code ${room.roomId} copied")
                                 }
                             },
-                            modifier = Modifier.weight(1f)
-                        )
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, NyxoraElectricBlue.copy(alpha = 0.65f)),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = NyxoraElectricBlue.copy(alpha = 0.12f),
+                                contentColor = NyxoraElectricBlue
+                            ),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .semantics { contentDescription = "Share Room Code" }
+                                .testTag("connect_share_code_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.Share,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.width(5.dp))
+                            Text(
+                                text = "Share Code",
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
 
-                        CompactConnectActionButton(
-                            label = "Refresh",
-                            icon = Icons.Outlined.Refresh,
-                            contentDescription = if (isHost) {
-                                "Refresh and rotate room invitation link"
-                            } else {
-                                "Refresh room synchronization"
-                            },
-                            accentColor = MaterialTheme.colorScheme.onSurface,
-                            isPrimary = false,
-                            testTag = "connect_rotate_invite_button",
-                            onClick = {
-                                if (isHost) {
-                                    onRotateInviteLink(false)
-                                    onToast("Previous invitation revoked; generated new HTTPS invite link")
-                                } else {
-                                    onManualResync()
-                                }
-                            },
-                            modifier = Modifier.weight(1f)
-                        )
-
-                        CompactConnectActionButton(
-                            label = "Close",
-                            icon = Icons.Outlined.Close,
-                            contentDescription = if (isHost) "Close room" else "Leave room",
-                            accentColor = NyxoraDangerRed,
-                            isPrimary = false,
-                            testTag = "connect_header_leave_button",
+                        OutlinedButton(
                             onClick = onLeaveOrCloseRoom,
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                }
-            }
-        }
-
-        // 2. Active Mode & Live Synchronization Control Card
-        item {
-            Surface(
-                shape = MaterialTheme.shapes.medium,
-                color = MaterialTheme.colorScheme.surface,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Text(
-                        text = "Synchronization Mode & Controls",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        for (mode in RoomSyncMode.entries) {
-                            FilterChip(
-                                selected = room.mode == mode,
-                                enabled = isHost,
-                                onClick = {
-                                    if (isHost) {
-                                        onUpdateRoomConfig(null, mode, null, null)
-                                    }
-                                },
-                                label = { Text(mode.label) },
-                                modifier = Modifier.testTag("connect_active_mode_${mode.name.lowercase()}")
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, NyxoraDangerRed.copy(alpha = 0.65f)),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = NyxoraDangerRed.copy(alpha = 0.12f),
+                                contentColor = NyxoraDangerRed
+                            ),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .semantics { contentDescription = "Leave Room" }
+                                .testTag("connect_leave_or_close_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.Close,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.width(5.dp))
+                            Text(
+                                text = "Leave Room",
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
 
-                    if (room.currentSyncedUrl.isNotBlank()) {
+                    if (isHost) {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("connect_allow_participant_controls_row"),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Allow Participant Controls",
+                                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = "Let connected participants search, navigate, open pages, and control playback",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            Switch(
+                                checked = room.permissions.allowParticipantControls,
+                                onCheckedChange = { onSetAllowParticipantControls(it) },
+                                modifier = Modifier
+                                    .semantics { contentDescription = "Allow Participant Controls" }
+                                    .testTag("connect_allow_participant_controls_switch")
+                            )
+                        }
+                    } else if (!room.permissions.allowParticipantControls || !participantControlsDisabledNotice.isNullOrBlank()) {
                         Surface(
                             shape = RoundedCornerShape(8.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant,
-                            modifier = Modifier.fillMaxWidth()
+                            color = NyxoraWarningAmber.copy(alpha = 0.14f),
+                            border = BorderStroke(1.dp, NyxoraWarningAmber.copy(alpha = 0.45f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("connect_participant_controls_disabled_notice")
                         ) {
                             Row(
-                                modifier = Modifier.padding(10.dp),
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Icon(
-                                    imageVector = Icons.Outlined.Public,
+                                    imageVector = Icons.Outlined.WarningAmber,
                                     contentDescription = null,
-                                    tint = NyxoraElectricBlue,
-                                    modifier = Modifier.size(18.dp)
+                                    tint = NyxoraWarningAmber,
+                                    modifier = Modifier.size(16.dp)
                                 )
                                 Spacer(Modifier.width(8.dp))
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = "Synchronized URL",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    Text(
-                                        text = room.currentSyncedUrl,
-                                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.testTag("connect_synced_url_text")
-                                    )
-                                }
+                                Text(
+                                    text = participantControlsDisabledNotice
+                                        ?: "Shared controls are disabled by the host — only the host can control shared navigation and playback.",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
                             }
                         }
                     }
+                }
+            }
+        }
 
-                    ConnectOptionToggleRow(
-                        title = "Share My Browsing Activity with Room",
-                        subtitle = if (hasUserConsentedToShare) {
-                            "Consent granted — your normal tab URL changes are shared when permitted"
-                        } else {
-                            "Sharing disabled — your local browsing activity is not sent to the room"
-                        },
-                        checked = hasUserConsentedToShare,
-                        onCheckedChange = onSetUserShareConsent
-                    )
-
-                    if (isHost) {
-                        ConnectOptionToggleRow(
-                            title = "Host Synchronization Active",
-                            subtitle = if (room.isSyncActive) {
-                                "Broadcasting ${room.mode.label} events to all connected devices"
-                            } else {
-                                "Synchronization is paused; participants stay in room without updates"
-                            },
-                            checked = room.isSyncActive,
-                            onCheckedChange = { active ->
-                                onUpdateRoomConfig(null, null, active, null)
-                            }
-                        )
-
-                        OutlinedButton(
-                            onClick = onBroadcastCurrentUrlNow,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("connect_broadcast_url_button")
-                        ) {
-                            Icon(Icons.Outlined.Sync, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("Sync Current Active Tab URL Now")
-                        }
-                    } else {
-                        ConnectOptionToggleRow(
-                            title = "Follow Room Synchronization",
-                            subtitle = if (!isFollowingPaused) {
-                                "Automatically following room navigation and playback"
-                            } else {
-                                "Following paused — browse independently without leaving the room"
-                            },
-                            checked = !isFollowingPaused,
-                            onCheckedChange = { follow ->
-                                onSetFollowingPaused(!follow)
-                            }
-                        )
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Button(
-                                onClick = onManualResync,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("connect_manual_resync_button")
-                            ) {
-                                Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text("Manual Resync")
-                            }
-                            if (room.permissions.allowParticipantNavigationSync) {
-                                OutlinedButton(
-                                    onClick = onBroadcastCurrentUrlNow,
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .testTag("connect_participant_broadcast_url_button")
-                                ) {
-                                    Icon(Icons.Outlined.Sync, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(Modifier.width(6.dp))
-                                    Text("Share My URL")
-                                }
-                            }
-                        }
-                    }
-
-                    // Watch Together Dedicated Controls & Player Compatibility Indicator
-                    if (room.mode == RoomSyncMode.WATCH_TOGETHER) {
-                        HorizontalDivider()
+        // 2. Compact Watch Together Media Session & Controls
+        item {
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.28f)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("connect_watch_together_card")
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    if (pb != null && !isUnsupportedOrProtected) {
                         Text(
-                            text = "Watch Together Media Player Status",
-                            style = MaterialTheme.typography.titleSmall
+                            text = "Playback: ${if (pb.isPlaying) "Playing" else "Paused"} at ${formatSeconds(pb.positionSeconds)} / ${formatSeconds(pb.durationSeconds)}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.testTag("connect_playback_state_text")
                         )
-                        val compatColor = if (videoCompatibility.supportsDirectSync) {
-                            NyxoraSuccessGreen
-                        } else {
-                            NyxoraWarningAmber
-                        }
+                    } else if (isUnsupportedOrProtected) {
                         Text(
                             text = videoCompatibility.label,
-                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
-                            color = compatColor,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = NyxoraWarningAmber,
                             modifier = Modifier.testTag("connect_video_compat_text")
                         )
+                    } else {
+                        Text(
+                            text = "Waiting for host to start supported media playback…",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag("connect_waiting_for_media_text")
+                        )
+                        Text(
+                            text = videoCompatibility.label,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag("connect_video_compat_text")
+                        )
+                    }
 
-                        val pb = room.playbackState
-                        if (pb != null) {
-                            Text(
-                                text = "Host Playback: ${if (pb.isPlaying) "Playing" else "Paused"} at ${formatSeconds(pb.positionSeconds)} / ${formatSeconds(pb.durationSeconds)} (${pb.playbackRate}x)",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.testTag("connect_playback_state_text")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(
+                            onClick = { onHostPlaybackControl(pb?.isPlaying ?: true, -10.0) },
+                            enabled = canControlPlayback,
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .semantics { contentDescription = "Skip backward 10 seconds" }
+                                .testTag("connect_watch_rewind_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.Replay10,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
                             )
+                            Spacer(Modifier.width(4.dp))
+                            Text("-10s")
                         }
 
-                        val canControlPlayback = isHost || room.permissions.allowParticipantPlaybackControl
-                        if (canControlPlayback) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                OutlinedButton(
-                                    onClick = { onHostPlaybackControl(pb?.isPlaying ?: true, -10.0) },
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Icon(Icons.Outlined.Replay10, contentDescription = "Rewind 10s", modifier = Modifier.size(18.dp))
-                                    Spacer(Modifier.width(4.dp))
-                                    Text("-10s")
+                        Button(
+                            onClick = {
+                                val nextPlay = !(pb?.isPlaying ?: false)
+                                onHostPlaybackControl(nextPlay, null)
+                            },
+                            enabled = canControlPlayback,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = NyxoraElectricBlue,
+                                contentColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier
+                                .weight(1.2f)
+                                .height(48.dp)
+                                .semantics {
+                                    contentDescription = if (pb?.isPlaying == true) "Pause playback" else "Play playback"
                                 }
-                                Button(
-                                    onClick = {
-                                        val nextPlay = !(pb?.isPlaying ?: false)
-                                        onHostPlaybackControl(nextPlay, null)
-                                    },
-                                    modifier = Modifier
-                                        .weight(1.2f)
-                                        .testTag("connect_watch_play_pause_button")
-                                ) {
-                                    val isPlaying = pb?.isPlaying == true
-                                    Icon(
-                                        imageVector = if (isPlaying) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Spacer(Modifier.width(4.dp))
-                                    Text(if (isPlaying) "Pause All" else "Play All")
-                                }
-                                OutlinedButton(
-                                    onClick = { onHostPlaybackControl(pb?.isPlaying ?: true, 10.0) },
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Icon(Icons.Outlined.Forward10, contentDescription = "Forward 10s", modifier = Modifier.size(18.dp))
-                                    Spacer(Modifier.width(4.dp))
-                                    Text("+10s")
-                                }
-                            }
+                                .testTag("connect_watch_play_pause_button")
+                        ) {
+                            val isPlaying = pb?.isPlaying == true
+                            Icon(
+                                imageVector = if (isPlaying) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(if (isPlaying) "Pause" else "Play")
                         }
 
-                        if (!videoCompatibility.supportsDirectSync) {
-                            Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = NyxoraWarningAmber.copy(alpha = 0.14f),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Column(
-                                    modifier = Modifier.padding(12.dp),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Text(
-                                        text = "Why Direct Player Sync Is Unavailable Here:",
-                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                                        color = NyxoraWarningAmber
-                                    )
-                                    Text(
-                                        text = "This page either uses DRM-protected media (Widevine/EME), a cross-origin restricted iframe embed, or has no active HTML5 <video> element. NYXORA respects DRM and website access controls. Use Synchronized URL Navigation below so all devices open the same video URL together.",
-                                        style = MaterialTheme.typography.bodySmall
-                                    )
-                                    if (isHost && activePageUrl.startsWith("http")) {
-                                        OutlinedButton(
-                                            onClick = onBroadcastCurrentUrlNow,
-                                            modifier = Modifier.testTag("connect_fallback_url_sync_button")
-                                        ) {
-                                            Text("Use Synchronized URL Navigation Fallback")
-                                        }
-                                    }
-                                }
-                            }
+                        OutlinedButton(
+                            onClick = { onHostPlaybackControl(pb?.isPlaying ?: true, 10.0) },
+                            enabled = canControlPlayback,
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .semantics { contentDescription = "Skip forward 10 seconds" }
+                                .testTag("connect_watch_forward_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.Forward10,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text("+10s")
                         }
                     }
                 }
             }
         }
-
-        // 3. Connected Devices List
-        item {
-            Surface(
-                shape = MaterialTheme.shapes.medium,
-                color = MaterialTheme.colorScheme.surface,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("connect_devices_list")
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Text(
-                        text = "Connected Devices (${room.members.size}/${room.permissions.maxParticipants})",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-
-                    for (member in room.members) {
-                        ConnectedDeviceRow(
-                            member = member,
-                            isCurrentDevice = member.deviceId == localDeviceId,
-                            canManageMember = isHost && member.deviceId != localDeviceId,
-                            onTransferHost = { onTransferHost(member.deviceId) },
-                            onRemoveParticipant = { onRemoveParticipant(member.deviceId) }
-                        )
-                    }
-                }
-            }
-        }
-
-        // 4. Room Permissions & Settings (Host Editable, Participant Read-Only)
-        item {
-            Surface(
-                shape = MaterialTheme.shapes.medium,
-                color = MaterialTheme.colorScheme.surface,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Text(
-                        text = if (isHost) "Room Settings & Access Controls" else "Room Permissions (Managed by Host)",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-
-                    val perms = room.permissions
-                    ConnectOptionToggleRow(
-                        title = "Lock Room",
-                        subtitle = "Prevent any additional devices from joining this room",
-                        checked = perms.isRoomLocked,
-                        enabled = isHost,
-                        onCheckedChange = { locked ->
-                            onUpdateRoomConfig(null, null, null, perms.copy(isRoomLocked = locked))
-                        }
-                    )
-                    ConnectOptionToggleRow(
-                        title = "Synchronize URL Navigation",
-                        subtitle = "Navigate connected devices when a new URL is loaded",
-                        checked = perms.syncUrlNavigation,
-                        enabled = isHost,
-                        onCheckedChange = { v ->
-                            onUpdateRoomConfig(null, null, null, perms.copy(syncUrlNavigation = v))
-                        }
-                    )
-                    ConnectOptionToggleRow(
-                        title = "Bidirectional URL Sync (Participants Can Navigate Room)",
-                        subtitle = "Allow participants to broadcast URL and navigation updates to the room",
-                        checked = perms.allowParticipantNavigationSync,
-                        enabled = isHost,
-                        onCheckedChange = { v ->
-                            onUpdateRoomConfig(null, null, null, perms.copy(allowParticipantNavigationSync = v))
-                        }
-                    )
-                    ConnectOptionToggleRow(
-                        title = "Synchronize Back & Forward",
-                        subtitle = "Mirror host Back and Forward actions",
-                        checked = perms.syncBackForward,
-                        enabled = isHost,
-                        onCheckedChange = { v ->
-                            onUpdateRoomConfig(null, null, null, perms.copy(syncBackForward = v))
-                        }
-                    )
-                    ConnectOptionToggleRow(
-                        title = "Synchronize Selected-Tab Navigation",
-                        subtitle = "Sync URL when host switches between open normal tabs",
-                        checked = perms.syncTabSelection,
-                        enabled = isHost,
-                        onCheckedChange = { v ->
-                            onUpdateRoomConfig(null, null, null, perms.copy(syncTabSelection = v))
-                        }
-                    )
-                    ConnectOptionToggleRow(
-                        title = "Auto-Sync Newly Opened Pages",
-                        subtitle = "Open synchronized tabs when host opens a new page",
-                        checked = perms.syncNewlyOpenedPages,
-                        enabled = isHost,
-                        onCheckedChange = { v ->
-                            onUpdateRoomConfig(null, null, null, perms.copy(syncNewlyOpenedPages = v))
-                        }
-                    )
-                    ConnectOptionToggleRow(
-                        title = "Allow Participant Playback Controls",
-                        subtitle = "Allow participants to Play, Pause, and Seek in Watch Together",
-                        checked = perms.allowParticipantPlaybackControl,
-                        enabled = isHost,
-                        onCheckedChange = { v ->
-                            onUpdateRoomConfig(null, null, null, perms.copy(allowParticipantPlaybackControl = v))
-                        }
-                    )
-
-                    OutlinedButton(
-                        onClick = onSimulateNetworkDrop,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("connect_test_reconnect_button")
-                    ) {
-                        Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Test Reconnection & State Recovery")
-                    }
-                }
-            }
-        }
-
-        // 5. Leave / Close Room Button
-        item {
-            Button(
-                onClick = onLeaveOrCloseRoom,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = NyxoraDangerRed,
-                    contentColor = Color.White
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("connect_leave_or_close_button")
-            ) {
-                Icon(Icons.Outlined.Close, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text(if (isHost) "Close Room for All Devices" else "Leave Room")
-            }
-            Spacer(Modifier.height(20.dp))
-        }
-    }
-}
-
-@Composable
-private fun ConnectedDeviceRow(
-    member: ConnectedDeviceMember,
-    isCurrentDevice: Boolean,
-    canManageMember: Boolean,
-    onTransferHost: () -> Unit,
-    onRemoveParticipant: () -> Unit
-) {
-    Surface(
-        shape = RoundedCornerShape(10.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        modifier = Modifier
-            .fillMaxWidth()
-            .border(
-                width = if (member.role == RoomRole.HOST) 1.dp else 0.dp,
-                color = if (member.role == RoomRole.HOST) NyxoraElectricBlue.copy(alpha = 0.6f) else Color.Transparent,
-                shape = RoundedCornerShape(10.dp)
-            )
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = if (isCurrentDevice) "${member.deviceName} (You)" else member.deviceName,
-                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = member.role.label,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (member.role == RoomRole.HOST) NyxoraElectricBlue else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Text(
-                    text = "Status: ${member.status.label}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            if (canManageMember) {
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    IconButton(
-                        onClick = onTransferHost,
-                        modifier = Modifier.testTag("connect_transfer_host_${member.deviceId}")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.SwapHoriz,
-                            contentDescription = "Transfer Host Role",
-                            tint = NyxoraElectricBlue
-                        )
-                    }
-                    IconButton(
-                        onClick = onRemoveParticipant,
-                        modifier = Modifier.testTag("connect_remove_member_${member.deviceId}")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.PersonRemove,
-                            contentDescription = "Remove Participant",
-                            tint = NyxoraDangerRed
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ConnectOptionToggleRow(
-    title: String,
-    subtitle: String,
-    checked: Boolean,
-    enabled: Boolean = true,
-    onCheckedChange: (Boolean) -> Unit
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
-            Text(text = title, style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium))
-            Text(
-                text = subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        Switch(
-            checked = checked,
-            enabled = enabled,
-            onCheckedChange = onCheckedChange
-        )
-    }
-}
-
-@Composable
-private fun CompactConnectActionButton(
-    label: String,
-    icon: ImageVector,
-    contentDescription: String,
-    accentColor: Color,
-    isPrimary: Boolean,
-    testTag: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val containerColor = if (isPrimary) {
-        accentColor.copy(alpha = 0.14f)
-    } else {
-        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-    }
-    val borderColor = if (isPrimary) {
-        accentColor.copy(alpha = 0.65f)
-    } else {
-        MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)
-    }
-    val contentColor = if (isPrimary) {
-        accentColor
-    } else {
-        accentColor
-    }
-
-    OutlinedButton(
-        onClick = onClick,
-        shape = RoundedCornerShape(8.dp),
-        border = BorderStroke(width = 1.dp, color = borderColor),
-        colors = ButtonDefaults.outlinedButtonColors(
-            containerColor = containerColor,
-            contentColor = contentColor
-        ),
-        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
-        modifier = modifier
-            .height(38.dp)
-            .minimumInteractiveComponentSize()
-            .semantics { this.contentDescription = contentDescription }
-            .testTag(testTag)
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            modifier = Modifier.size(15.dp)
-        )
-        Spacer(Modifier.width(4.dp))
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
     }
 }
 

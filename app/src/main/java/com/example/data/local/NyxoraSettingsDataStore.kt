@@ -123,7 +123,9 @@ data class NyxoraSettingsState(
     val defaultDesktopSite: Boolean = false,
     val dataSaverBlockImages: Boolean = false,
     val forceDarkWebPages: Boolean = false,
-    val hideCookieConsentBanners: Boolean = true
+    val hideCookieConsentBanners: Boolean = true,
+    // NYXORA Connect Permanent Backend Configuration
+    val connectBackendEndpoint: String = com.example.domain.connect.NyxoraConnectSecurity.DEFAULT_PRODUCTION_WSS_ENDPOINT
 )
 
 class NyxoraSettingsDataStore(private val context: Context) {
@@ -190,6 +192,7 @@ class NyxoraSettingsDataStore(private val context: Context) {
         val DATA_SAVER = booleanPreferencesKey("data_saver")
         val FORCE_DARK_WEB = booleanPreferencesKey("force_dark_web")
         val HIDE_COOKIE_BANNERS = booleanPreferencesKey("hide_cookie_banners")
+        val CONNECT_BACKEND_ENDPOINT = stringPreferencesKey("connect_backend_endpoint")
     }
 
     val settingsFlow: Flow<NyxoraSettingsState> = context.nyxoraDataStore.data.map { prefs ->
@@ -197,6 +200,15 @@ class NyxoraSettingsDataStore(private val context: Context) {
     }
 
     private fun mapPreferencesToState(prefs: Preferences): NyxoraSettingsState {
+        val rawConnectEndpoint = (prefs[Keys.CONNECT_BACKEND_ENDPOINT] ?: "").trim()
+        val resolvedConnectEndpoint = if (
+            rawConnectEndpoint.isBlank() ||
+            rawConnectEndpoint.equals(com.example.domain.connect.NyxoraConnectSecurity.LEGACY_PRODUCTION_WSS_ENDPOINT, ignoreCase = true)
+        ) {
+            com.example.domain.connect.NyxoraConnectSecurity.configuredPublicWssEndpoint()
+        } else {
+            rawConnectEndpoint
+        }
         return NyxoraSettingsState(
             themeMode = runCatching { ThemeMode.valueOf(prefs[Keys.THEME_MODE] ?: ThemeMode.DARK.name) }.getOrDefault(ThemeMode.DARK),
             homepageUrl = (prefs[Keys.HOMEPAGE_URL] ?: "nyxora://home").ifBlank { "nyxora://home" },
@@ -253,7 +265,8 @@ class NyxoraSettingsDataStore(private val context: Context) {
             defaultDesktopSite = prefs[Keys.DEFAULT_DESKTOP] ?: false,
             dataSaverBlockImages = prefs[Keys.DATA_SAVER] ?: false,
             forceDarkWebPages = prefs[Keys.FORCE_DARK_WEB] ?: false,
-            hideCookieConsentBanners = prefs[Keys.HIDE_COOKIE_BANNERS] ?: true
+            hideCookieConsentBanners = prefs[Keys.HIDE_COOKIE_BANNERS] ?: true,
+            connectBackendEndpoint = resolvedConnectEndpoint
         )
     }
 
@@ -313,6 +326,9 @@ class NyxoraSettingsDataStore(private val context: Context) {
             prefs[Keys.DATA_SAVER] = updated.dataSaverBlockImages
             prefs[Keys.FORCE_DARK_WEB] = updated.forceDarkWebPages
             prefs[Keys.HIDE_COOKIE_BANNERS] = updated.hideCookieConsentBanners
+            prefs[Keys.CONNECT_BACKEND_ENDPOINT] = updated.connectBackendEndpoint.ifBlank {
+                com.example.domain.connect.NyxoraConnectSecurity.configuredPublicWssEndpoint()
+            }
         }
     }
 

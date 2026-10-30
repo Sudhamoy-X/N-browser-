@@ -12,6 +12,8 @@ import android.webkit.WebView
 import android.widget.FrameLayout
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -36,6 +38,7 @@ import com.example.data.model.SyncedTabItem
 import com.example.domain.browser.BrowserNetworkClient
 import com.example.domain.browser.ContentBlockingEngine
 import com.example.domain.browser.ReaderModeExtractor
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -335,6 +338,8 @@ class ExampleRobolectricTest {
         composeTestRule.waitForIdle()
 
         composeTestRule.onNodeWithTag("nyxora_webview_instance").assertIsDisplayed()
+        composeTestRule.activity.activeBrowserViewModel?.closeAllTabs(inPrivateMode = false)
+        composeTestRule.waitForIdle()
     }
 
     @Test
@@ -364,76 +369,159 @@ class ExampleRobolectricTest {
         composeTestRule.mainClock.advanceTimeBy(350L)
         composeTestRule.waitForIdle()
 
-        // 1. Open Settings from the 8-action bottom menu -> Advanced -> NYXORA Connect
+        // 1. Open Room Sync directly from the main browser bottom menu
         composeTestRule.onNodeWithTag("toolbar_overflow_menu_button").performClick()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("nyxora_bottom_menu_sheet").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("menu_item_settings").performClick()
-        composeTestRule.waitForIdle()
-
-        composeTestRule.onNodeWithTag("settings_category_advanced").performScrollTo().performClick()
-        composeTestRule.waitForIdle()
-        composeTestRule.onNodeWithTag("settings_open_connect_button").performClick()
+        composeTestRule.onNodeWithTag("menu_item_room_sync").assertIsDisplayed().performClick()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("nyxora_connect_sheet").assertIsDisplayed()
+
+        // Verify simple Connect lobby shows Title, Status, Create Room, Room Code input, and Join Room button,
+        // and does NOT show manual WSS endpoint, Room Access Key, or Browse/Watch Together mode selector chips
+        composeTestRule.onNodeWithTag("connect_title_text").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_status_pill").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_create_room_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_join_room_input").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_join_room_button").assertIsDisplayed()
+        assertEquals(
+            "Room Access Key input must be removed from user-facing Join UI",
+            0,
+            composeTestRule.onAllNodesWithTag("connect_join_key_input").fetchSemanticsNodes().size
+        )
+        assertEquals(
+            "Mode selection chips must be removed in unified Room Sync mode",
+            0,
+            composeTestRule.onAllNodesWithTag("connect_mode_chip_browse_together").fetchSemanticsNodes().size
+        )
+
+        val vm = composeTestRule.activity.activeBrowserViewModel!!
+        assertEquals(
+            "wss://n-browser.onrender.com/nyxora",
+            vm.settings.value.connectBackendEndpoint
+        )
 
         // 2. Create a room from the NYXORA Connect sheet
         composeTestRule.onNodeWithTag("connect_create_room_button").performClick()
         composeTestRule.mainClock.advanceTimeBy(400L)
         composeTestRule.waitForIdle()
 
-        // Verify Room ID display, standard HTTPS invite link, and compact 4-action row (Copy, Share, Refresh, Close)
+        // Verify active room shows Current Room Code, Copy Code button, Share Code button, and Leave Room button
         composeTestRule.onNodeWithTag("connect_active_room_id").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("connect_shareable_https_invite_text").assertIsDisplayed()
         composeTestRule.onNodeWithTag("connect_compact_action_row").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("connect_copy_invite_button").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("connect_share_invite_button").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("connect_rotate_invite_button").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("connect_header_leave_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_copy_code_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_share_code_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_leave_or_close_button").assertIsDisplayed()
 
-        val vm = composeTestRule.activity.activeBrowserViewModel!!
-        val initialInvite = vm.connectManager.currentShareableInviteUrl.value
-        assertTrue("Expected standard HTTPS invite link", initialInvite.startsWith("https://nyxora.app/connect?"))
-        assertFalse("Invite link must never expose internal 192.0.0.2 address", initialInvite.contains("192.0.0.2"))
+        val activeRoomCode = vm.connectManager.roomState.value?.roomId ?: ""
+        assertTrue("Expected valid Room Code NYX-XXXX-XXXX", activeRoomCode.startsWith("NYX-"))
 
-        // Tap Refresh (rotate invite) in the compact row and verify a new HTTPS invitation token is issued
-        composeTestRule.onNodeWithTag("connect_rotate_invite_button").performClick()
+        // Tap Copy Code button and verify it copies the room code
+        composeTestRule.onNodeWithTag("connect_copy_code_button").performClick()
         composeTestRule.waitForIdle()
-        val rotatedInvite = vm.connectManager.currentShareableInviteUrl.value
-        assertTrue(rotatedInvite.startsWith("https://nyxora.app/connect?"))
-        assertNotEquals("Refresh button must rotate the invitation token", initialInvite, rotatedInvite)
-        val generatedInvite = rotatedInvite
 
-        // Close the room and dismiss the Connect sheet
-        composeTestRule.onNodeWithTag("connect_header_leave_button").performClick()
+        // Dismiss the Connect sheet to verify the Browse Together Overlay (compact collapsible synchronization indicator)
+        composeTestRule.onNodeWithTag("connect_back_button").performClick()
+        composeTestRule.waitForIdle()
+
+        // Verify compact indicator is displayed with small status icon, room code, expand toggle, and compact menu button
+        composeTestRule.onNodeWithTag("nyxora_connect_status_banner").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_banner_status_icon", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_banner_room_code", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_banner_expand_toggle").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_banner_menu_button").assertIsDisplayed()
+        assertEquals(
+            "Banner must start in compact collapsed mode by default",
+            0,
+            composeTestRule.onAllNodesWithTag("connect_banner_expanded_row").fetchSemanticsNodes().size
+        )
+
+        // Open the compact menu and verify Pause and Leave are inside the compact menu
+        composeTestRule.onNodeWithTag("connect_banner_menu_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("connect_banner_compact_menu").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_banner_pause_toggle").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_banner_stop_button").assertIsDisplayed()
+
+        // Toggle Pause via the compact menu
+        composeTestRule.onNodeWithTag("connect_banner_pause_toggle").performClick()
+        composeTestRule.mainClock.advanceTimeBy(200L)
+        composeTestRule.waitForIdle()
+
+        // Expand the status bar and verify full details + Hide (collapse) button appear
+        composeTestRule.onNodeWithTag("connect_banner_expand_toggle").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("connect_banner_expanded_row").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_banner_collapse_button").assertIsDisplayed()
+
+        // Manually hide the expanded status bar while browsing
+        composeTestRule.onNodeWithTag("connect_banner_collapse_button").performClick()
         composeTestRule.waitForIdle()
         assertEquals(
-            "Closing room must transition status to DISCONNECTED",
+            "Expanded status bar must collapse when user taps Hide button",
+            0,
+            composeTestRule.onAllNodesWithTag("connect_banner_expanded_row").fetchSemanticsNodes().size
+        )
+        composeTestRule.onNodeWithTag("connect_banner_room_code", useUnmergedTree = true).assertIsDisplayed()
+
+        // Expand again, navigate to a webpage, and verify scrolling automatically collapses the expanded bar
+        composeTestRule.onNodeWithTag("connect_banner_expand_toggle").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("connect_banner_expanded_row").assertIsDisplayed()
+        vm.navigateInActiveTab("https://example.com")
+        composeTestRule.mainClock.advanceTimeBy(250L)
+        composeTestRule.waitForIdle()
+        val liveWv = findFirstWebView(composeTestRule.activity.window.decorView)
+        if (liveWv != null) {
+            composeTestRule.runOnUiThread {
+                liveWv.scrollTo(0, 120)
+            }
+            composeTestRule.waitForIdle()
+            assertEquals(
+                "Scrolling webpage must automatically hide the expanded status bar back to compact indicator",
+                0,
+                composeTestRule.onAllNodesWithTag("connect_banner_expanded_row").fetchSemanticsNodes().size
+            )
+            composeTestRule.onNodeWithTag("nyxora_top_address_bar").assertIsDisplayed()
+            composeTestRule.onNodeWithTag("nyxora_bottom_tab_bar").assertIsDisplayed()
+        }
+
+        // Leave the room using the compact menu's Leave option
+        composeTestRule.onNodeWithTag("connect_banner_menu_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("connect_banner_stop_button").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals(
+            "Leaving room must transition status to DISCONNECTED",
             com.example.domain.connect.SyncConnectionStatus.DISCONNECTED,
             vm.connectManager.connectionStatus.value
         )
-        composeTestRule.onNodeWithTag("connect_back_button").performClick()
+        vm.navigateHome()
         composeTestRule.waitForIdle()
 
-        // Verify opening an HTTPS room invitation URL launches NYXORA Connect instead of loading as a webpage
-        vm.navigateInActiveTab(generatedInvite)
-        composeTestRule.waitForIdle()
-        composeTestRule.onNodeWithTag("nyxora_connect_sheet").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("connect_back_button").performClick()
-        composeTestRule.waitForIdle()
 
-        // 3. Open bottom menu -> Settings -> About NYXORA (and search for "Sudhamoy")
+        // 3. Open bottom menu -> Settings -> Verify Room Sync is removed from Settings and About NYXORA works
         composeTestRule.onNodeWithTag("toolbar_overflow_menu_button").performClick()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("menu_item_settings").performClick()
         composeTestRule.waitForIdle()
 
-        // Verify Settings Home has the 5 required categories
+        // Verify Settings Home has the 5 required categories and does NOT contain Room Sync button
         composeTestRule.onNodeWithTag("settings_category_general").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("settings_category_customization").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("settings_category_privacy").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("settings_category_advanced").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("settings_category_about").performScrollTo().assertIsDisplayed()
+
+        composeTestRule.onNodeWithTag("settings_category_advanced").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        assertEquals(
+            "Room Sync button must be removed from Settings",
+            0,
+            composeTestRule.onAllNodesWithTag("settings_open_connect_button").fetchSemanticsNodes().size
+        )
+        composeTestRule.onNodeWithTag("settings_back_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
 
         composeTestRule.onNodeWithTag("settings_search_input").performScrollTo().performTextReplacement("Sudhamoy")
         composeTestRule.waitForIdle()
@@ -454,7 +542,7 @@ class ExampleRobolectricTest {
         composeTestRule.activity.activeBrowserViewModel?.closeAllTabs(inPrivateMode = false)
         composeTestRule.waitForIdle()
 
-        // 1. Open bottom menu and verify all 8 actions are displayed in the 2-row grid
+        // 1. Open bottom menu and verify all 9 actions (including Room Sync) are displayed
         composeTestRule.onNodeWithTag("toolbar_overflow_menu_button").performClick()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("nyxora_bottom_menu_sheet").assertIsDisplayed()
@@ -464,6 +552,7 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("menu_item_incognito").assertIsDisplayed()
         composeTestRule.onNodeWithTag("menu_item_add_bookmark").assertIsDisplayed()
         composeTestRule.onNodeWithTag("menu_item_desktop_site").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("menu_item_room_sync").assertIsDisplayed()
         composeTestRule.onNodeWithTag("menu_item_share").assertIsDisplayed()
         composeTestRule.onNodeWithTag("menu_item_settings").assertIsDisplayed()
 
@@ -517,6 +606,11 @@ class ExampleRobolectricTest {
     @Test
     fun `fullscreen video playback in portrait and landscape hides toolbars and system bars preserves orientation and playback and exits via Back and player control`() {
         composeTestRule.mainClock.advanceTimeBy(350L)
+        composeTestRule.waitForIdle()
+        composeTestRule.activity.activeBrowserViewModel?.closeAllTabs(inPrivateMode = false)
+        composeTestRule. runOnUiThread {
+            composeTestRule.activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
         composeTestRule.waitForIdle()
 
         // Navigate to a video page using the homepage search bar so the real Android WebView is mounted
@@ -741,79 +835,68 @@ class ExampleRobolectricTest {
             activity.requestedOrientation
         )
         assertSame(initialWebView, findFirstWebView(activity.window.decorView))
+        composeTestRule.runOnUiThread {
+            activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
+        composeTestRule.activity.activeBrowserViewModel?.closeAllTabs(inPrivateMode = false)
+        composeTestRule.waitForIdle()
     }
 
     @Test
     fun `closing final incognito tab returns to normal mode and global settings propagate to open tabs`() {
-        val context = ApplicationProvider.getApplicationContext<Context>()
-        val db = NyxoraLocalDatabase.createInMemoryForTest(context)
-        val settingsStore = NyxoraSettingsDataStore(context)
-        val dlEngine = com.example.domain.browser.DownloadEngine(
-            context = context,
-            downloadDao = db.downloadDao(),
-            scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob())
+        composeTestRule.mainClock.advanceTimeBy(350L)
+        composeTestRule.waitForIdle()
+        val viewModel = composeTestRule.activity.activeBrowserViewModel!!
+        viewModel.closeAllTabs(inPrivateMode = false)
+        composeTestRule.waitForIdle()
+
+        // 1. Create a private tab and verify browser switches to Private Mode
+        val privateTabId = viewModel.createNewTab(
+            url = "https://example.org",
+            inPrivateMode = true,
+            inBackground = false
         )
-        val viewModel = com.example.ui.viewmodel.NyxoraBrowserViewModel(
-            bookmarkDao = db.bookmarkDao(),
-            historyDao = db.historyDao(),
-            savedTabDao = db.savedTabDao(),
-            siteSettingDao = db.siteSettingDao(),
-            downloadDao = db.downloadDao(),
-            filterRuleDao = db.filterRuleDao(),
-            settingsDataStore = settingsStore,
-            downloadEngine = dlEngine
+        assertTrue("Expected browser in private mode after opening foreground private tab", viewModel.isPrivateMode.value)
+        assertEquals(1, viewModel.privateTabs.value.size)
+
+        // 2. Close the final private tab and verify browser cleanly exits Private Mode back to Normal Mode
+        viewModel.closeTab(privateTabId)
+        assertEquals(0, viewModel.privateTabs.value.size)
+        assertFalse("Closing the last private tab must exit private mode back to normal mode", viewModel.isPrivateMode.value)
+
+        // 3. Verify SPA history update (doUpdateVisitedHistory -> onWebHistoryUpdated) syncs URL and canGoBack/canGoForward
+        val normalTabId = viewModel.normalTabs.value.first().id
+        viewModel.onWebHistoryUpdated(
+            tabId = normalTabId,
+            url = "https://example.com/spa-route",
+            canGoBack = true,
+            canGoForward = false
         )
+        val updatedNormalTab = viewModel.normalTabs.value.first { it.id == normalTabId }
+        assertEquals("https://example.com/spa-route", updatedNormalTab.url)
+        assertTrue(updatedNormalTab.canGoBack)
+        assertFalse(updatedNormalTab.canGoForward)
 
-        try {
-            // 1. Create a private tab and verify browser switches to Private Mode
-            val privateTabId = viewModel.createNewTab(
-                url = "https://example.org",
-                inPrivateMode = true,
-                inBackground = false
+        // 4. Verify changing globalTextZoom and defaultDesktopSite immediately updates open tabs without per-site overrides
+        viewModel.updateSettings {
+            it.copy(
+                globalTextZoom = 135,
+                defaultDesktopSite = true
             )
-            assertTrue("Expected browser in private mode after opening foreground private tab", viewModel.isPrivateMode.value)
-            assertEquals(1, viewModel.privateTabs.value.size)
-
-            // 2. Close the final private tab and verify browser cleanly exits Private Mode back to Normal Mode
-            viewModel.closeTab(privateTabId)
-            assertEquals(0, viewModel.privateTabs.value.size)
-            assertFalse("Closing the last private tab must exit private mode back to normal mode", viewModel.isPrivateMode.value)
-
-            // 3. Verify SPA history update (doUpdateVisitedHistory -> onWebHistoryUpdated) syncs URL and canGoBack/canGoForward
-            val normalTabId = viewModel.normalTabs.value.first().id
-            viewModel.onWebHistoryUpdated(
-                tabId = normalTabId,
-                url = "https://example.com/spa-route",
-                canGoBack = true,
-                canGoForward = false
-            )
-            val updatedNormalTab = viewModel.normalTabs.value.first { it.id == normalTabId }
-            assertEquals("https://example.com/spa-route", updatedNormalTab.url)
-            assertTrue(updatedNormalTab.canGoBack)
-            assertFalse(updatedNormalTab.canGoForward)
-
-            // 4. Verify changing globalTextZoom and defaultDesktopSite immediately updates open tabs without per-site overrides
-            viewModel.updateSettings {
-                it.copy(
-                    globalTextZoom = 135,
-                    defaultDesktopSite = true
-                )
-            }
-            val propagatedTab = viewModel.normalTabs.value.first { it.id == normalTabId }
-            assertEquals(135, propagatedTab.textZoom)
-            assertTrue(propagatedTab.desktopMode)
-
-            // Restore defaults
-            viewModel.updateSettings {
-                it.copy(
-                    globalTextZoom = 100,
-                    defaultDesktopSite = false
-                )
-            }
-            composeTestRule.waitForIdle()
-        } finally {
-            db.close()
         }
+        val propagatedTab = viewModel.normalTabs.value.first { it.id == normalTabId }
+        assertEquals(135, propagatedTab.textZoom)
+        assertTrue(propagatedTab.desktopMode)
+
+        // Restore defaults
+        viewModel.updateSettings {
+            it.copy(
+                globalTextZoom = 100,
+                defaultDesktopSite = false
+            )
+        }
+        viewModel.closeAllTabs(inPrivateMode = false)
+        composeTestRule.waitForIdle()
     }
 
     @Test
@@ -1524,6 +1607,547 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("toolbar_tabs_counter_box", useUnmergedTree = true).assertIsDisplayed()
     }
 
+    @Test
+    fun audit18_performanceAndResourceOptimization_measuredWebViewPoolAndDiagnostics() {
+        composeTestRule.mainClock.advanceTimeBy(350L)
+        composeTestRule.waitForIdle()
+
+        val vm = composeTestRule.activity.activeBrowserViewModel!!
+        com.example.domain.browser.BrowserDiagnosticsEngine.resetDiagnostics()
+
+        // 1. Measure subresource filter engine latency across 1,500 subresource checks
+        val sampleSubresources = listOf(
+            "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js",
+            "https://securepubads.g.doubleclick.net/tag/js/gpt.js",
+            "https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css",
+            "https://rr1---sn-ab5l6nzl.googlevideo.com/videoplayback?id=123",
+            "https://ib.adnxs.com/ut/v3/prebid",
+            "https://en.wikipedia.org/w/load.php?modules=site.styles"
+        )
+        val startFilterNs = System.nanoTime()
+        var blockedTotal = 0
+        for (i in 0 until 250) {
+            for (url in sampleSubresources) {
+                if (ContentBlockingEngine.shouldBlockSubresource(
+                        requestUrl = url,
+                        pageUrl = "https://en.wikipedia.org/wiki/Kotlin",
+                        globalAdBlockingEnabled = true,
+                        siteSetting = null
+                    )
+                ) {
+                    blockedTotal++
+                }
+            }
+        }
+        val elapsedFilterMs = (System.nanoTime() - startFilterNs) / 1_000_000.0
+        assertEquals(750, blockedTotal)
+        assertTrue("Expected 1,500 subresource filter evaluations to complete in < 150ms (was ${elapsedFilterMs}ms)", elapsedFilterMs < 150.0)
+
+        // Verify data: and vbscript: top-level schemes are blocked alongside javascript:
+        assertEquals(
+            com.example.domain.browser.NavigationDecision.BLOCK_DANGEROUS_SCHEME,
+            ContentBlockingEngine.evaluateTopLevelNavigation(
+                requestUrl = "data:text/html,<script>alert(1)</script>",
+                currentPageUrl = "https://example.com",
+                hasUserGesture = true,
+                isServerRedirect = false,
+                timeSinceLastUserInteractionMs = 50L,
+                globalRedirectBlockingEnabled = true,
+                httpsOnlyMode = true,
+                siteSetting = null,
+                allowOnceUrls = emptySet()
+            )
+        )
+        assertEquals(
+            com.example.domain.browser.NavigationDecision.BLOCK_DANGEROUS_SCHEME,
+            ContentBlockingEngine.evaluateTopLevelNavigation(
+                requestUrl = "vbscript:msgbox(1)",
+                currentPageUrl = "https://example.com",
+                hasUserGesture = true,
+                isServerRedirect = false,
+                timeSinceLastUserInteractionMs = 50L,
+                globalRedirectBlockingEnabled = true,
+                httpsOnlyMode = true,
+                siteSetting = null,
+                allowOnceUrls = emptySet()
+            )
+        )
+
+        // 2. Verify WebView pool retains the exact same WebView instance across Web -> Home -> Web transitions
+        val webTabId = vm.createNewTab(url = "https://en.wikipedia.org/wiki/Android", inPrivateMode = false, inBackground = false)
+        composeTestRule.waitForIdle()
+        val wvBeforeHome = findFirstWebView(composeTestRule.activity.window.decorView)
+        assertNotNull("Expected active WebView on web tab", wvBeforeHome)
+        val identityBeforeHome = System.identityHashCode(wvBeforeHome)
+
+        val homeTabId = vm.createNewTab(url = "nyxora://home", inPrivateMode = false, inBackground = false)
+        composeTestRule.waitForIdle()
+        assertEquals(homeTabId, vm.activeTab.value.id)
+
+        // Switch back to the web tab and confirm the exact same WebView instance was reused without recreation
+        vm.selectTab(webTabId, isPrivate = false)
+        composeTestRule.waitForIdle()
+        val wvAfterHome = findFirstWebView(composeTestRule.activity.window.decorView)
+        assertNotNull("Expected pooled WebView restored after Home transition", wvAfterHome)
+        assertEquals(
+            "Expected WebView instance to be preserved across Home transition without duplicate allocation",
+            identityBeforeHome,
+            System.identityHashCode(wvAfterHome)
+        )
+
+        // 3. Open additional background tabs and trigger onTrimMemory(TRIM_MEMORY_RUNNING_CRITICAL)
+        vm.createNewTab(url = "https://example.org/one", inPrivateMode = false, inBackground = true)
+        vm.createNewTab(url = "https://example.org/two", inPrivateMode = false, inBackground = true)
+        composeTestRule.waitForIdle()
+
+        composeTestRule.activity.onTrimMemory(android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL)
+        composeTestRule.waitForIdle()
+
+        val diagAfterTrim = com.example.domain.browser.BrowserDiagnosticsEngine.captureSnapshot()
+        assertTrue("Expected trimMemoryCount >= 1", diagAfterTrim.trimMemoryCount >= 1)
+        assertTrue("Expected background tabs to be suspended on critical memory trim", diagAfterTrim.suspendedTabCount >= 2)
+        assertEquals("Expected only the 1 active tab WebView kept alive after critical trim", 1, diagAfterTrim.activeWebViewCount)
+        assertTrue("Expected pooled WebView reuse counter >= 1", diagAfterTrim.duplicateWebViewPreventedCount >= 1)
+
+        println(
+            "NYXORA_BENCHMARK_METRICS: filter1500Ms=${"%.2f".format(elapsedFilterMs)}, " +
+                "avgSubresourceUs=${diagAfterTrim.avgSubresourceCheckMicros}, " +
+                "activeWebViews=${diagAfterTrim.activeWebViewCount}, " +
+                "suspendedTabs=${diagAfterTrim.suspendedTabCount}, " +
+                "pooledReuses=${diagAfterTrim.duplicateWebViewPreventedCount}, " +
+                "usedHeapMb=${diagAfterTrim.usedHeapMb}/${diagAfterTrim.maxHeapMb}"
+        )
+
+        // 4. Verify Diagnostics UI in Settings > Advanced
+        vm.setOverlaySheet(com.example.ui.viewmodel.OverlaySheet.SETTINGS)
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("settings_category_advanced").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("settings_diagnostics_card").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("diagnostics_refresh_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("settings_back_button").performClick()
+        composeTestRule.waitForIdle()
+
+        vm.closeAllTabs(inPrivateMode = false)
+        composeTestRule.waitForIdle()
+    }
+
+    @Test
+    fun audit19_simplifiedConnectScreen_watchTogetherPlaybackControls_andAutoNavigationToHomePage() {
+        composeTestRule.mainClock.advanceTimeBy(350L)
+        composeTestRule.waitForIdle()
+
+        val vm = composeTestRule.activity.activeBrowserViewModel!!
+        vm.closeAllTabs(inPrivateMode = false)
+        composeTestRule.waitForIdle()
+
+        // Navigate Participant's browser to an arbitrary web page before opening Connect
+        vm.navigateInActiveTab("https://example.org/pre-join-page")
+        composeTestRule.waitForIdle()
+        assertEquals("https://example.org/pre-join-page", vm.activeTab.value.url)
+
+        // Open NYXORA Connect screen
+        vm.setOverlaySheet(com.example.ui.viewmodel.OverlaySheet.NYXORA_CONNECT)
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("nyxora_connect_sheet").assertIsDisplayed()
+
+        // 1. Verify lobby does NOT show separate synchronization toggles
+        assertEquals(
+            0,
+            composeTestRule.onAllNodesWithText("Share My Browsing Activity", substring = true).fetchSemanticsNodes().size
+        )
+
+        // 2. Verify attempting to join an unconfirmed/invalid room does NOT redirect to Home Page prematurely
+        composeTestRule.onNodeWithTag("connect_join_room_input").performTextReplacement("BAD-CODE")
+        composeTestRule.onNodeWithTag("connect_join_room_button").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals(
+            "Must NOT redirect before successful authentication and room confirmation",
+            com.example.ui.viewmodel.OverlaySheet.NYXORA_CONNECT,
+            vm.activeOverlay.value
+        )
+        assertEquals(
+            "Active tab must remain on pre-join page when room confirmation fails",
+            "https://example.org/pre-join-page",
+            vm.activeTab.value.url
+        )
+
+        // 3. Create a Host room on the shared local relay server
+        val externalHostScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO)
+        val externalHostManager = com.example.domain.connect.NyxoraConnectSessionManager(
+            scope = externalHostScope,
+            localDeviceId = "external-host-device-99",
+            initialDeviceName = "External Host"
+        )
+
+        try {
+            val hostRoom = externalHostManager.createRoom(
+                roomName = "Host Room",
+                mode = com.example.domain.connect.RoomSyncMode.BROWSE_TOGETHER,
+                initialUrl = "https://kotlinlang.org",
+                initialTitle = "Kotlin"
+            )
+            val hostReadyDeadline = System.currentTimeMillis() + 3000L
+            while (!externalHostManager.connectionStatus.value.isConnectedOrSynced && System.currentTimeMillis() < hostReadyDeadline) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                composeTestRule.waitForIdle()
+                Thread.sleep(25L)
+            }
+            assertTrue("Host room must be confirmed on relay server", externalHostManager.connectionStatus.value.isConnectedOrSynced)
+
+            // 4. Participant joins Host's room -> upon JOIN_ACCEPTED, automatically returns to browser Home Page!
+            composeTestRule.onNodeWithTag("connect_join_room_input").performTextReplacement(hostRoom.roomId)
+            composeTestRule.onNodeWithTag("connect_join_room_button").performClick()
+
+            val joinConfirmDeadline = System.currentTimeMillis() + 4000L
+            while (
+                (!vm.connectManager.connectionStatus.value.isConnectedOrSynced ||
+                    vm.activeOverlay.value != com.example.ui.viewmodel.OverlaySheet.NONE) &&
+                System.currentTimeMillis() < joinConfirmDeadline
+            ) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                composeTestRule.mainClock.advanceTimeBy(50L)
+                composeTestRule.waitForIdle()
+                Thread.sleep(25L)
+            }
+            composeTestRule.waitForIdle()
+
+            assertTrue("Participant must be connected", vm.connectManager.connectionStatus.value.isConnectedOrSynced)
+            assertEquals(
+                "Connect overlay must automatically close after server confirms JOIN_ACCEPTED",
+                com.example.ui.viewmodel.OverlaySheet.NONE,
+                vm.activeOverlay.value
+            )
+            assertEquals(
+                "Participant must automatically return to the browser Home Page (nyxora://home) upon JOIN_ACCEPTED",
+                "nyxora://home",
+                vm.activeTab.value.url
+            )
+            composeTestRule.onNodeWithTag("home_logo_header").assertIsDisplayed()
+
+            // 5. Open Connect Sheet to verify simplified active room UI & waiting message when Host is not playing media
+            vm.setOverlaySheet(com.example.ui.viewmodel.OverlaySheet.NYXORA_CONNECT)
+            composeTestRule.waitForIdle()
+
+            composeTestRule.onNodeWithTag("connect_active_room_id").assertIsDisplayed()
+            composeTestRule.onNodeWithTag("connect_status_pill").assertIsDisplayed()
+            composeTestRule.onNodeWithTag("connect_copy_code_button").assertIsDisplayed()
+            composeTestRule.onNodeWithTag("connect_share_code_button").assertIsDisplayed()
+            composeTestRule.onNodeWithTag("connect_leave_or_close_button").assertIsDisplayed()
+
+            // Verify removed clutter: no separate sync toggles, no manual URL sync button, no large Members section
+            assertEquals(0, composeTestRule.onAllNodesWithTag("connect_broadcast_url_button").fetchSemanticsNodes().size)
+            assertEquals(0, composeTestRule.onAllNodesWithTag("connect_participant_broadcast_url_button").fetchSemanticsNodes().size)
+            assertEquals(0, composeTestRule.onAllNodesWithTag("connect_devices_list").fetchSemanticsNodes().size)
+            assertEquals(0, composeTestRule.onAllNodesWithText("Room Synchronization Active", substring = true).fetchSemanticsNodes().size)
+            assertEquals(0, composeTestRule.onAllNodesWithText("Follow Room Navigation", substring = true).fetchSemanticsNodes().size)
+
+            // Verify waiting message is shown and Watch Together controls are disabled while no supported media is playing
+            composeTestRule.onNodeWithTag("connect_waiting_for_media_text").assertIsDisplayed()
+            composeTestRule.onNodeWithTag("connect_watch_rewind_button").assertIsNotEnabled()
+            composeTestRule.onNodeWithTag("connect_watch_play_pause_button").assertIsNotEnabled()
+            composeTestRule.onNodeWithTag("connect_watch_forward_button").assertIsNotEnabled()
+
+            // 6. Host starts supported HTML5 media playback at 40.0s -> Watch Together initializes and enables controls
+            externalHostManager.updateVideoCompatibility(com.example.domain.connect.VideoCompatibilityState.COMPATIBLE_HTML5)
+            assertTrue(
+                externalHostManager.publishPlaybackEvent(
+                    pageUrl = "https://example.com/movie.mp4",
+                    isPlaying = true,
+                    positionSeconds = 40.0,
+                    durationSeconds = 180.0
+                )
+            )
+            val mediaSyncDeadline = System.currentTimeMillis() + 3000L
+            while (vm.connectManager.roomState.value?.playbackState == null && System.currentTimeMillis() < mediaSyncDeadline) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                composeTestRule.mainClock.advanceTimeBy(50L)
+                composeTestRule.waitForIdle()
+                Thread.sleep(25L)
+            }
+            composeTestRule.waitForIdle()
+
+            composeTestRule.onNodeWithTag("connect_playback_state_text").assertIsDisplayed()
+            composeTestRule.onNodeWithTag("connect_watch_rewind_button").assertIsEnabled()
+            composeTestRule.onNodeWithTag("connect_watch_play_pause_button").assertIsEnabled()
+            composeTestRule.onNodeWithTag("connect_watch_forward_button").assertIsEnabled()
+
+            // 7. Click Skip Forward 10s (+10s) -> seek position updates from ~40s to ~50s and syncs to Host
+            composeTestRule.onNodeWithTag("connect_watch_forward_button").performClick()
+            composeTestRule.waitForIdle()
+            val forwardDeadline = System.currentTimeMillis() + 3000L
+            while ((externalHostManager.roomState.value?.playbackState?.positionSeconds ?: 0.0) < 48.0 && System.currentTimeMillis() < forwardDeadline) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                composeTestRule.mainClock.advanceTimeBy(50L)
+                composeTestRule.waitForIdle()
+                Thread.sleep(25L)
+            }
+            assertEquals(50.0, vm.connectManager.roomState.value?.playbackState?.positionSeconds ?: 0.0, 2.5)
+            assertEquals(50.0, externalHostManager.roomState.value?.playbackState?.positionSeconds ?: 0.0, 2.5)
+
+            // 8. Click Skip Backward 10s (-10s) -> seek position updates from ~50s back to ~40s
+            composeTestRule.onNodeWithTag("connect_watch_rewind_button").performClick()
+            composeTestRule.waitForIdle()
+            val rewindDeadline = System.currentTimeMillis() + 3000L
+            while ((externalHostManager.roomState.value?.playbackState?.positionSeconds ?: 50.0) > 42.0 && System.currentTimeMillis() < rewindDeadline) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                composeTestRule.mainClock.advanceTimeBy(50L)
+                composeTestRule.waitForIdle()
+                Thread.sleep(25L)
+            }
+            assertEquals(40.0, vm.connectManager.roomState.value?.playbackState?.positionSeconds ?: 0.0, 2.5)
+
+            // 9. Click Play/Pause -> toggles from Playing (true) to Paused (false) and syncs to Host
+            composeTestRule.onNodeWithTag("connect_watch_play_pause_button").performClick()
+            composeTestRule.waitForIdle()
+            val pauseDeadline = System.currentTimeMillis() + 3000L
+            while (externalHostManager.roomState.value?.playbackState?.isPlaying == true && System.currentTimeMillis() < pauseDeadline) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                composeTestRule.mainClock.advanceTimeBy(50L)
+                composeTestRule.waitForIdle()
+                Thread.sleep(25L)
+            }
+            assertFalse("Playback must be Paused after clicking Play/Pause", vm.connectManager.roomState.value?.playbackState?.isPlaying ?: true)
+            assertFalse("Host playback must also be Paused", externalHostManager.roomState.value?.playbackState?.isPlaying ?: true)
+
+            // 10. Verify DRM-protected / unsupported media disables Watch Together playback controls
+            vm.connectManager.updateVideoCompatibility(com.example.domain.connect.VideoCompatibilityState.DRM_PROTECTED_UNSUPPORTED)
+            composeTestRule.waitForIdle()
+            composeTestRule.onNodeWithTag("connect_watch_rewind_button").assertIsNotEnabled()
+            composeTestRule.onNodeWithTag("connect_watch_play_pause_button").assertIsNotEnabled()
+            composeTestRule.onNodeWithTag("connect_watch_forward_button").assertIsNotEnabled()
+
+            // Leave room cleanly
+            composeTestRule.onNodeWithTag("connect_leave_or_close_button").performClick()
+            composeTestRule.waitForIdle()
+            assertEquals(
+                com.example.domain.connect.SyncConnectionStatus.DISCONNECTED,
+                vm.connectManager.connectionStatus.value
+            )
+            vm.setOverlaySheet(com.example.ui.viewmodel.OverlaySheet.NONE)
+            composeTestRule.waitForIdle()
+        } finally {
+            externalHostManager.leaveOrCloseRoom()
+            externalHostScope.cancel()
+            vm.connectManager.leaveOrCloseRoom()
+            vm.closeAllTabs(inPrivateMode = false)
+            composeTestRule.waitForIdle()
+        }
+    }
+
+    @Test
+    fun `floating chat overlay equal participant controls and host permission switch work end to end`() {
+        composeTestRule.mainClock.advanceTimeBy(350L)
+        composeTestRule.waitForIdle()
+        val vm = composeTestRule.activity.activeBrowserViewModel
+        assertNotNull("Expected activeBrowserViewModel", vm)
+        vm!!.closeAllTabs(inPrivateMode = false)
+        vm.connectManager.leaveOrCloseRoom()
+        composeTestRule.waitForIdle()
+
+        val externalScope = kotlinx.coroutines.CoroutineScope(
+            kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO
+        )
+        val externalParticipantManager = com.example.domain.connect.NyxoraConnectSessionManager(
+            scope = externalScope,
+            localDeviceId = "robo-ext-part-77",
+            initialDeviceName = "External Participant"
+        )
+
+        try {
+            // 1. Before joining or creating a room, floating chat overlay is NOT displayed
+            assertEquals(
+                "Floating chat overlay must not be present when not in a room",
+                0,
+                composeTestRule.onAllNodesWithTag("nyxora_floating_chat_bubble").fetchSemanticsNodes().size
+            )
+
+            // 2. Host creates a room via NYXORA Connect Sheet -> Verify Allow Participant Controls switch is ON by default
+            vm.setOverlaySheet(com.example.ui.viewmodel.OverlaySheet.NYXORA_CONNECT)
+            composeTestRule.waitForIdle()
+            composeTestRule.onNodeWithTag("connect_create_room_button").performClick()
+
+            val createConfirmDeadline = System.currentTimeMillis() + 4000L
+            while (!vm.connectManager.connectionStatus.value.isConnectedOrSynced && System.currentTimeMillis() < createConfirmDeadline) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                composeTestRule.mainClock.advanceTimeBy(50L)
+                composeTestRule.waitForIdle()
+                Thread.sleep(25L)
+            }
+            composeTestRule.waitForIdle()
+            val roomId = vm.connectManager.roomState.value?.roomId ?: ""
+            assertTrue(roomId.startsWith("NYX-"))
+
+            // Verify Host sees Allow Participant Controls switch enabled by default
+            composeTestRule.onNodeWithTag("connect_allow_participant_controls_switch").assertIsDisplayed()
+            assertTrue(
+                "Allow Participant Controls must be enabled by default for every new room",
+                vm.connectManager.roomState.value?.permissions?.allowParticipantControls == true
+            )
+
+            // External participant joins the room
+            assertTrue(externalParticipantManager.joinRoom(roomId))
+            val joinDeadline = System.currentTimeMillis() + 4000L
+            while (!externalParticipantManager.connectionStatus.value.isConnectedOrSynced && System.currentTimeMillis() < joinDeadline) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                composeTestRule.mainClock.advanceTimeBy(50L)
+                composeTestRule.waitForIdle()
+                Thread.sleep(25L)
+            }
+
+            // Close Connect Sheet to return to main browser screen -> Verify Floating Chat Indicator is displayed at screen edge
+            composeTestRule.onNodeWithTag("connect_back_button").performClick()
+            composeTestRule.waitForIdle()
+            composeTestRule.onNodeWithTag("nyxora_floating_chat_bubble").assertIsDisplayed()
+
+            // 3. External participant sends a real-time chat message -> Unread badge appears on floating chat indicator
+            assertTrue(externalParticipantManager.sendChatMessage("Hey Host, ready to watch!"))
+            val chatReceiveDeadline = System.currentTimeMillis() + 3000L
+            while (vm.connectManager.chatMessages.value.isEmpty() && System.currentTimeMillis() < chatReceiveDeadline) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                composeTestRule.mainClock.advanceTimeBy(50L)
+                composeTestRule.waitForIdle()
+                Thread.sleep(25L)
+            }
+            composeTestRule.waitForIdle()
+            composeTestRule.onNodeWithTag("nyxora_floating_chat_badge", useUnmergedTree = true).assertIsDisplayed()
+
+            // 4. Tap floating chat indicator -> Opens compact chat overlay with received message
+            composeTestRule.onNodeWithTag("nyxora_floating_chat_bubble").performClick()
+            composeTestRule.waitForIdle()
+            composeTestRule.onNodeWithTag("nyxora_chat_panel").assertIsDisplayed()
+            composeTestRule.onNodeWithTag("chat_messages_list").assertIsDisplayed()
+            assertTrue(
+                composeTestRule.onAllNodesWithText("Hey Host, ready to watch!", substring = true).fetchSemanticsNodes().isNotEmpty()
+            )
+
+            // 5. Send a chat message from the overlay -> Synchronizes to connected participant
+            composeTestRule.onNodeWithTag("chat_message_input").performTextReplacement("Starting the video now!")
+            composeTestRule.onNodeWithTag("chat_send_button").performClick()
+            composeTestRule.waitForIdle()
+
+            val replySyncDeadline = System.currentTimeMillis() + 3000L
+            while (externalParticipantManager.chatMessages.value.size < 2 && System.currentTimeMillis() < replySyncDeadline) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                composeTestRule.mainClock.advanceTimeBy(50L)
+                composeTestRule.waitForIdle()
+                Thread.sleep(25L)
+            }
+            assertEquals("Starting the video now!", externalParticipantManager.chatMessages.value.last().text)
+
+            // 6. Dismiss the floating chat overlay and reopen it easily
+            composeTestRule.onNodeWithTag("chat_panel_close_button").performClick()
+            composeTestRule.waitForIdle()
+            assertEquals(
+                "Expanded chat panel must be hidden after dismissal",
+                0,
+                composeTestRule.onAllNodesWithTag("nyxora_chat_panel").fetchSemanticsNodes().size
+            )
+            composeTestRule.onNodeWithTag("nyxora_floating_chat_reopen_tab").assertIsDisplayed()
+            composeTestRule.onNodeWithTag("connect_banner_chat_button").performClick()
+            composeTestRule.waitForIdle()
+            composeTestRule.onNodeWithTag("nyxora_chat_panel").assertIsDisplayed()
+
+            // 7. Enter fullscreen video -> Expanded chat panel automatically hides while floating indicator remains accessible
+            vm.navigateInActiveTab("https://example.com/watch")
+            composeTestRule.mainClock.advanceTimeBy(250L)
+            composeTestRule.waitForIdle()
+            val liveWv = findFirstWebView(composeTestRule.activity.window.decorView)
+            if (liveWv?.webChromeClient != null) {
+                val fsView = FrameLayout(composeTestRule.activity)
+                composeTestRule.runOnUiThread {
+                    liveWv.webChromeClient!!.onShowCustomView(fsView, WebChromeClient.CustomViewCallback {})
+                }
+                composeTestRule.waitForIdle()
+                assertEquals(
+                    "Expanded chat panel must automatically hide when entering fullscreen video",
+                    0,
+                    composeTestRule.onAllNodesWithTag("nyxora_chat_panel").fetchSemanticsNodes().size
+                )
+                composeTestRule.onNodeWithTag("nyxora_floating_chat_bubble").assertIsDisplayed()
+                composeTestRule.runOnUiThread {
+                    liveWv.webChromeClient!!.onHideCustomView()
+                }
+                composeTestRule.waitForIdle()
+            }
+
+            // 8. Host toggles Allow Participant Controls OFF on Connect screen -> Participant controls are disabled
+            vm.setOverlaySheet(com.example.ui.viewmodel.OverlaySheet.NYXORA_CONNECT)
+            composeTestRule.waitForIdle()
+            composeTestRule.onNodeWithTag("connect_allow_participant_controls_switch").performClick()
+            composeTestRule.waitForIdle()
+
+            val disablePermDeadline = System.currentTimeMillis() + 3000L
+            while (
+                externalParticipantManager.roomState.value?.permissions?.allowParticipantControls != false &&
+                System.currentTimeMillis() < disablePermDeadline
+            ) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                composeTestRule.mainClock.advanceTimeBy(50L)
+                composeTestRule.waitForIdle()
+                Thread.sleep(25L)
+            }
+            assertFalse(
+                "Participant permissions must reflect disabled state",
+                externalParticipantManager.roomState.value?.permissions?.allowParticipantControls ?: true
+            )
+            assertFalse(
+                "Participant navigation must be blocked when Allow Participant Controls is disabled",
+                externalParticipantManager.publishUrlNavigation(
+                    url = "https://participant-blocked.example.com",
+                    title = "Blocked",
+                    isPrivateTab = false,
+                    isPrivateMode = false
+                )
+            )
+
+            // Host toggles Allow Participant Controls back ON -> Restores shared controls without reconnecting
+            composeTestRule.onNodeWithTag("connect_allow_participant_controls_switch").performClick()
+            composeTestRule.waitForIdle()
+            val enablePermDeadline = System.currentTimeMillis() + 3000L
+            while (
+                externalParticipantManager.roomState.value?.permissions?.allowParticipantControls != true &&
+                System.currentTimeMillis() < enablePermDeadline
+            ) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                composeTestRule.mainClock.advanceTimeBy(50L)
+                composeTestRule.waitForIdle()
+                Thread.sleep(25L)
+            }
+            assertTrue(
+                "Participant controls must be restored without reconnecting",
+                externalParticipantManager.publishUrlNavigation(
+                    url = "https://participant-restored.example.com",
+                    title = "Restored",
+                    isPrivateTab = false,
+                    isPrivateMode = false
+                )
+            )
+
+            // 9. Leave room -> Floating chat overlay is automatically removed
+            composeTestRule.onNodeWithTag("connect_leave_or_close_button").performClick()
+            composeTestRule.waitForIdle()
+            vm.setOverlaySheet(com.example.ui.viewmodel.OverlaySheet.NONE)
+            composeTestRule.waitForIdle()
+            assertEquals(
+                "Floating chat overlay must be removed automatically when leaving the room",
+                0,
+                composeTestRule.onAllNodesWithTag("nyxora_floating_chat_bubble").fetchSemanticsNodes().size
+            )
+            assertEquals(
+                0,
+                composeTestRule.onAllNodesWithTag("nyxora_chat_panel").fetchSemanticsNodes().size
+            )
+        } finally {
+            externalParticipantManager.leaveOrCloseRoom()
+            externalScope.cancel()
+            vm.connectManager.leaveOrCloseRoom()
+            vm.closeAllTabs(inPrivateMode = false)
+            composeTestRule.waitForIdle()
+        }
+    }
+
     private fun findFirstWebView(root: View?): WebView? {
         if (root == null) return null
         if (root is WebView) return root
@@ -1536,4 +2160,5 @@ class ExampleRobolectricTest {
         return null
     }
 }
+
 

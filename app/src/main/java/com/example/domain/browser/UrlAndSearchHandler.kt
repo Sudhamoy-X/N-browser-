@@ -577,9 +577,25 @@ object UrlAndSearchHandler {
     }
 
     fun extractHost(url: String): String {
-        val raw = extractRawHost(url).removePrefix("www.")
+        val raw = extractRawHost(url).removePrefix("www.").removePrefix("WWW.")
         if (raw.isBlank()) return ""
         if (raw.startsWith("[") && raw.endsWith("]")) return raw.lowercase()
+        var isAscii = true
+        var hasUppercase = false
+        for (i in 0 until raw.length) {
+            val ch = raw[i]
+            if (ch.code > 0x7F) {
+                isAscii = false
+                break
+            }
+            if (ch in 'A'..'Z') {
+                hasUppercase = true
+            }
+        }
+        if (isAscii) {
+            val lowered = if (hasUppercase) raw.lowercase() else raw
+            return lowered.removePrefix("www.")
+        }
         return try {
             IDN.toASCII(raw, IDN.ALLOW_UNASSIGNED).lowercase().removePrefix("www.")
         } catch (_: Exception) {

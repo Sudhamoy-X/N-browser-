@@ -39,6 +39,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.outlined.BookmarkAdd
 import androidx.compose.material.icons.outlined.Bookmarks
+import androidx.compose.material.icons.outlined.CastConnected
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Computer
 import androidx.compose.material.icons.outlined.Download
@@ -706,9 +707,10 @@ internal fun buildNyxoraThreeLineMenuIcon(): ImageVector =
     }.build()
 
 /**
- * Compact 8-Action Bottom Menu Sheet displayed in a 2-row x 4-column grid:
- * Row 1: Bookmarks, History, Downloads, Incognito
- * Row 2: Add Bookmark, Desktop Site, Share, Settings
+ * Compact Bottom Menu Sheet displayed in a clean 3-row x 3-column grid:
+ * Row 1: Bookmarks, History, Downloads
+ * Row 2: Add Bookmark, Desktop Site, Incognito
+ * Row 3: Room Sync, Share, Settings
  */
 @Composable
 fun NyxoraBottomMenuSheet(
@@ -717,6 +719,7 @@ fun NyxoraBottomMenuSheet(
     isPrivateMode: Boolean,
     isDesktopMode: Boolean,
     isCurrentPageBookmarked: Boolean,
+    isRoomSyncActive: Boolean = false,
     onDismiss: () -> Unit,
     onOpenBookmarks: () -> Unit,
     onOpenHistory: () -> Unit,
@@ -724,6 +727,7 @@ fun NyxoraBottomMenuSheet(
     onToggleIncognito: () -> Unit,
     onToggleAddBookmark: () -> Unit,
     onToggleDesktopSite: () -> Unit,
+    onOpenRoomSync: () -> Unit = {},
     onSharePage: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
@@ -790,7 +794,7 @@ fun NyxoraBottomMenuSheet(
                             .navigationBarsPadding()
                             .padding(horizontal = 16.dp, vertical = 14.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         // Subtle swipe-down handle
                         Box(
@@ -801,7 +805,7 @@ fun NyxoraBottomMenuSheet(
                                 .background(MaterialTheme.colorScheme.outline)
                         )
 
-                        // Row 1: Bookmarks, History, Downloads, Incognito
+                        // Row 1: Bookmarks, History, Downloads
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -839,20 +843,9 @@ fun NyxoraBottomMenuSheet(
                                 },
                                 modifier = Modifier.weight(1f)
                             )
-                            BottomMenuGridItem(
-                                icon = Icons.Outlined.VisibilityOff,
-                                label = "Incognito",
-                                isActive = isPrivateMode,
-                                testTag = "menu_item_incognito",
-                                onClick = {
-                                    onDismiss()
-                                    onToggleIncognito()
-                                },
-                                modifier = Modifier.weight(1f)
-                            )
                         }
 
-                        // Row 2: Add Bookmark, Desktop Site, Share, Settings
+                        // Row 2: Add Bookmark, Desktop Site, Incognito
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -876,6 +869,35 @@ fun NyxoraBottomMenuSheet(
                                 onClick = {
                                     onDismiss()
                                     onToggleDesktopSite()
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                            BottomMenuGridItem(
+                                icon = Icons.Outlined.VisibilityOff,
+                                label = "Incognito",
+                                isActive = isPrivateMode,
+                                testTag = "menu_item_incognito",
+                                onClick = {
+                                    onDismiss()
+                                    onToggleIncognito()
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+
+                        // Row 3: Room Sync, Share, Settings
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            BottomMenuGridItem(
+                                icon = Icons.Outlined.CastConnected,
+                                label = "Room Sync",
+                                isActive = isRoomSyncActive,
+                                testTag = "menu_item_room_sync",
+                                onClick = {
+                                    onDismiss()
+                                    onOpenRoomSync()
                                 },
                                 modifier = Modifier.weight(1f)
                             )

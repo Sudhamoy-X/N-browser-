@@ -26,13 +26,24 @@ import okhttp3.WebSocketListener
 import org.json.JSONObject
 
 sealed class IncomingRemoteSyncCommand {
-    data class NavigateToUrl(val url: String, val title: String) : IncomingRemoteSyncCommand()
+    data class ParticipantJoinConfirmed(
+        val roomId: String,
+        val syncedUrl: String,
+        val syncedTitle: String,
+        val playbackState: WatchTogetherPlaybackState?
+    ) : IncomingRemoteSyncCommand()
+    data class NavigateToUrl(
+        val url: String,
+        val title: String,
+        val isInitialJoinSnapshot: Boolean = false
+    ) : IncomingRemoteSyncCommand()
     data object NavigateBack : IncomingRemoteSyncCommand()
     data object NavigateForward : IncomingRemoteSyncCommand()
     data class OpenNewSyncedTab(val url: String, val title: String) : IncomingRemoteSyncCommand()
     data class ApplyPlaybackState(
         val state: WatchTogetherPlaybackState,
-        val forceManualResync: Boolean
+        val forceManualResync: Boolean,
+        val isInitialJoinSnapshot: Boolean = false
     ) : IncomingRemoteSyncCommand()
 }
 
@@ -61,7 +72,8 @@ class NyxoraConnectSessionManager(
     private val sharedRelayServer: NyxoraWebSocketRelayServer = defaultSharedRelayServer,
     private val maxReconnectAttempts: Int = DEFAULT_MAX_RECONNECT_ATTEMPTS,
     private val baseReconnectDelayMs: Long = DEFAULT_BASE_RECONNECT_DELAY_MS,
-    private val handshakeTimeoutMs: Long = DEFAULT_HANDSHAKE_TIMEOUT_MS
+    private val handshakeTimeoutMs: Long = DEFAULT_HANDSHAKE_TIMEOUT_MS,
+    private val configuredEndpointProvider: () -> String = { NyxoraConnectSecurity.configuredPublicWssEndpoint() }
 ) {
 
     private val okHttpClient: OkHttpClient = OkHttpClient.Builder()
@@ -94,7 +106,28 @@ class NyxoraConnectSessionManager(
     private var activeInviteToken: String = ""
 
     @Volatile
+    private var lastGeneratedInviteToken: String = ""
+
+    @Volatile
     private var lastAppliedSequence: Long = 0L
+
+    @Volatile
+    private var lastPublishedNavUrl: String = ""
+
+    @Volatile
+    private var lastPublishedNavType: RealtimeEventType? = null
+
+    @Volatile
+    private var lastPublishedNavAtMillis: Long = 0L
+
+    @Volatile
+    private var lastBeaconPositionSec: Double = -1.0
+
+    @Volatile
+    private var lastBeaconPlayingState: Boolean = false
+
+    @Volatile
+    private var lastBeaconSentAtMillis: Long = 0L
 
     private val _deviceDisplayName = MutableStateFlow(initialDeviceName)
     val deviceDisplayName: StateFlow<String> = _deviceDisplayName.asStateFlow()
@@ -120,8 +153,26 @@ class NyxoraConnectSessionManager(
     private val _lastSyncError = MutableStateFlow<String?>(null)
     val lastSyncError: StateFlow<String?> = _lastSyncError.asStateFlow()
 
+    private val _lastHeartbeatRttMs = MutableStateFlow(0L)
+    val lastHeartbeatRttMs: StateFlow<Long> = _lastHeartbeatRttMs.asStateFlow()
+
     private val _diagnosticLogs = MutableStateFlow<List<String>>(emptyList())
     val diagnosticLogs: StateFlow<List<String>> = _diagnosticLogs.asStateFlow()
+
+    private val _chatMessages = MutableStateFlow<List<RoomChatMessage>>(emptyList())
+    val chatMessages: StateFlow<List<RoomChatMessage>> = _chatMessages.asStateFlow()
+
+    private val _unreadChatCount = MutableStateFlow(0)
+    val unreadChatCount: StateFlow<Int> = _unreadChatCount.asStateFlow()
+
+    private val _isChatOverlayExpanded = MutableStateFlow(false)
+    val isChatOverlayExpanded: StateFlow<Boolean> = _isChatOverlayExpanded.asStateFlow()
+
+    private val _isChatBubbleDismissed = MutableStateFlow(false)
+    val isChatBubbleDismissed: StateFlow<Boolean> = _isChatBubbleDismissed.asStateFlow()
+
+    private val _participantControlsDisabledNotice = MutableStateFlow<String?>(null)
+    val participantControlsDisabledNotice: StateFlow<String?> = _participantControlsDisabledNotice.asStateFlow()
 
     private val _remoteSyncCommands = MutableSharedFlow<IncomingRemoteSyncCommand>(extraBufferCapacity = 16)
     val remoteSyncCommands: SharedFlow<IncomingRemoteSyncCommand> = _remoteSyncCommands.asSharedFlow()
@@ -131,6 +182,26 @@ class NyxoraConnectSessionManager(
 
     val isCurrentDeviceHost: Boolean
         get() = _roomState.value?.hostDeviceId == localDeviceId
+
+    val configuredBackendEndpoint: String
+        get() = resolveConfiguredProductionEndpoint()
+
+    private fun resolveConfiguredProductionEndpoint(): String {
+        val candidate = configuredEndpointProvider().trim()
+        return when {
+            candidate.isBlank() ||
+                candidate.equals(NyxoraConnectSecurity.LEGACY_PRODUCTION_WSS_ENDPOINT, ignoreCase = true) -> {
+                NyxoraConnectSecurity.configuredPublicWssEndpoint()
+            }
+            candidate.startsWith("wss://", ignoreCase = true) ||
+                candidate.startsWith("ws://", ignoreCase = true) -> candidate
+            else -> NyxoraConnectSecurity.configuredPublicWssEndpoint()
+        }
+    }
+
+    private fun shouldUseLocalRelayForInProcessTest(): Boolean {
+        return sharedRelayServer !== defaultSharedRelayServer || isRobolectricOrJvmTestRuntime()
+    }
 
     fun recordDiagnosticLog(rawEvent: String) {
         val redacted = NyxoraConnectSecurity.redactSecretsForLog(rawEvent)
@@ -170,7 +241,7 @@ class NyxoraConnectSessionManager(
             ttlMillis = ttlMillis,
             singleUse = singleUse
         )
-        activeInviteToken = token
+        lastGeneratedInviteToken = token
         val url = NyxoraConnectSecurity.buildRoomInviteLink(
             roomId = current.roomId,
             accessKey = key,
@@ -190,9 +261,10 @@ class NyxoraConnectSessionManager(
      */
     fun revokeCurrentInviteAndRotate(singleUse: Boolean = false): String {
         val current = _roomState.value ?: return ""
-        if (activeInviteToken.isNotBlank()) {
-            sharedRelayServer.revokeInvitationToken(current.roomId, activeInviteToken)
-            recordDiagnosticLog("INVITE_REVOKED room=${current.roomId} token=$activeInviteToken")
+        val tokenToRevoke = lastGeneratedInviteToken.ifBlank { activeInviteToken }
+        if (tokenToRevoke.isNotBlank()) {
+            sharedRelayServer.revokeInvitationToken(current.roomId, tokenToRevoke)
+            recordDiagnosticLog("INVITE_REVOKED room=${current.roomId} token=$tokenToRevoke")
         }
         return generateShareableInviteLink(singleUse = singleUse)
     }
@@ -201,8 +273,8 @@ class NyxoraConnectSessionManager(
      * Creates a new NYXORA Connect room and connects the Host over WebSockets.
      */
     fun createRoom(
-        roomName: String,
-        mode: RoomSyncMode,
+        roomName: String = "NYXORA Sync Room",
+        mode: RoomSyncMode = RoomSyncMode.BROWSE_TOGETHER,
         permissions: RoomPermissionsConfig = RoomPermissionsConfig(),
         initialUrl: String = "",
         initialTitle: String = "",
@@ -220,15 +292,19 @@ class NyxoraConnectSessionManager(
         lastAppliedSequence = 0L
 
         val roomId = NyxoraConnectSecurity.generateSecureRoomId()
-        val accessKey = NyxoraConnectSecurity.generateRoomAccessKey()
+        // Derive deterministic room handshake key from the Room Code so participants can join
+        // directly using only the Room Code without manually entering an Access Key or URL.
+        val accessKey = NyxoraConnectSecurity.deriveRoomCodeHandshakeKey(roomId)
         activeAccessKey = accessKey
+        activeInviteToken = ""
+        lastGeneratedInviteToken = ""
 
-        val port = sharedRelayServer.startIfNeeded()
         val cleanCustomEndpoint = customRelayEndpoint.trim().takeIf {
             it.startsWith("wss://", ignoreCase = true) || it.startsWith("ws://", ignoreCase = true)
         }
+        val configuredEndpoint = resolveConfiguredProductionEndpoint()
         val publicEndpoint = cleanCustomEndpoint?.let { NyxoraConnectSecurity.sanitizePublicEndpointForInvite(it) } ?: ""
-        val endpointUrl = publicEndpoint.ifBlank { NyxoraConnectSecurity.configuredPublicWssEndpoint() }
+        val endpointUrl = publicEndpoint.ifBlank { configuredEndpoint }
 
         val safeInitialUrl = if (userConsentedToShare) {
             NyxoraConnectSecurity.sanitizeUrlForSync(
@@ -270,20 +346,32 @@ class NyxoraConnectSessionManager(
             lastSequenceNumber = 1L
         )
 
-        sharedRelayServer.registerNewRoom(initialRoomState)
+        val targetEndpoint = cleanCustomEndpoint ?: configuredEndpoint
+        val isDefaultProdEndpoint = targetEndpoint.equals(
+            NyxoraConnectSecurity.DEFAULT_PRODUCTION_WSS_ENDPOINT,
+            ignoreCase = true
+        ) || targetEndpoint.equals(
+            NyxoraConnectSecurity.LEGACY_PRODUCTION_WSS_ENDPOINT,
+            ignoreCase = true
+        )
+
+        val connectUrl = if (isDefaultProdEndpoint && shouldUseLocalRelayForInProcessTest()) {
+            val port = sharedRelayServer.startIfNeeded()
+            sharedRelayServer.registerNewRoom(initialRoomState)
+            "ws://127.0.0.1:$port/nyxora"
+        } else {
+            if (sharedRelayServer.listeningPort > 0 &&
+                targetEndpoint.contains(":${sharedRelayServer.listeningPort}/")
+            ) {
+                sharedRelayServer.registerNewRoom(initialRoomState)
+            }
+            targetEndpoint
+        }
+
         _roomState.value = initialRoomState
         _isFollowingPaused.value = false
         _connectionStatus.value = SyncConnectionStatus.CONNECTING
         generateShareableInviteLink(singleUse = false)
-
-        val connectUrl = if (cleanCustomEndpoint != null &&
-            (!cleanCustomEndpoint.equals(NyxoraConnectSecurity.DEFAULT_PRODUCTION_WSS_ENDPOINT, ignoreCase = true) ||
-                sharedRelayServer.getRoomState(roomId) == null)
-        ) {
-            cleanCustomEndpoint
-        } else {
-            "ws://127.0.0.1:$port/nyxora"
-        }
 
         recordDiagnosticLog("CREATE_ROOM room=$roomId mode=${mode.name} endpoint=$connectUrl")
         openWebSocketConnection(
@@ -296,7 +384,8 @@ class NyxoraConnectSessionManager(
     }
 
     /**
-     * Joins an existing room using a Room ID + Access Key or a standard HTTPS / deep-link Invitation URL.
+     * Joins an existing room directly using a Room Code (`NYX-XXXX-XXXX`, `XXXX-XXXX`, or `XXXXXXXX`)
+     * or a standard HTTPS / deep-link Invitation URL.
      */
     fun joinRoom(
         rawRoomOrInvite: String,
@@ -306,7 +395,7 @@ class NyxoraConnectSessionManager(
     ): Boolean {
         val parsed = NyxoraConnectSecurity.parseRoomInviteInput(rawRoomOrInvite)
         if (parsed == null) {
-            _lastSyncError.value = "Invalid Room ID or invitation link format (expected NYX-XXXX-XXXX)"
+            _lastSyncError.value = "Invalid Room Code format (expected NYX-XXXX-XXXX)"
             recordDiagnosticLog("JOIN_REJECTED_LOCAL reason=INVALID_FORMAT input=$rawRoomOrInvite")
             return false
         }
@@ -317,14 +406,15 @@ class NyxoraConnectSessionManager(
             return false
         }
 
-        val resolvedKey = explicitAccessKey.trim().uppercase().ifBlank { parsed.accessKey }
-        val resolvedInviteToken = if (explicitAccessKey.isBlank()) parsed.inviteToken else ""
-        val handshakeSigningSecret = resolvedKey.ifBlank { parsed.handshakeSigningSecret }
-
-        if (handshakeSigningSecret.isBlank()) {
-            _lastSyncError.value = "Valid invitation token or Room Access Key is required to join ${parsed.roomId}"
-            recordDiagnosticLog("JOIN_REJECTED_LOCAL reason=MISSING_CREDENTIALS room=${parsed.roomId}")
-            return false
+        val cleanExplicitKey = explicitAccessKey.trim().uppercase()
+        val resolvedInviteToken = if (cleanExplicitKey.isBlank()) parsed.inviteToken else ""
+        val handshakeSigningSecret = when {
+            cleanExplicitKey.isNotBlank() -> cleanExplicitKey
+            parsed.handshakeSigningSecret.isNotBlank() -> parsed.handshakeSigningSecret
+            else -> NyxoraConnectSecurity.deriveRoomCodeHandshakeKey(parsed.roomId)
+        }
+        val resolvedKey = cleanExplicitKey.ifBlank {
+            parsed.accessKey.ifBlank { NyxoraConnectSecurity.deriveRoomCodeHandshakeKey(parsed.roomId) }
         }
 
         leaveOrCloseRoom(notifyServer = false)
@@ -338,32 +428,47 @@ class NyxoraConnectSessionManager(
         activeAccessKey = handshakeSigningSecret
         activeInviteToken = resolvedInviteToken
 
-        val fallbackPort = sharedRelayServer.startIfNeeded()
+        val configuredEndpoint = resolveConfiguredProductionEndpoint()
         val isHostedOnSharedRelay = sharedRelayServer.getRoomState(parsed.roomId) != null
         val candidateEndpoint = explicitEndpointUrl.trim().ifBlank { parsed.endpointUrl }
+        val effectiveEndpoint = candidateEndpoint.ifBlank { configuredEndpoint }
+        val isDefaultProdEndpoint = effectiveEndpoint.equals(
+            NyxoraConnectSecurity.DEFAULT_PRODUCTION_WSS_ENDPOINT,
+            ignoreCase = true
+        ) || effectiveEndpoint.equals(
+            NyxoraConnectSecurity.LEGACY_PRODUCTION_WSS_ENDPOINT,
+            ignoreCase = true
+        )
 
         val targetConnectEndpoint = when {
-            candidateEndpoint.isNotBlank() &&
-                candidateEndpoint.contains(":$fallbackPort/") -> "ws://127.0.0.1:$fallbackPort/nyxora"
+            sharedRelayServer.listeningPort > 0 &&
+                effectiveEndpoint.contains(":${sharedRelayServer.listeningPort}/") -> {
+                "ws://127.0.0.1:${sharedRelayServer.listeningPort}/nyxora"
+            }
             isHostedOnSharedRelay &&
-                (candidateEndpoint.isBlank() ||
-                    candidateEndpoint.equals(NyxoraConnectSecurity.DEFAULT_PRODUCTION_WSS_ENDPOINT, ignoreCase = true) ||
-                    NyxoraConnectSecurity.isInternalOrPrivateEndpoint(candidateEndpoint)) -> {
+                (isDefaultProdEndpoint ||
+                    (NyxoraConnectSecurity.isInternalOrPrivateEndpoint(effectiveEndpoint) &&
+                        !effectiveEndpoint.startsWith("ws://127.0.0.1:", ignoreCase = true))) -> {
+                val fallbackPort = sharedRelayServer.startIfNeeded()
                 "ws://127.0.0.1:$fallbackPort/nyxora"
             }
-            candidateEndpoint.isNotBlank() -> candidateEndpoint
-            else -> NyxoraConnectSecurity.configuredPublicWssEndpoint()
+            !isDefaultProdEndpoint -> effectiveEndpoint
+            shouldUseLocalRelayForInProcessTest() -> {
+                val fallbackPort = sharedRelayServer.startIfNeeded()
+                "ws://127.0.0.1:$fallbackPort/nyxora"
+            }
+            else -> configuredEndpoint
         }
 
         val displayEndpoint = candidateEndpoint
-            .takeIf { !NyxoraConnectSecurity.isInternalOrPrivateEndpoint(it) }
-            ?: NyxoraConnectSecurity.configuredPublicWssEndpoint()
+            .takeIf { it.isNotBlank() && !NyxoraConnectSecurity.isInternalOrPrivateEndpoint(it) }
+            ?: configuredEndpoint
 
         _connectionStatus.value = SyncConnectionStatus.CONNECTING
         _isFollowingPaused.value = false
         _roomState.value = NyxoraConnectRoomState(
             roomId = parsed.roomId,
-            roomName = parsed.roomName.ifBlank { "Connecting to ${parsed.roomId}…" },
+            roomName = parsed.roomName.ifBlank { "Room ${parsed.roomId}" },
             accessKey = resolvedKey,
             endpointUrl = displayEndpoint,
             hostDeviceId = "",
@@ -420,16 +525,128 @@ class NyxoraConnectSessionManager(
         runCatching { ws?.close(1000, "Session ended") }
         activeAccessKey = ""
         activeInviteToken = ""
+        lastGeneratedInviteToken = ""
         hasConfirmedServerSession = false
         reconnectAttempt = 0
         _currentShareableInviteUrl.value = ""
         lastAppliedSequence = 0L
+        lastPublishedNavUrl = ""
+        lastPublishedNavType = null
+        lastPublishedNavAtMillis = 0L
+        lastBeaconPositionSec = -1.0
+        lastBeaconSentAtMillis = 0L
         deduplicator.clear()
         outgoingRateLimiter.clear()
         _roomState.value = null
         _isFollowingPaused.value = false
         _videoCompatibility.value = VideoCompatibilityState.UNKNOWN
+        _chatMessages.value = emptyList()
+        _unreadChatCount.value = 0
+        _isChatOverlayExpanded.value = false
+        _isChatBubbleDismissed.value = false
+        _participantControlsDisabledNotice.value = null
         _connectionStatus.value = SyncConnectionStatus.DISCONNECTED
+    }
+
+    fun setAllowParticipantControls(allowed: Boolean) {
+        val current = _roomState.value ?: return
+        if (current.hostDeviceId != localDeviceId) return
+        val updatedPerms = current.permissions.withParticipantControls(allowed)
+        _roomState.value = current.copy(permissions = updatedPerms)
+        if (allowed) {
+            _participantControlsDisabledNotice.value = null
+        }
+        updateRoomConfiguration(permissions = updatedPerms)
+        recordDiagnosticLog("HOST_SET_PARTICIPANT_CONTROLS room=${current.roomId} allowed=$allowed")
+    }
+
+    fun setChatOverlayExpanded(expanded: Boolean) {
+        if (!isInRoom) {
+            _isChatOverlayExpanded.value = false
+            return
+        }
+        _isChatOverlayExpanded.value = expanded
+        if (expanded) {
+            _isChatBubbleDismissed.value = false
+            _unreadChatCount.value = 0
+        }
+    }
+
+    fun setChatBubbleDismissed(dismissed: Boolean) {
+        _isChatBubbleDismissed.value = dismissed
+        if (dismissed) {
+            _isChatOverlayExpanded.value = false
+        }
+    }
+
+    fun reopenChatOverlay() {
+        if (!isInRoom) return
+        _isChatBubbleDismissed.value = false
+        _isChatOverlayExpanded.value = true
+        _unreadChatCount.value = 0
+    }
+
+    fun sendChatMessage(rawText: String): Boolean {
+        val current = _roomState.value ?: return false
+        if (!hasConfirmedServerSession || _connectionStatus.value == SyncConnectionStatus.DISCONNECTED) {
+            return false
+        }
+        val isConfirmedMember = current.members.any { it.deviceId == localDeviceId }
+        if (!isConfirmedMember) {
+            return false
+        }
+        val sanitizedText = NyxoraConnectSecurity.sanitizeChatMessageForSync(
+            rawMessage = rawText,
+            roomAccessKey = activeAccessKey.ifBlank { current.accessKey }
+        ) ?: return false
+
+        val messageId = UUID.randomUUID().toString()
+        val now = System.currentTimeMillis()
+        val role = if (current.hostDeviceId == localDeviceId) RoomRole.HOST else RoomRole.PARTICIPANT
+        val chatMessage = RoomChatMessage(
+            messageId = messageId,
+            roomId = current.roomId,
+            senderDeviceId = localDeviceId,
+            senderName = _deviceDisplayName.value,
+            senderRole = role,
+            text = sanitizedText,
+            timestampMillis = now
+        )
+        val payload = JSONObject().apply {
+            put("messageId", messageId)
+            put("senderName", _deviceDisplayName.value)
+            put("text", sanitizedText)
+            put("timestampMillis", now)
+        }
+        val sent = sendSignedEvent(
+            type = RealtimeEventType.CHAT_MESSAGE,
+            payloadJson = payload.toString()
+        )
+        if (sent) {
+            appendChatMessageInternal(chatMessage, isIncomingRemote = false)
+            recordDiagnosticLog("CHAT_SENT room=${current.roomId} msgId=$messageId text=$sanitizedText")
+        }
+        return sent
+    }
+
+    private fun appendChatMessageInternal(message: RoomChatMessage, isIncomingRemote: Boolean) {
+        var wasAdded = false
+        _chatMessages.update { existing ->
+            if (existing.any { it.messageId == message.messageId }) {
+                existing
+            } else {
+                wasAdded = true
+                (existing + message).takeLast(RoomChatMessage.MAX_CHAT_HISTORY)
+            }
+        }
+        if (wasAdded) {
+            _roomState.update { state ->
+                state?.copy(chatMessages = _chatMessages.value)
+            }
+            if (isIncomingRemote && !_isChatOverlayExpanded.value) {
+                _unreadChatCount.update { it + 1 }
+            }
+        }
     }
 
     fun updateRoomConfiguration(
@@ -519,7 +736,7 @@ class NyxoraConnectSessionManager(
             )
         }
         val pb = current.playbackState
-        if (current.mode == RoomSyncMode.WATCH_TOGETHER && pb != null) {
+        if (pb != null) {
             _remoteSyncCommands.tryEmit(
                 IncomingRemoteSyncCommand.ApplyPlaybackState(
                     state = pb,
@@ -543,7 +760,10 @@ class NyxoraConnectSessionManager(
         if (!current.isSyncActive || _isFollowingPaused.value) return false
 
         val isHost = current.hostDeviceId == localDeviceId
-        if (!isHost && !current.permissions.allowParticipantNavigationSync) return false
+        if (!isHost && (!current.permissions.allowParticipantControls || !current.permissions.allowParticipantNavigationSync)) {
+            _participantControlsDisabledNotice.value = PARTICIPANT_CONTROLS_DISABLED_MESSAGE
+            return false
+        }
 
         if (!current.permissions.syncUrlNavigation && eventType == RealtimeEventType.NAVIGATE_URL) return false
         if (!current.permissions.syncTabSelection && eventType == RealtimeEventType.SELECT_TAB_NAVIGATION) return false
@@ -554,6 +774,17 @@ class NyxoraConnectSessionManager(
             isPrivateTab = isPrivateTab,
             isPrivateMode = isPrivateMode
         ) ?: return false
+
+        val now = System.currentTimeMillis()
+        if (sanitized == lastPublishedNavUrl &&
+            eventType == lastPublishedNavType &&
+            now - lastPublishedNavAtMillis in 0L..180L
+        ) {
+            return true
+        }
+        lastPublishedNavUrl = sanitized
+        lastPublishedNavType = eventType
+        lastPublishedNavAtMillis = now
 
         val payload = JSONObject().apply {
             put("url", sanitized)
@@ -575,7 +806,10 @@ class NyxoraConnectSessionManager(
         if (!current.isSyncActive || _isFollowingPaused.value) return false
 
         val isHost = current.hostDeviceId == localDeviceId
-        if (!isHost && !current.permissions.allowParticipantNavigationSync) return false
+        if (!isHost && (!current.permissions.allowParticipantControls || !current.permissions.allowParticipantNavigationSync)) {
+            _participantControlsDisabledNotice.value = PARTICIPANT_CONTROLS_DISABLED_MESSAGE
+            return false
+        }
         if (!current.permissions.syncBackForward) return false
 
         val type = if (isBack) RealtimeEventType.NAVIGATE_BACK else RealtimeEventType.NAVIGATE_FORWARD
@@ -602,27 +836,73 @@ class NyxoraConnectSessionManager(
         isPrivateMode: Boolean = false
     ): Boolean {
         if (!_hasUserConsentedToShare.value || isPrivateTab || isPrivateMode) return false
+        val compat = _videoCompatibility.value
+        if (compat == VideoCompatibilityState.DRM_PROTECTED_UNSUPPORTED ||
+            compat == VideoCompatibilityState.IFRAME_OR_EMBED_RESTRICTED ||
+            compat == VideoCompatibilityState.NO_VIDEO_DETECTED
+        ) {
+            return false
+        }
         val current = _roomState.value ?: return false
-        if (!current.isSyncActive || current.mode != RoomSyncMode.WATCH_TOGETHER) return false
+        if (!current.isSyncActive || _isFollowingPaused.value) return false
 
         val isHost = current.hostDeviceId == localDeviceId
-        if (!isHost && (!current.permissions.allowParticipantPlaybackControl || isBeacon)) {
+        if (!isHost && (!current.permissions.allowParticipantControls || !current.permissions.allowParticipantPlaybackControl || isBeacon)) {
+            if (!isBeacon && (!current.permissions.allowParticipantControls || !current.permissions.allowParticipantPlaybackControl)) {
+                _participantControlsDisabledNotice.value = PARTICIPANT_CONTROLS_DISABLED_MESSAGE
+            }
             return false
         }
 
-        val safeUrl = NyxoraConnectSecurity.sanitizeUrlForSync(pageUrl, false, false) ?: return false
+        val candidateUrl = pageUrl.ifBlank { current.playbackState?.pageUrl ?: current.currentSyncedUrl }
+        val safeUrl = NyxoraConnectSecurity.sanitizeUrlForSync(candidateUrl, false, false) ?: return false
+        val safeDur = durationSeconds.coerceAtLeast(0.0)
+        val rawPos = positionSeconds.coerceAtLeast(0.0)
+        val safePos = if (safeDur > 0.0) rawPos.coerceAtMost(safeDur) else rawPos
+        val safeRate = playbackRate.coerceIn(0.25, 2.0)
+        val now = System.currentTimeMillis()
+        if (isBeacon) {
+            if (isPlaying == lastBeaconPlayingState &&
+                kotlin.math.abs(safePos - lastBeaconPositionSec) < 0.15 &&
+                now - lastBeaconSentAtMillis in 0L..800L
+            ) {
+                return true
+            }
+            lastBeaconPositionSec = safePos
+            lastBeaconPlayingState = isPlaying
+            lastBeaconSentAtMillis = now
+        }
         val payload = JSONObject().apply {
             put("pageUrl", safeUrl)
             put("isPlaying", isPlaying)
-            put("positionSeconds", positionSeconds.coerceAtLeast(0.0))
-            put("durationSeconds", durationSeconds.coerceAtLeast(0.0))
-            put("playbackRate", playbackRate.coerceIn(0.25, 2.0))
+            put("positionSeconds", safePos)
+            put("durationSeconds", safeDur)
+            put("playbackRate", safeRate)
         }
         val eventType = if (isBeacon) RealtimeEventType.PLAYBACK_BEACON else RealtimeEventType.PLAYBACK_ACTION
-        return sendSignedEvent(
+        val sent = sendSignedEvent(
             type = eventType,
             payloadJson = payload.toString()
         )
+        if (sent) {
+            val optimisticPb = WatchTogetherPlaybackState(
+                pageUrl = safeUrl,
+                isPlaying = isPlaying,
+                positionSeconds = safePos,
+                durationSeconds = safeDur,
+                playbackRate = safeRate,
+                updatedAtMillis = now,
+                updatedByDeviceId = localDeviceId,
+                sequenceNumber = current.lastSequenceNumber + 1L
+            )
+            _roomState.update { state ->
+                state?.copy(
+                    currentSyncedUrl = safeUrl.ifBlank { state.currentSyncedUrl },
+                    playbackState = optimisticPb
+                )
+            }
+        }
+        return sent
     }
 
     /**
@@ -643,7 +923,9 @@ class NyxoraConnectSessionManager(
         signingKey: String,
         inviteToken: String
     ) {
-        // Close any prior socket before opening a new one to prevent duplicate client sessions
+        // Close any prior socket or pending reconnect job before opening a new one to prevent duplicate client sessions
+        reconnectJob?.cancel()
+        reconnectJob = null
         handshakeTimeoutJob?.cancel()
         handshakeTimeoutJob = null
         val previousSocket = activeWebSocket
@@ -784,6 +1066,9 @@ class NyxoraConnectSessionManager(
         }
 
         if (reconnectAttempt >= effectiveMaxRetries) {
+            com.example.domain.browser.BrowserDiagnosticsEngine.recordWebSocketConnectionFailure(
+                failureDetail.ifBlank { "reconnect_exhausted" }
+            )
             recordDiagnosticLog(
                 "RECONNECT_EXHAUSTED_DISCONNECTED room=$roomId attempts=$reconnectAttempt endpoint=$connectEndpoint reason=$failureDetail"
             )
@@ -798,6 +1083,10 @@ class NyxoraConnectSessionManager(
 
         val currentAttemptIndex = reconnectAttempt
         reconnectAttempt++
+        com.example.domain.browser.BrowserDiagnosticsEngine.recordWebSocketConnectionFailure(
+            failureDetail.ifBlank { "socket_closed" }
+        )
+        com.example.domain.browser.BrowserDiagnosticsEngine.recordWebSocketReconnect(reconnectAttempt)
         _connectionStatus.value = SyncConnectionStatus.RECONNECTING
         val backoffMs = (baseReconnectDelayMs * (1L shl currentAttemptIndex.coerceAtMost(5))).coerceAtMost(8_000L)
         recordDiagnosticLog(
@@ -826,7 +1115,9 @@ class NyxoraConnectSessionManager(
         if (envelope.type == RealtimeEventType.JOIN_REJECTED) {
             handshakeTimeoutJob?.cancel()
             val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull()
-            val code = payload?.optString("code", "REJECTED") ?: "REJECTED"
+            val code = payload?.optString("code", "")?.ifBlank {
+                payload.optString("errorCode", "REJECTED")
+            } ?: "REJECTED"
             val message = payload?.optString("message", "Unable to join room") ?: "Unable to join room"
             recordDiagnosticLog("JOIN_REJECTED room=${envelope.roomId} code=$code message=$message")
             _lastSyncError.value = message
@@ -835,7 +1126,9 @@ class NyxoraConnectSessionManager(
         }
 
         val currentSigningKey = activeAccessKey
-        val verifiedWithCurrent = NyxoraConnectSecurity.verifyEventHmac(currentSigningKey, envelope)
+        val derivedRoomKey = NyxoraConnectSecurity.deriveRoomCodeHandshakeKey(envelope.roomId)
+        val verifiedWithCurrent = NyxoraConnectSecurity.verifyEventHmac(currentSigningKey, envelope) ||
+            (derivedRoomKey.isNotBlank() && NyxoraConnectSecurity.verifyEventHmac(derivedRoomKey, envelope))
         if (!verifiedWithCurrent) {
             recordDiagnosticLog("FRAME_HMAC_MISMATCH room=${envelope.roomId} type=${envelope.type.name}")
             return
@@ -847,10 +1140,14 @@ class NyxoraConnectSessionManager(
                 if (envelope.sequenceNumber < lastAppliedSequence && envelope.type == RealtimeEventType.ROOM_STATE_SNAPSHOT) {
                     return
                 }
+                val wasAlreadyConfirmedSession = hasConfirmedServerSession
                 handshakeTimeoutJob?.cancel()
                 handshakeTimeoutJob = null
                 hasConfirmedServerSession = true
                 reconnectAttempt = 0
+                if (_lastSyncError.value != null) {
+                    _lastSyncError.value = null
+                }
 
                 lastAppliedSequence = maxOf(lastAppliedSequence, envelope.sequenceNumber)
                 val snapshotJson = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: return
@@ -861,10 +1158,19 @@ class NyxoraConnectSessionManager(
                     fallbackEndpoint = _roomState.value?.endpointUrl ?: connectEndpoint
                 )
                 // Upgrade activeAccessKey from handshake tokenHmac to the authenticated room session key on JOIN_ACCEPTED
+                // and clear activeInviteToken so future reconnections authenticate directly with activeAccessKey.
                 if (updatedState.accessKey.isNotBlank()) {
                     activeAccessKey = updatedState.accessKey
+                    activeInviteToken = ""
+                } else if (envelope.type == RealtimeEventType.JOIN_ACCEPTED) {
+                    activeInviteToken = ""
                 }
-                _roomState.value = updatedState
+                val mergedChats = (_chatMessages.value + updatedState.chatMessages)
+                    .distinctBy { it.messageId }
+                    .sortedBy { it.timestampMillis }
+                    .takeLast(RoomChatMessage.MAX_CHAT_HISTORY)
+                _chatMessages.value = mergedChats
+                _roomState.value = updatedState.copy(chatMessages = mergedChats)
                 if (_currentShareableInviteUrl.value.isBlank() && activeAccessKey.isNotBlank()) {
                     generateShareableInviteLink(singleUse = false)
                 }
@@ -878,6 +1184,25 @@ class NyxoraConnectSessionManager(
                 )
 
                 val isParticipant = updatedState.hostDeviceId != localDeviceId
+                if (!isParticipant || updatedState.permissions.allowParticipantControls) {
+                    _participantControlsDisabledNotice.value = null
+                } else {
+                    _participantControlsDisabledNotice.value = PARTICIPANT_CONTROLS_DISABLED_MESSAGE
+                }
+                val isInitialParticipantJoinConfirmation =
+                    isParticipant && !wasAlreadyConfirmedSession && envelope.type == RealtimeEventType.JOIN_ACCEPTED
+
+                if (isInitialParticipantJoinConfirmation) {
+                    _remoteSyncCommands.tryEmit(
+                        IncomingRemoteSyncCommand.ParticipantJoinConfirmed(
+                            roomId = updatedState.roomId,
+                            syncedUrl = updatedState.currentSyncedUrl,
+                            syncedTitle = updatedState.currentSyncedTitle,
+                            playbackState = updatedState.playbackState
+                        )
+                    )
+                }
+
                 if (isParticipant &&
                     updatedState.isSyncActive &&
                     !_isFollowingPaused.value &&
@@ -887,7 +1212,8 @@ class NyxoraConnectSessionManager(
                     _remoteSyncCommands.tryEmit(
                         IncomingRemoteSyncCommand.NavigateToUrl(
                             url = updatedState.currentSyncedUrl,
-                            title = updatedState.currentSyncedTitle
+                            title = updatedState.currentSyncedTitle,
+                            isInitialJoinSnapshot = isInitialParticipantJoinConfirmation
                         )
                     )
                 }
@@ -895,14 +1221,14 @@ class NyxoraConnectSessionManager(
                 if (isParticipant &&
                     updatedState.isSyncActive &&
                     !_isFollowingPaused.value &&
-                    updatedState.mode == RoomSyncMode.WATCH_TOGETHER &&
                     pb != null &&
                     envelope.type == RealtimeEventType.JOIN_ACCEPTED
                 ) {
                     _remoteSyncCommands.tryEmit(
                         IncomingRemoteSyncCommand.ApplyPlaybackState(
                             state = pb,
-                            forceManualResync = true
+                            forceManualResync = true,
+                            isInitialJoinSnapshot = isInitialParticipantJoinConfirmation
                         )
                     )
                 }
@@ -917,6 +1243,14 @@ class NyxoraConnectSessionManager(
                 leaveOrCloseRoom(notifyServer = false)
             }
             RealtimeEventType.HEARTBEAT_PONG -> {
+                val clientSentMs = runCatching {
+                    JSONObject(envelope.payloadJson).optLong("clientTimeMillis", 0L)
+                }.getOrDefault(0L)
+                if (clientSentMs > 0L) {
+                    val rtt = (System.currentTimeMillis() - clientSentMs).coerceAtLeast(0L)
+                    _lastHeartbeatRttMs.value = rtt
+                    com.example.domain.browser.BrowserDiagnosticsEngine.recordWebSocketHeartbeatRtt(rtt)
+                }
                 if (hasConfirmedServerSession &&
                     (_connectionStatus.value == SyncConnectionStatus.CONNECTED ||
                         _connectionStatus.value == SyncConnectionStatus.RECONNECTING)
@@ -937,6 +1271,7 @@ class NyxoraConnectSessionManager(
                 val rawUrl = payload.optString("url", "")
                 val title = payload.optString("title", "")
                 val safeUrl = NyxoraConnectSecurity.sanitizeUrlForSync(rawUrl, false, false) ?: return
+                val initiatorId = payload.optString("initiatedBy", "").ifBlank { envelope.senderDeviceId }
 
                 _roomState.value = _roomState.value?.copy(
                     currentSyncedUrl = safeUrl,
@@ -944,7 +1279,7 @@ class NyxoraConnectSessionManager(
                     lastSequenceNumber = envelope.sequenceNumber
                 )
 
-                if (envelope.senderDeviceId != localDeviceId && !_isFollowingPaused.value) {
+                if (initiatorId != localDeviceId && !_isFollowingPaused.value) {
                     _connectionStatus.value = SyncConnectionStatus.SYNCHRONIZING
                     if (envelope.type == RealtimeEventType.NEW_PAGE_OPENED) {
                         _remoteSyncCommands.tryEmit(IncomingRemoteSyncCommand.OpenNewSyncedTab(safeUrl, title))
@@ -957,7 +1292,10 @@ class NyxoraConnectSessionManager(
             RealtimeEventType.NAVIGATE_BACK -> {
                 if (envelope.sequenceNumber < lastAppliedSequence) return
                 lastAppliedSequence = envelope.sequenceNumber
-                if (envelope.senderDeviceId != localDeviceId && !_isFollowingPaused.value) {
+                val initiatorId = runCatching {
+                    JSONObject(envelope.payloadJson).optString("initiatedBy", "")
+                }.getOrDefault("").ifBlank { envelope.senderDeviceId }
+                if (initiatorId != localDeviceId && !_isFollowingPaused.value) {
                     _connectionStatus.value = SyncConnectionStatus.SYNCHRONIZING
                     _remoteSyncCommands.tryEmit(IncomingRemoteSyncCommand.NavigateBack)
                     _connectionStatus.value = SyncConnectionStatus.SYNCED
@@ -966,7 +1304,10 @@ class NyxoraConnectSessionManager(
             RealtimeEventType.NAVIGATE_FORWARD -> {
                 if (envelope.sequenceNumber < lastAppliedSequence) return
                 lastAppliedSequence = envelope.sequenceNumber
-                if (envelope.senderDeviceId != localDeviceId && !_isFollowingPaused.value) {
+                val initiatorId = runCatching {
+                    JSONObject(envelope.payloadJson).optString("initiatedBy", "")
+                }.getOrDefault("").ifBlank { envelope.senderDeviceId }
+                if (initiatorId != localDeviceId && !_isFollowingPaused.value) {
                     _connectionStatus.value = SyncConnectionStatus.SYNCHRONIZING
                     _remoteSyncCommands.tryEmit(IncomingRemoteSyncCommand.NavigateForward)
                     _connectionStatus.value = SyncConnectionStatus.SYNCED
@@ -979,10 +1320,12 @@ class NyxoraConnectSessionManager(
                 val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: return
                 val pbState = WatchTogetherPlaybackState.fromJson(payload) ?: return
                 _roomState.value = _roomState.value?.copy(
+                    currentSyncedUrl = pbState.pageUrl.ifBlank { _roomState.value?.currentSyncedUrl ?: "" },
                     playbackState = pbState,
                     lastSequenceNumber = envelope.sequenceNumber
                 )
-                if (envelope.senderDeviceId != localDeviceId && !_isFollowingPaused.value) {
+                val initiatorId = pbState.updatedByDeviceId.ifBlank { envelope.senderDeviceId }
+                if (initiatorId != localDeviceId && !_isFollowingPaused.value) {
                     _remoteSyncCommands.tryEmit(
                         IncomingRemoteSyncCommand.ApplyPlaybackState(
                             state = pbState,
@@ -991,8 +1334,54 @@ class NyxoraConnectSessionManager(
                     )
                 }
             }
+            RealtimeEventType.CHAT_MESSAGE -> {
+                if (envelope.sequenceNumber < lastAppliedSequence) return
+                lastAppliedSequence = envelope.sequenceNumber
+                val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: return
+                val incomingMsg = RoomChatMessage.fromJson(payload)?.let {
+                    if (it.roomId.isBlank()) it.copy(roomId = envelope.roomId) else it
+                } ?: return
+                val safeText = NyxoraConnectSecurity.sanitizeChatMessageForSync(
+                    rawMessage = incomingMsg.text,
+                    roomAccessKey = activeAccessKey
+                ) ?: return
+                val sanitizedMsg = incomingMsg.copy(text = safeText)
+                appendChatMessageInternal(
+                    message = sanitizedMsg,
+                    isIncomingRemote = sanitizedMsg.senderDeviceId != localDeviceId
+                )
+                recordDiagnosticLog(
+                    "CHAT_RECEIVED room=${envelope.roomId} from=${sanitizedMsg.senderDeviceId} msgId=${sanitizedMsg.messageId}"
+                )
+            }
+            RealtimeEventType.PERMISSION_DENIED -> {
+                val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull()
+                val code = payload?.optString("code", "PERMISSION_DENIED") ?: "PERMISSION_DENIED"
+                val message = payload?.optString(
+                    "message",
+                    PARTICIPANT_CONTROLS_DISABLED_MESSAGE
+                ) ?: PARTICIPANT_CONTROLS_DISABLED_MESSAGE
+                _participantControlsDisabledNotice.value = message
+                if (code == "PARTICIPANT_CONTROLS_DISABLED") {
+                    _roomState.update { state ->
+                        state?.copy(permissions = state.permissions.withParticipantControls(false))
+                    }
+                }
+                recordDiagnosticLog("PERMISSION_DENIED room=${envelope.roomId} code=$code message=$message")
+            }
             else -> Unit
         }
+    }
+
+    internal fun sendControlFrameBypassingClientCheckForTest(
+        type: RealtimeEventType,
+        payloadJson: String
+    ): Boolean {
+        return sendSignedEvent(
+            type = type,
+            payloadJson = payloadJson,
+            bypassRateLimit = true
+        )
     }
 
     private fun sendSignedEvent(
@@ -1059,8 +1448,19 @@ class NyxoraConnectSessionManager(
         const val DEFAULT_BASE_RECONNECT_DELAY_MS = 400L
         const val DEFAULT_HANDSHAKE_TIMEOUT_MS = 6_000L
         private const val MAX_DIAGNOSTIC_LOG_ENTRIES = 50
+        const val PARTICIPANT_CONTROLS_DISABLED_MESSAGE =
+            "Shared controls are disabled by the host — only the host can control shared navigation and playback."
 
         val defaultSharedRelayServer = NyxoraWebSocketRelayServer()
+
+        fun isRobolectricOrJvmTestRuntime(): Boolean {
+            return Build.FINGERPRINT?.equals("robolectric", ignoreCase = true) == true ||
+                System.getProperty("robolectric.logging") != null ||
+                runCatching {
+                    Class.forName("org.robolectric.Robolectric")
+                    true
+                }.getOrDefault(false)
+        }
 
         fun defaultDeviceDisplayName(): String {
             val brand = Build.MANUFACTURER?.replaceFirstChar { it.uppercase() } ?: "Android"

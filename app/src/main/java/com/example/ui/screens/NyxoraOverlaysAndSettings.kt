@@ -93,6 +93,8 @@ import com.example.data.model.CustomFilterRule
 import com.example.data.model.DownloadRecord
 import com.example.data.model.HistoryItem
 import com.example.data.model.SiteSettingItem
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.domain.browser.BrowserDiagnosticsEngine
 import com.example.domain.browser.DownloadEngine
 import com.example.domain.browser.EngineCapabilityMatrix
 import com.example.domain.browser.ReaderArticle
@@ -1512,21 +1514,9 @@ fun NyxoraSettingsScreen(
 
             // 4. ADVANCED
             if (selectedCategory == SettingsCategory.ADVANCED ||
-                matchesSearch("Advanced", "Gesture", "Swipe", "Video", "Fullscreen", "Orientation", "Accessibility", "Cache", "Reset", "Connect", "Room", "Sync")
+                matchesSearch("Advanced", "Gesture", "Swipe", "Video", "Fullscreen", "Orientation", "Accessibility", "Cache", "Reset", "Diagnostics", "Memory", "CPU", "Crash")
             ) {
                 SettingsSectionCard(title = "Advanced") {
-                    Text("NYXORA Connect", style = MaterialTheme.typography.labelLarge)
-                    OutlinedButton(
-                        onClick = onOpenNyxoraConnect,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("settings_open_connect_button")
-                    ) {
-                        Icon(Icons.Outlined.CastConnected, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Open NYXORA Connect (Room Sync)")
-                    }
-
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(
                             onClick = {
@@ -1629,6 +1619,75 @@ fun NyxoraSettingsScreen(
                         checked = settings.forceDarkWebPages,
                         onCheckedChange = { v -> onUpdateSettings { it.copy(forceDarkWebPages = v) } }
                     )
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+
+                    val diagSnapshot by BrowserDiagnosticsEngine.snapshotFlow.collectAsStateWithLifecycle()
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("settings_diagnostics_card"),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "System & Performance Diagnostics",
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                        Text(
+                            text = "Memory: ${diagSnapshot.usedHeapMb} MB / ${diagSnapshot.maxHeapMb} MB (${diagSnapshot.memoryUsagePercent}% • ${diagSnapshot.memoryPressureLevel.label})",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag("diagnostics_memory_summary")
+                        )
+                        Text(
+                            text = "CPU: ${diagSnapshot.cpuUsagePercent}% est • Process CPU: ${diagSnapshot.processCpuTimeMs} ms",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag("diagnostics_cpu_summary")
+                        )
+                        Text(
+                            text = "WebViews: ${diagSnapshot.activeWebViewCount} active • ${diagSnapshot.suspendedTabCount} tabs suspended • ${diagSnapshot.duplicateWebViewPreventedCount} pooled reuses",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag("diagnostics_webview_summary")
+                        )
+                        Text(
+                            text = "Ad-Block Engine: ${diagSnapshot.subresourceBlockedCount}/${diagSnapshot.subresourceCheckCount} blocked (avg ${diagSnapshot.avgSubresourceCheckMicros} µs)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag("diagnostics_filter_summary")
+                        )
+                        Text(
+                            text = "Stability & Sync: ${diagSnapshot.rendererCrashCount} crashes • ${diagSnapshot.wsConnectionFailureCount} WS failures • ${diagSnapshot.lastWsHeartbeatRttMs} ms RTT",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag("diagnostics_stability_summary")
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(
+                                onClick = {
+                                    BrowserDiagnosticsEngine.captureSnapshot()
+                                    onToast("Diagnostics refreshed")
+                                },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("diagnostics_refresh_button")
+                            ) {
+                                Text("Refresh")
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    BrowserDiagnosticsEngine.resetDiagnostics()
+                                    onToast("Diagnostics reset")
+                                },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("diagnostics_reset_button")
+                            ) {
+                                Text("Reset Metrics")
+                            }
+                        }
+                    }
                 }
             }
 

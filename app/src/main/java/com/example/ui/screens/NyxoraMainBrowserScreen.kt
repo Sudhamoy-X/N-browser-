@@ -52,6 +52,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -146,10 +147,16 @@ fun NyxoraMainBrowserScreen(
     val deviceDisplayName by viewModel.connectManager.deviceDisplayName.collectAsStateWithLifecycle()
     val shareableInviteUrl by viewModel.connectManager.currentShareableInviteUrl.collectAsStateWithLifecycle()
     val hasUserConsentedToShare by viewModel.connectManager.hasUserConsentedToShare.collectAsStateWithLifecycle()
+    val chatMessages by viewModel.connectManager.chatMessages.collectAsStateWithLifecycle()
+    val unreadChatCount by viewModel.connectManager.unreadChatCount.collectAsStateWithLifecycle()
+    val isChatOverlayExpanded by viewModel.connectManager.isChatOverlayExpanded.collectAsStateWithLifecycle()
+    val isChatBubbleDismissed by viewModel.connectManager.isChatBubbleDismissed.collectAsStateWithLifecycle()
+    val participantControlsDisabledNotice by viewModel.connectManager.participantControlsDisabledNotice.collectAsStateWithLifecycle()
 
     var addressInput by rememberSaveable { mutableStateOf("") }
     var isEditingAddress by remember { mutableStateOf(false) }
     var showOverflowMenu by remember { mutableStateOf(false) }
+    var isConnectBannerExpanded by rememberSaveable { mutableStateOf(false) }
     var lastAutoSeekMillis by remember { mutableLongStateOf(0L) }
 
     LaunchedEffect(activeTab.isHomePage) {
@@ -162,6 +169,16 @@ fun NyxoraMainBrowserScreen(
     val splitController = remember { WebViewControllerHandle() }
     val snackbarHostState = remember { SnackbarHostState() }
 
+    LaunchedEffect(primaryController, splitController) {
+        val collapseOnScroll: (Int, Int) -> Unit = { _, deltaY ->
+            if (abs(deltaY) > 2 && isConnectBannerExpanded) {
+                isConnectBannerExpanded = false
+            }
+        }
+        primaryController.onWebPageScrollChanged = collapseOnScroll
+        splitController.onWebPageScrollChanged = collapseOnScroll
+    }
+
     val localFileLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
@@ -173,6 +190,25 @@ fun NyxoraMainBrowserScreen(
     val secondarySplitTab = remember(normalTabs, privateTabs, splitSecondTabId) {
         if (splitSecondTabId == null) null
         else (normalTabs + privateTabs).firstOrNull { it.id == splitSecondTabId }
+    }
+
+    val openNonSuspendedTabIds = remember(normalTabs, privateTabs) {
+        (normalTabs + privateTabs).asSequence()
+            .filter { !it.isSuspended }
+            .map { it.id }
+            .toSet()
+    }
+
+    LaunchedEffect(openNonSuspendedTabIds, activeTab.id, secondarySplitTab?.id) {
+        primaryController.evictTabsNotIn(openNonSuspendedTabIds, activeTab.id)
+        splitController.evictTabsNotIn(openNonSuspendedTabIds, secondarySplitTab?.id ?: "")
+    }
+
+    DisposableEffect(primaryController, splitController) {
+        onDispose {
+            primaryController.destroyAllWebViews()
+            splitController.destroyAllWebViews()
+        }
     }
 
     // Collect toast messages
@@ -209,10 +245,10 @@ fun NyxoraMainBrowserScreen(
         }
     }
 
-    // Periodic Watch Together media compatibility probe & host playback beacon
-    LaunchedEffect(connectRoomState?.roomId, connectRoomState?.mode, activeTab.url, isPrivateMode) {
+    // Periodic media compatibility probe & host playback beacon for unified Room Sync
+    LaunchedEffect(connectRoomState?.roomId, activeTab.url, isPrivateMode) {
         val room = connectRoomState
-        if (room != null && room.mode == RoomSyncMode.WATCH_TOGETHER && !isPrivateMode && !activeTab.isHomePage) {
+        if (room != null && !isPrivateMode && !activeTab.isHomePage) {
             while (isActive) {
                 primaryController.probeWatchTogetherMedia { compat, curTime, dur, isPaused, rate ->
                     viewModel.connectManager.updateVideoCompatibility(compat)
@@ -244,8 +280,22 @@ fun NyxoraMainBrowserScreen(
             val currentTab = viewModel.activeTab.value
             if (currentTab.isPrivate) return@collect
             when (cmd) {
+                is IncomingRemoteSyncCommand.ParticipantJoinConfirmed -> {
+                    viewModel.onParticipantRoomJoinConfirmed(cmd)
+                    val pb = cmd.playbackState
+                    if (pb != null) {
+                        lastAutoSeekMillis = System.currentTimeMillis()
+                        primaryController.applyWatchTogetherPlayback(
+                            shouldPlay = pb.isPlaying,
+                            seekToSeconds = pb.positionSeconds,
+                            playbackRate = pb.playbackRate
+                        )
+                    }
+                }
                 is IncomingRemoteSyncCommand.NavigateToUrl -> {
-                    viewModel.applyRemoteSyncUrlNavigation(cmd.url, cmd.title)
+                    if (!cmd.isInitialJoinSnapshot) {
+                        viewModel.applyRemoteSyncUrlNavigation(cmd.url, cmd.title)
+                    }
                 }
                 IncomingRemoteSyncCommand.NavigateBack -> {
                     val wvWentBack = !currentTab.isHomePage && primaryController.goBack()
@@ -262,11 +312,32 @@ fun NyxoraMainBrowserScreen(
                 }
                 is IncomingRemoteSyncCommand.ApplyPlaybackState -> {
                     val state = cmd.state
-                    if (state.pageUrl.isNotBlank() && state.pageUrl != currentTab.url) {
+                    if (!cmd.isInitialJoinSnapshot &&
+                        !currentTab.isHomePage &&
+                        state.pageUrl.isNotBlank() &&
+                        state.pageUrl != currentTab.url
+                    ) {
                         viewModel.applyRemoteSyncUrlNavigation(state.pageUrl, "")
                     }
+                    val currentCompat = viewModel.connectManager.videoCompatibility.value
+                    val isUnsupported =
+                        currentCompat == com.example.domain.connect.VideoCompatibilityState.DRM_PROTECTED_UNSUPPORTED ||
+                            currentCompat == com.example.domain.connect.VideoCompatibilityState.IFRAME_OR_EMBED_RESTRICTED
+                    if (!isUnsupported) {
+                        viewModel.connectManager.updateVideoCompatibility(
+                            com.example.domain.connect.VideoCompatibilityState.COMPATIBLE_HTML5
+                        )
+                        lastAutoSeekMillis = System.currentTimeMillis()
+                        primaryController.applyWatchTogetherPlayback(
+                            shouldPlay = state.isPlaying,
+                            seekToSeconds = state.positionSeconds,
+                            playbackRate = state.playbackRate
+                        )
+                    }
                     primaryController.probeWatchTogetherMedia { compat, localPos, _, localPaused, _ ->
-                        viewModel.connectManager.updateVideoCompatibility(compat)
+                        if (compat != com.example.domain.connect.VideoCompatibilityState.NO_VIDEO_DETECTED) {
+                            viewModel.connectManager.updateVideoCompatibility(compat)
+                        }
                         if (compat.supportsDirectSync) {
                             val now = System.currentTimeMillis()
                             val adj = WatchTogetherMediaBridge.calculatePlaybackAdjustment(
@@ -343,6 +414,12 @@ fun NyxoraMainBrowserScreen(
     }
 
     val isFullscreenVideo = primaryController.isFullscreen || splitController.isFullscreen
+
+    LaunchedEffect(isFullscreenVideo) {
+        if (isFullscreenVideo && isConnectBannerExpanded) {
+            isConnectBannerExpanded = false
+        }
+    }
 
     val density = LocalDensity.current
     val hapticFeedback = LocalHapticFeedback.current
@@ -515,6 +592,12 @@ fun NyxoraMainBrowserScreen(
                             connectionStatus = connectStatus,
                             isFollowingPaused = isFollowingPaused,
                             isPrivateMode = isPrivateMode,
+                            isExpanded = isConnectBannerExpanded,
+                            onExpandedChange = { isConnectBannerExpanded = it },
+                            unreadChatCount = unreadChatCount,
+                            onOpenChatOverlay = {
+                                viewModel.connectManager.reopenChatOverlay()
+                            },
                             onOpenConnectSheet = {
                                 viewModel.setOverlaySheet(OverlaySheet.NYXORA_CONNECT)
                             },
@@ -528,6 +611,7 @@ fun NyxoraMainBrowserScreen(
                                 )
                             },
                             onStopOrLeaveImmediate = {
+                                isConnectBannerExpanded = false
                                 viewModel.connectManager.leaveOrCloseRoom(notifyServer = true)
                                 viewModel.emitToast("Disconnected from NYXORA Connect room")
                             }
@@ -675,9 +759,7 @@ fun NyxoraMainBrowserScreen(
                 // Lazy-collect site settings & allowOnceUrls only when rendering a web page
                 val siteSettings by viewModel.siteSettings.collectAsStateWithLifecycle()
                 val allowOnceUrls by viewModel.allowOnceUrls.collectAsStateWithLifecycle()
-                val openTabIds = remember(normalTabs, privateTabs) {
-                    (normalTabs + privateTabs).map { it.id }.toSet()
-                }
+                val openTabIds = openNonSuspendedTabIds
 
                 BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
                     val isWideScreen = maxWidth >= 600.dp
@@ -996,6 +1078,27 @@ fun NyxoraMainBrowserScreen(
                 }
             }
 
+            // Floating Room Chat Overlay (edge-docked, movable, dismissible, auto-collapses on fullscreen video)
+            NyxoraFloatingChatOverlay(
+                roomState = connectRoomState,
+                localDeviceId = viewModel.connectManager.localDeviceId,
+                connectionStatus = connectStatus,
+                chatMessages = chatMessages,
+                unreadChatCount = unreadChatCount,
+                isExpanded = isChatOverlayExpanded,
+                isBubbleDismissed = isChatBubbleDismissed,
+                isFullscreenVideo = isFullscreenVideo,
+                onExpandedChange = { expanded ->
+                    viewModel.connectManager.setChatOverlayExpanded(expanded)
+                },
+                onDismissBubbleChange = { dismissed ->
+                    viewModel.connectManager.setChatBubbleDismissed(dismissed)
+                },
+                onSendMessage = { messageText ->
+                    viewModel.connectManager.sendChatMessage(messageText)
+                }
+            )
+
             // Compact 8-Action Bottom Menu Sheet Overlay
             val bookmarksForMenu by viewModel.bookmarks.collectAsStateWithLifecycle()
             val isActivePageBookmarked = remember(bookmarksForMenu, activeTab.url) {
@@ -1007,6 +1110,7 @@ fun NyxoraMainBrowserScreen(
                 isPrivateMode = isPrivateMode,
                 isDesktopMode = activeTab.desktopMode,
                 isCurrentPageBookmarked = isActivePageBookmarked,
+                isRoomSyncActive = connectRoomState != null && connectStatus != SyncConnectionStatus.DISCONNECTED,
                 onDismiss = { showOverflowMenu = false },
                 onOpenBookmarks = { viewModel.setOverlaySheet(OverlaySheet.BOOKMARKS) },
                 onOpenHistory = { viewModel.setOverlaySheet(OverlaySheet.HISTORY) },
@@ -1020,6 +1124,7 @@ fun NyxoraMainBrowserScreen(
                 },
                 onToggleAddBookmark = { viewModel.toggleBookmarkForActiveTab() },
                 onToggleDesktopSite = { viewModel.toggleDesktopSiteForActiveTab() },
+                onOpenRoomSync = { viewModel.setOverlaySheet(OverlaySheet.NYXORA_CONNECT) },
                 onSharePage = {
                     val shareText = if (activeTab.isHomePage) "https://nyxora.browser" else activeTab.url
                     val sendIntent = Intent(Intent.ACTION_SEND).apply {
@@ -1250,29 +1355,55 @@ fun NyxoraMainBrowserScreen(
                     }
                 },
                 onHostPlaybackControl = { shouldPlay, seekDelta ->
-                    primaryController.probeWatchTogetherMedia { _, curTime, dur, _, rate ->
-                        val nextPos = if (seekDelta != null) {
-                            (curTime + seekDelta).coerceAtLeast(0.0)
-                        } else {
-                            curTime
-                        }
-                        primaryController.applyWatchTogetherPlayback(
-                            shouldPlay = shouldPlay,
-                            seekToSeconds = if (seekDelta != null) nextPos else null,
-                            playbackRate = rate
+                    val currentRoom = viewModel.connectManager.roomState.value
+                    val isHost = currentRoom?.hostDeviceId == viewModel.connectManager.localDeviceId
+                    if (currentRoom != null && !isHost && !currentRoom.permissions.allowParticipantControls) {
+                        viewModel.emitToast(
+                            viewModel.connectManager.participantControlsDisabledNotice.value
+                                ?: "Shared controls are disabled by the host"
                         )
-                        viewModel.connectManager.publishPlaybackEvent(
-                            pageUrl = activeTab.url,
-                            isPlaying = shouldPlay,
-                            positionSeconds = nextPos,
-                            durationSeconds = dur,
-                            playbackRate = rate,
+                        return@NyxoraConnectSheet
+                    }
+                    val currentCompat = viewModel.connectManager.videoCompatibility.value
+                    primaryController.executeWatchTogetherControl(
+                        shouldPlay = shouldPlay,
+                        seekDeltaSeconds = seekDelta,
+                        currentRoomPlayback = currentRoom?.playbackState,
+                        currentCompatibility = currentCompat
+                    ) { result ->
+                        viewModel.connectManager.updateVideoCompatibility(result.compatibility)
+                        if (!result.succeeded) {
+                            viewModel.emitToast(
+                                result.failureReason ?: "Playback sync unavailable: no supported media detected"
+                            )
+                            return@executeWatchTogetherControl
+                        }
+                        val targetPageUrl = activeTab.url.takeIf { !activeTab.isHomePage && it.isNotBlank() }
+                            ?: currentRoom?.playbackState?.pageUrl?.takeIf { it.isNotBlank() }
+                            ?: currentRoom?.currentSyncedUrl?.takeIf { it.isNotBlank() }
+                            ?: "https://example.com/watch"
+                        val sent = viewModel.connectManager.publishPlaybackEvent(
+                            pageUrl = targetPageUrl,
+                            isPlaying = result.isPlaying,
+                            positionSeconds = result.positionSeconds,
+                            durationSeconds = result.durationSeconds,
+                            playbackRate = result.playbackRate,
                             isBeacon = false,
                             isPrivateTab = activeTab.isPrivate,
                             isPrivateMode = isPrivateMode
                         )
+                        if (!sent) {
+                            viewModel.emitToast("Unable to synchronize playback in current room state")
+                        }
                     }
                 },
+                onSetAllowParticipantControls = { allowed ->
+                    viewModel.connectManager.setAllowParticipantControls(allowed)
+                    viewModel.emitToast(
+                        if (allowed) "Participant controls enabled" else "Participant controls disabled"
+                    )
+                },
+                participantControlsDisabledNotice = participantControlsDisabledNotice,
                 onRemoveParticipant = { targetId ->
                     viewModel.connectManager.removeParticipant(targetId)
                     viewModel.emitToast("Removed participant")

@@ -159,6 +159,19 @@ object ContentBlockingEngine {
         "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
         Base64.DEFAULT
     )
+    private val BLOCKED_JS_BYTES: ByteArray = "/* Blocked by NYXORA */".toByteArray(Charsets.UTF_8)
+    private val EMPTY_BYTES: ByteArray = ByteArray(0)
+    private val BLOCKED_RESPONSE_HEADERS: Map<String, String> = mapOf(
+        "Access-Control-Allow-Origin" to "*",
+        "Cache-Control" to "no-store"
+    )
+
+    private const val HOST_FLAG_CUSTOM_ALLOWED = 1
+    private const val HOST_FLAG_SAFE_AUTH_OR_CDN = 2
+    private const val HOST_FLAG_BLOCKED_DOMAIN = 4
+    private const val MAX_HOST_CACHE_ENTRIES = 2048
+
+    private val hostDecisionCache = ConcurrentHashMap<String, Int>(256)
 
     @Volatile
     private var dynamicBlockedDomains: Set<String> = emptySet()
@@ -223,6 +236,7 @@ object ContentBlockingEngine {
         dynamicBlockedDomains = blockedDomains
         dynamicAllowDomains = allowedDomains
         dynamicBlockedPathTokens = blockedPaths
+        hostDecisionCache.clear()
     }
 
     fun getTotalActiveRuleCount(): Int {
@@ -230,6 +244,29 @@ object ContentBlockingEngine {
             BUILT_IN_BLOCKED_PATH_TOKENS.size +
             dynamicBlockedDomains.size +
             dynamicBlockedPathTokens.size
+    }
+
+    private fun getOrComputeHostFlags(host: String): Int {
+        hostDecisionCache[host]?.let { return it }
+        var flags = 0
+        if (dynamicAllowDomains.isNotEmpty() && matchesDomainSet(host, dynamicAllowDomains)) {
+            flags = flags or HOST_FLAG_CUSTOM_ALLOWED
+        }
+        if (matchesDomainSet(host, ESSENTIAL_AUTH_AND_PAYMENT_HOSTS) ||
+            matchesDomainSet(host, SAFE_VIDEO_AND_CDN_HOSTS)
+        ) {
+            flags = flags or HOST_FLAG_SAFE_AUTH_OR_CDN
+        }
+        if (matchesDomainSet(host, BUILT_IN_BLOCKED_DOMAINS) ||
+            (dynamicBlockedDomains.isNotEmpty() && matchesDomainSet(host, dynamicBlockedDomains))
+        ) {
+            flags = flags or HOST_FLAG_BLOCKED_DOMAIN
+        }
+        if (hostDecisionCache.size >= MAX_HOST_CACHE_ENTRIES) {
+            hostDecisionCache.clear()
+        }
+        hostDecisionCache[host] = flags
+        return flags
     }
 
     /**
@@ -245,36 +282,47 @@ object ContentBlockingEngine {
         if (!globalAdBlockingEnabled) return false
         if (siteSetting?.allowAds == true) return false
 
+        val startNs = System.nanoTime()
+        val blocked = evaluateSubresourceInternal(requestUrl, pageUrl)
+        val elapsedNs = System.nanoTime() - startNs
+        BrowserDiagnosticsEngine.recordSubresourceCheck(elapsedNs, blocked)
+        return blocked
+    }
+
+    private fun evaluateSubresourceInternal(
+        requestUrl: String,
+        pageUrl: String
+    ): Boolean {
         val reqHost = UrlAndSearchHandler.extractHost(requestUrl)
         if (reqHost.isEmpty()) return false
 
-        val pageHost = UrlAndSearchHandler.extractHost(pageUrl)
-
-        // Check custom allowlist rules for either the page host or the request host
-        if (matchesDomainSet(reqHost, dynamicAllowDomains) ||
-            (pageHost.isNotEmpty() && matchesDomainSet(pageHost, dynamicAllowDomains))
-        ) {
+        val reqFlags = getOrComputeHostFlags(reqHost)
+        if ((reqFlags and HOST_FLAG_CUSTOM_ALLOWED) != 0) {
             return false
         }
 
-        // Never block essential login/payment flows or direct video stream CDNs unless it's an explicit /pagead/ path
+        val pageHost = UrlAndSearchHandler.extractHost(pageUrl)
+        if (pageHost.isNotEmpty() && dynamicAllowDomains.isNotEmpty()) {
+            val pageFlags = getOrComputeHostFlags(pageHost)
+            if ((pageFlags and HOST_FLAG_CUSTOM_ALLOWED) != 0) {
+                return false
+            }
+        }
+
+        // Fast check on URL path tokens
         val lowerUrl = requestUrl.lowercase()
         val isExplicitAdPath = lowerUrl.contains("/pagead/") ||
             lowerUrl.contains("/adserver/") ||
             lowerUrl.contains("/adsbygoogle") ||
             lowerUrl.contains("/gpt/pubads")
 
-        if (!isExplicitAdPath &&
-            (matchesDomainSet(reqHost, ESSENTIAL_AUTH_AND_PAYMENT_HOSTS) ||
-                matchesDomainSet(reqHost, SAFE_VIDEO_AND_CDN_HOSTS))
-        ) {
+        // Never block essential login/payment flows or direct video stream CDNs unless it's an explicit /pagead/ path
+        if (!isExplicitAdPath && (reqFlags and HOST_FLAG_SAFE_AUTH_OR_CDN) != 0) {
             return false
         }
 
-        // Check built-in and dynamic blocked domains
-        if (matchesDomainSet(reqHost, BUILT_IN_BLOCKED_DOMAINS) ||
-            matchesDomainSet(reqHost, dynamicBlockedDomains)
-        ) {
+        // Check built-in and dynamic blocked domains via cached host classification
+        if ((reqFlags and HOST_FLAG_BLOCKED_DOMAIN) != 0) {
             return true
         }
 
@@ -297,26 +345,22 @@ object ContentBlockingEngine {
      */
     fun createBlockedSubresourceResponse(requestUrl: String): WebResourceResponse {
         val cleanPath = requestUrl.substringBefore('?').substringBefore('#').lowercase()
-        val headers = mapOf(
-            "Access-Control-Allow-Origin" to "*",
-            "Cache-Control" to "no-store"
-        )
         return when {
             cleanPath.endsWith(".js") || cleanPath.contains("/js/") -> WebResourceResponse(
                 "application/javascript",
                 "utf-8",
                 200,
                 "OK",
-                headers,
-                ByteArrayInputStream("/* Blocked by NYXORA */".toByteArray(Charsets.UTF_8))
+                BLOCKED_RESPONSE_HEADERS,
+                ByteArrayInputStream(BLOCKED_JS_BYTES)
             )
             cleanPath.endsWith(".css") -> WebResourceResponse(
                 "text/css",
                 "utf-8",
                 200,
                 "OK",
-                headers,
-                ByteArrayInputStream("".toByteArray(Charsets.UTF_8))
+                BLOCKED_RESPONSE_HEADERS,
+                ByteArrayInputStream(EMPTY_BYTES)
             )
             cleanPath.endsWith(".gif") || cleanPath.endsWith(".png") ||
                 cleanPath.endsWith(".jpg") || cleanPath.endsWith(".jpeg") ||
@@ -325,7 +369,7 @@ object ContentBlockingEngine {
                 null,
                 200,
                 "OK",
-                headers,
+                BLOCKED_RESPONSE_HEADERS,
                 ByteArrayInputStream(TRANSPARENT_1X1_GIF_BYTES)
             )
             else -> WebResourceResponse(
@@ -333,19 +377,21 @@ object ContentBlockingEngine {
                 "utf-8",
                 204,
                 "Blocked by NYXORA",
-                headers,
-                ByteArrayInputStream(ByteArray(0))
+                BLOCKED_RESPONSE_HEADERS,
+                ByteArrayInputStream(EMPTY_BYTES)
             )
         }
     }
 
     internal fun matchesDomainSet(host: String, domainSet: Set<String>): Boolean {
+        if (domainSet.isEmpty()) return false
         val clean = host.lowercase().trimEnd('.')
         if (clean in domainSet) return true
-        var current = clean
-        while (current.contains('.')) {
-            current = current.substringAfter('.')
-            if (current in domainSet) return true
+        var dotIdx = clean.indexOf('.')
+        while (dotIdx != -1 && dotIdx + 1 < clean.length) {
+            val suffix = clean.substring(dotIdx + 1)
+            if (suffix in domainSet) return true
+            dotIdx = clean.indexOf('.', dotIdx + 1)
         }
         return false
     }
@@ -355,14 +401,16 @@ object ContentBlockingEngine {
         val cleanA = hostA.lowercase().removePrefix("www.").removePrefix("m.")
         val cleanB = hostB.lowercase().removePrefix("www.").removePrefix("m.")
         if (cleanA == cleanB) return true
-        val partsA = cleanA.split('.')
-        val partsB = cleanB.split('.')
-        if (partsA.size >= 2 && partsB.size >= 2) {
-            val tailA = partsA.takeLast(2).joinToString(".")
-            val tailB = partsB.takeLast(2).joinToString(".")
-            if (tailA == tailB) return true
-        }
-        return false
+        val tailA = extractRegistrableTail(cleanA)
+        val tailB = extractRegistrableTail(cleanB)
+        return tailA.isNotEmpty() && tailA == tailB
+    }
+
+    private fun extractRegistrableTail(cleanHost: String): String {
+        val lastDot = cleanHost.lastIndexOf('.')
+        if (lastDot <= 0) return ""
+        val secondLastDot = cleanHost.lastIndexOf('.', lastDot - 1)
+        return if (secondLastDot == -1) cleanHost else cleanHost.substring(secondLastDot + 1)
     }
 
     internal fun isUrlAllowedOnce(targetUrl: String, allowOnceUrls: Set<String>): Boolean {
@@ -439,7 +487,12 @@ object ContentBlockingEngine {
 
         val lower = trimmed.lowercase()
         // Block dangerous schemes from web pages
-        if (lower.startsWith("javascript:") || lower.startsWith("file:") || lower.startsWith("content:")) {
+        if (lower.startsWith("javascript:") ||
+            lower.startsWith("vbscript:") ||
+            lower.startsWith("data:") ||
+            lower.startsWith("file:") ||
+            lower.startsWith("content:")
+        ) {
             return NavigationDecision.BLOCK_DANGEROUS_SCHEME
         }
 

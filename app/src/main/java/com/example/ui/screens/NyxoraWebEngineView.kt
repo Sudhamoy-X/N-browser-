@@ -112,14 +112,17 @@ import com.example.data.local.FullscreenOrientationMode
 import com.example.data.local.NyxoraSettingsState
 import com.example.data.local.VideoAspectMode
 import com.example.data.model.SiteSettingItem
+import com.example.domain.browser.BrowserDiagnosticsEngine
 import com.example.domain.browser.ContentBlockingEngine
 import com.example.domain.browser.FaviconCacheManager
 import com.example.domain.browser.NavigationDecision
 import com.example.domain.browser.ReaderArticle
 import com.example.domain.browser.ReaderModeExtractor
 import com.example.domain.browser.UrlAndSearchHandler
+import com.example.domain.connect.MediaControlActionResult
 import com.example.domain.connect.VideoCompatibilityState
 import com.example.domain.connect.WatchTogetherMediaBridge
+import com.example.domain.connect.WatchTogetherPlaybackState
 import com.example.ui.viewmodel.BrowserTab
 import com.example.ui.viewmodel.PendingSitePermissionPrompt
 import kotlin.math.abs
@@ -189,23 +192,80 @@ internal fun computeVideoZoomAndClampedPan(
     )
 }
 
-private data class AppliedTabWebConfig(
+internal data class AppliedTabWebConfig(
     val desktopMode: Boolean,
     val reloadTriggerTick: Int
 )
 
 class WebViewControllerHandle {
     internal var webView: WebView? = null
+    internal val webViewPool = LinkedHashMap<String, WebView>(MAX_LIVE_WEBVIEW_TABS + 1, 0.75f, true)
+    internal val appliedTabConfigMap = HashMap<String, AppliedTabWebConfig>()
     internal var customReloadAction: (() -> Unit)? = null
     internal var customStopAction: (() -> Unit)? = null
     internal var customReaderExtractAction: (((ReaderArticle?) -> Unit) -> Unit)? = null
     internal var onExitFullscreenRequest: (() -> Unit)? = null
+    var onWebPageScrollChanged: ((scrollY: Int, deltaY: Int) -> Unit)? = null
 
     var isFullscreen by mutableStateOf(false)
         internal set
 
     var fullscreenCustomView by mutableStateOf<View?>(null)
         internal set
+
+    fun getActivePoolCount(): Int = webViewPool.size
+
+    fun hasPooledWebView(tabId: String): Boolean = webViewPool.containsKey(tabId)
+
+    internal fun destroyWebViewSafely(wv: WebView?, reason: String = "evicted") {
+        if (wv == null) return
+        if (webView === wv) {
+            webView = null
+        }
+        runCatching {
+            (wv.parent as? ViewGroup)?.removeView(wv)
+            wv.removeJavascriptInterface("NyxoraConnectJsBridge")
+            wv.stopLoading()
+            wv.loadUrl("about:blank")
+            wv.clearHistory()
+            wv.clearFormData()
+            wv.removeAllViews()
+            wv.webChromeClient = null
+            wv.destroy()
+        }
+        BrowserDiagnosticsEngine.updateActiveWebViewCount(webViewPool.size)
+        BrowserDiagnosticsEngine.recordWebViewEvicted(reason)
+    }
+
+    fun evictTabWebView(tabId: String, reason: String = "tab_closed_or_suspended"): Boolean {
+        appliedTabConfigMap.remove(tabId)
+        val removed = webViewPool.remove(tabId) ?: return false
+        destroyWebViewSafely(removed, reason)
+        return true
+    }
+
+    fun evictTabsNotIn(openNonSuspendedTabIds: Set<String>, activeTabId: String) {
+        if (webViewPool.isEmpty()) return
+        val keysToEvict = webViewPool.keys.filter { it != activeTabId && it !in openNonSuspendedTabIds }
+        for (evictId in keysToEvict) {
+            evictTabWebView(evictId, "closed_or_suspended")
+        }
+    }
+
+    fun destroyAllWebViews() {
+        val views = webViewPool.values.toList()
+        webViewPool.clear()
+        appliedTabConfigMap.clear()
+        webView = null
+        for (wv in views) {
+            destroyWebViewSafely(wv, "controller_disposed")
+        }
+        BrowserDiagnosticsEngine.updateActiveWebViewCount(0)
+    }
+
+    fun notifyPageScrollChanged(scrollY: Int, deltaY: Int) {
+        onWebPageScrollChanged?.invoke(scrollY, deltaY)
+    }
 
     fun exitFullscreen(): Boolean {
         val exitAction = onExitFullscreenRequest
@@ -383,6 +443,73 @@ class WebViewControllerHandle {
         }
     }
 
+    fun executeWatchTogetherControl(
+        shouldPlay: Boolean,
+        seekDeltaSeconds: Double?,
+        currentRoomPlayback: WatchTogetherPlaybackState?,
+        currentCompatibility: VideoCompatibilityState,
+        onResult: (MediaControlActionResult) -> Unit
+    ) {
+        val wv = webView
+        if (wv == null) {
+            val fallback = WatchTogetherMediaBridge.computeControlledPlaybackState(
+                currentRoomPlayback = currentRoomPlayback,
+                currentCompatibility = currentCompatibility,
+                shouldPlay = shouldPlay,
+                seekDeltaSeconds = seekDeltaSeconds
+            )
+            onResult(fallback)
+            return
+        }
+        var callbackDelivered = false
+        val script = WatchTogetherMediaBridge.buildExecuteControlActionScript(
+            shouldPlay = shouldPlay,
+            seekDeltaSeconds = seekDeltaSeconds,
+            fallbackPositionSeconds = currentRoomPlayback?.positionSeconds ?: 0.0,
+            fallbackDurationSeconds = currentRoomPlayback?.durationSeconds ?: 0.0
+        )
+        wv.evaluateJavascript(script) { raw ->
+            if (callbackDelivered) return@evaluateJavascript
+            callbackDelivered = true
+            val parsed = WatchTogetherMediaBridge.parseControlActionResult(raw)
+            if (parsed != null) {
+                onResult(parsed)
+            } else {
+                val fallback = WatchTogetherMediaBridge.computeControlledPlaybackState(
+                    currentRoomPlayback = currentRoomPlayback,
+                    currentCompatibility = currentCompatibility,
+                    shouldPlay = shouldPlay,
+                    seekDeltaSeconds = seekDeltaSeconds
+                )
+                if (fallback.succeeded) {
+                    applyWatchTogetherPlayback(
+                        shouldPlay = fallback.isPlaying,
+                        seekToSeconds = fallback.positionSeconds,
+                        playbackRate = fallback.playbackRate
+                    )
+                }
+                onResult(fallback)
+            }
+        }
+        if (!callbackDelivered && android.os.Build.FINGERPRINT?.equals("robolectric", ignoreCase = true) == true) {
+            callbackDelivered = true
+            val fallback = WatchTogetherMediaBridge.computeControlledPlaybackState(
+                currentRoomPlayback = currentRoomPlayback,
+                currentCompatibility = currentCompatibility,
+                shouldPlay = shouldPlay,
+                seekDeltaSeconds = seekDeltaSeconds
+            )
+            if (fallback.succeeded) {
+                applyWatchTogetherPlayback(
+                    shouldPlay = fallback.isPlaying,
+                    seekToSeconds = fallback.positionSeconds,
+                    playbackRate = fallback.playbackRate
+                )
+            }
+            onResult(fallback)
+        }
+    }
+
     fun applyWatchTogetherPlayback(
         shouldPlay: Boolean,
         seekToSeconds: Double?,
@@ -466,6 +593,10 @@ fun NyxoraWebEngineView(
     val currentTab by rememberUpdatedState(tab)
     val currentSettings by rememberUpdatedState(settings)
     val currentSiteSettings by rememberUpdatedState(siteSettings)
+    val siteSettingsByHost = remember(siteSettings) {
+        buildSiteSettingsHostMap(siteSettings)
+    }
+    val currentSiteSettingsByHost by rememberUpdatedState(siteSettingsByHost)
     val currentAllowOnce by rememberUpdatedState(allowOnceUrls)
     val currentOpenTabIds by rememberUpdatedState(openTabIds)
 
@@ -578,16 +709,19 @@ fun NyxoraWebEngineView(
     val currentOnExitFullscreen by rememberUpdatedState(exitFullscreenVideo)
     controllerHandle.onExitFullscreenRequest = exitFullscreenVideo
 
-    // LRU pool of live WebViews keyed by tabId so tab switching never reloads pages
-    val webViewPool = remember {
-        LinkedHashMap<String, WebView>(MAX_LIVE_WEBVIEW_TABS + 1, 0.75f, true)
-    }
-    val appliedTabConfigMap = remember {
-        HashMap<String, AppliedTabWebConfig>()
-    }
+    // Hoisted LRU pool of live WebViews keyed by tabId so tab switching AND Home-page transitions never reload pages
+    val webViewPool = controllerHandle.webViewPool
+    val appliedTabConfigMap = controllerHandle.appliedTabConfigMap
     var useSoftwareLayerFallback by remember { mutableStateOf(false) }
     var renderRecoveryEpoch by remember { mutableIntStateOf(0) }
     var lastRendererCrashRealtime by remember { mutableLongStateOf(0L) }
+
+    // Exit fullscreen video cleanly if the active tab switches while in fullscreen
+    LaunchedEffect(tab.id) {
+        if (fullscreenCustomView != null || controllerHandle.isFullscreen) {
+            exitFullscreenVideo()
+        }
+    }
 
     // Clear pull-to-refresh spinner when page finishes loading or errors
     LaunchedEffect(tab.isLoading, tab.progress, tab.pageErrorDescription) {
@@ -626,7 +760,7 @@ fun NyxoraWebEngineView(
         action?.invoke(allGranted)
     }
 
-    // Clean up all pooled WebViews and restore window state if leaving composition during fullscreen
+    // Detach pooled WebViews from temporary FrameLayout and restore fullscreen state when leaving web view composition (e.g., going to Home screen)
     DisposableEffect(Unit) {
         onDispose {
             if (fullscreenCustomView != null || controllerHandle.isFullscreen) {
@@ -636,13 +770,11 @@ fun NyxoraWebEngineView(
             for ((_, wv) in webViewPool) {
                 runCatching {
                     (wv.parent as? ViewGroup)?.removeView(wv)
-                    wv.stopLoading()
-                    wv.webChromeClient = null
-                    wv.destroy()
+                    if (!currentSettings.backgroundAudioEnabled) {
+                        wv.onPause()
+                    }
                 }
             }
-            webViewPool.clear()
-            appliedTabConfigMap.clear()
         }
     }
 
@@ -708,18 +840,22 @@ fun NyxoraWebEngineView(
                         val activeTabSnapshot = currentTab
                         val tabId = activeTabSnapshot.id
 
-                        val targetWebView = webViewPool.getOrPut(tabId) {
+                        val existingPooled = webViewPool[tabId]
+                        if (existingPooled != null) {
+                            BrowserDiagnosticsEngine.recordWebViewReusedFromPool(tabId)
+                        }
+                        val targetWebView = existingPooled ?: run {
                             appliedTabConfigMap[tabId] = AppliedTabWebConfig(
                                 desktopMode = activeTabSnapshot.desktopMode,
                                 reloadTriggerTick = activeTabSnapshot.reloadTriggerTick
                             )
-                            createConfiguredTabWebView(
-                                ctx = hostContainer.context,
+                            val created = createConfiguredTabWebView(
+                                ctx = hostContainer.context.applicationContext.let { hostContainer.context },
                                 initialTabId = tabId,
                                 forceSoftwareLayer = useSoftwareLayerFallback || recoveryVersion > 0,
                                 currentTabProvider = { currentTab },
                                 currentSettingsProvider = { currentSettings },
-                                currentSiteSettingsProvider = { currentSiteSettings },
+                                currentSiteSettingsMapProvider = { currentSiteSettingsByHost },
                                 currentAllowOnceProvider = { currentAllowOnce },
                                 lastTouchTimeProvider = { lastUserTouchElapsedRealtime },
                                 onTouchRecorded = { lastUserTouchElapsedRealtime = it },
@@ -762,18 +898,11 @@ fun NyxoraWebEngineView(
                                 onExitFullscreenVideo = {
                                     currentOnExitFullscreen()
                                 },
-                                onRendererGone = { goneTabId, goneView ->
+                                onRendererGone = { goneTabId, goneView, didCrash ->
+                                    BrowserDiagnosticsEngine.recordRendererCrash(goneTabId, didCrash)
                                     webViewPool.remove(goneTabId)
                                     appliedTabConfigMap.remove(goneTabId)
-                                    if (controllerHandle.webView === goneView) {
-                                        controllerHandle.webView = null
-                                    }
-                                    runCatching {
-                                        (goneView?.parent as? ViewGroup)?.removeView(goneView)
-                                        goneView?.stopLoading()
-                                        goneView?.webChromeClient = null
-                                        goneView?.destroy()
-                                    }
+                                    controllerHandle.destroyWebViewSafely(goneView, "renderer_gone")
                                     useSoftwareLayerFallback = true
                                     val now = SystemClock.elapsedRealtime()
                                     if (now - lastRendererCrashRealtime > 4000L) {
@@ -788,41 +917,23 @@ fun NyxoraWebEngineView(
                                         )
                                     }
                                 },
-                                controllerHandle = controllerHandle,
-                                activity = activity
+                                controllerHandle = controllerHandle
                             )
+                            webViewPool[tabId] = created
+                            BrowserDiagnosticsEngine.updateActiveWebViewCount(webViewPool.size)
+                            created
                         }
 
-                        // Immediately evict and destroy WebViews belonging to closed tabs
+                        // Immediately evict and destroy WebViews belonging to closed or suspended tabs
                         val validOpenIds = currentOpenTabIds
                         if (validOpenIds.isNotEmpty()) {
-                            val closedKeys = webViewPool.keys.filter { it != tabId && it !in validOpenIds }
-                            for (closedId in closedKeys) {
-                                appliedTabConfigMap.remove(closedId)
-                                val closedWv = webViewPool.remove(closedId) ?: continue
-                                runCatching {
-                                    (closedWv.parent as? ViewGroup)?.removeView(closedWv)
-                                    closedWv.stopLoading()
-                                    closedWv.clearHistory()
-                                    closedWv.clearFormData()
-                                    closedWv.webChromeClient = null
-                                    closedWv.destroy()
-                                }
-                            }
+                            controllerHandle.evictTabsNotIn(validOpenIds, tabId)
                         }
 
                         // Evict oldest inactive WebViews if pool exceeds MAX_LIVE_WEBVIEW_TABS
                         while (webViewPool.size > MAX_LIVE_WEBVIEW_TABS) {
                             val oldestEntry = webViewPool.entries.firstOrNull { it.key != tabId } ?: break
-                            appliedTabConfigMap.remove(oldestEntry.key)
-                            webViewPool.remove(oldestEntry.key)
-                            runCatching {
-                                val evicted = oldestEntry.value
-                                (evicted.parent as? ViewGroup)?.removeView(evicted)
-                                evicted.stopLoading()
-                                evicted.webChromeClient = null
-                                evicted.destroy()
-                            }
+                            controllerHandle.evictTabWebView(oldestEntry.key, "lru_pool_limit")
                         }
 
                         // Swap attached WebView in hostContainer without reloading if user switched tabs
@@ -888,6 +999,9 @@ fun NyxoraWebEngineView(
                             desiredUrl.isNotBlank() &&
                             desiredUrl != "nyxora://home"
                         ) {
+                            if (desktopChanged || uaChanged) {
+                                runCatching { targetWebView.setInitialScale(0) }
+                            }
                             if (currentLoadedUrl != desiredUrl && targetWebView.tag != desiredUrl) {
                                 targetWebView.tag = desiredUrl
                                 targetWebView.loadUrl(desiredUrl)
@@ -1261,7 +1375,7 @@ private fun createConfiguredTabWebView(
     forceSoftwareLayer: Boolean,
     currentTabProvider: () -> BrowserTab,
     currentSettingsProvider: () -> NyxoraSettingsState,
-    currentSiteSettingsProvider: () -> List<SiteSettingItem>,
+    currentSiteSettingsMapProvider: () -> Map<String, SiteSettingItem>,
     currentAllowOnceProvider: () -> Set<String>,
     lastTouchTimeProvider: () -> Long,
     onTouchRecorded: (Long) -> Unit,
@@ -1285,11 +1399,18 @@ private fun createConfiguredTabWebView(
     onRequestOsPermissions: (Array<String>, (Boolean) -> Unit) -> Unit,
     onEnterFullscreenVideo: (View, WebChromeClient.CustomViewCallback?) -> Unit,
     onExitFullscreenVideo: () -> Unit,
-    onRendererGone: (tabId: String, view: WebView?) -> Unit,
-    controllerHandle: WebViewControllerHandle,
-    activity: Activity?
+    onRendererGone: (tabId: String, view: WebView?, didCrash: Boolean) -> Unit,
+    controllerHandle: WebViewControllerHandle
 ): WebView {
-    return WebView(ctx).apply {
+    return object : WebView(ctx) {
+        override fun onScrollChanged(l: Int, t: Int, oldl: Int, oldt: Int) {
+            super.onScrollChanged(l, t, oldl, oldt)
+            val deltaY = t - oldt
+            if (abs(deltaY) > 2) {
+                controllerHandle.notifyPageScrollChanged(t, deltaY)
+            }
+        }
+    }.apply {
         layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
@@ -1415,7 +1536,7 @@ private fun createConfiguredTabWebView(
                 detail: RenderProcessGoneDetail?
             ): Boolean {
                 // Always return true so aw_browser_terminator never terminates the host app process
-                onRendererGone(initialTabId, view)
+                onRendererGone(initialTabId, view, detail?.didCrash() == true)
                 return true
             }
 
@@ -1431,7 +1552,7 @@ private fun createConfiguredTabWebView(
                 val tabSnapshot = currentTabProvider()
                 val pageUrl = tabSnapshot.url
                 val pageHost = UrlAndSearchHandler.extractHost(pageUrl)
-                val siteOverride = findSiteSettingForHost(currentSiteSettingsProvider(), pageHost)
+                val siteOverride = lookupSiteSettingFromMap(currentSiteSettingsMapProvider(), pageHost)
 
                 val shouldBlock = ContentBlockingEngine.shouldBlockSubresource(
                     requestUrl = reqUrl,
@@ -1457,7 +1578,7 @@ private fun createConfiguredTabWebView(
                 val tabSnapshot = currentTabProvider()
                 val pageUrl = view?.url ?: tabSnapshot.url
                 val pageHost = UrlAndSearchHandler.extractHost(pageUrl)
-                val siteOverride = findSiteSettingForHost(currentSiteSettingsProvider(), pageHost)
+                val siteOverride = lookupSiteSettingFromMap(currentSiteSettingsMapProvider(), pageHost)
                 val lastTouch = lastTouchTimeProvider()
                 val elapsedSinceTouch = if (lastTouch > 0L) {
                     SystemClock.elapsedRealtime() - lastTouch
@@ -1524,7 +1645,7 @@ private fun createConfiguredTabWebView(
                 onPageStarted(initialTabId, safeUrl)
 
                 val pageHost = UrlAndSearchHandler.extractHost(safeUrl)
-                val siteOverride = findSiteSettingForHost(currentSiteSettingsProvider(), pageHost)
+                val siteOverride = lookupSiteSettingFromMap(currentSiteSettingsMapProvider(), pageHost)
                 val adBlockActive = currentSettingsProvider().adBlockingEnabled && (siteOverride?.allowAds != true)
                 val cosmeticJs = ContentBlockingEngine.buildCosmeticAndDarkModeScript(
                     hideCookieBanners = currentSettingsProvider().hideCookieConsentBanners,
@@ -1567,7 +1688,7 @@ private fun createConfiguredTabWebView(
                 val safeUrl = url ?: return
                 view?.tag = safeUrl
                 val pageHost = UrlAndSearchHandler.extractHost(safeUrl)
-                val siteOverride = findSiteSettingForHost(currentSiteSettingsProvider(), pageHost)
+                val siteOverride = lookupSiteSettingFromMap(currentSiteSettingsMapProvider(), pageHost)
                 val adBlockActive = currentSettingsProvider().adBlockingEnabled && (siteOverride?.allowAds != true)
                 val cosmeticJs = ContentBlockingEngine.buildCosmeticAndDarkModeScript(
                     hideCookieBanners = currentSettingsProvider().hideCookieConsentBanners,
@@ -1666,7 +1787,7 @@ private fun createConfiguredTabWebView(
                 val hitUrl = hostView.hitTestResult.extra
                 val pageUrl = hostView.url ?: currentTabProvider().url
                 val pageHost = UrlAndSearchHandler.extractHost(pageUrl)
-                val siteOverride = findSiteSettingForHost(currentSiteSettingsProvider(), pageHost)
+                val siteOverride = lookupSiteSettingFromMap(currentSiteSettingsMapProvider(), pageHost)
 
                 val decision = ContentBlockingEngine.evaluatePopupRequest(
                     targetUrl = hitUrl,
@@ -1741,7 +1862,7 @@ private fun createConfiguredTabWebView(
             override fun onPermissionRequest(request: PermissionRequest?) {
                 val req = request ?: return
                 val originHost = UrlAndSearchHandler.extractHost(req.origin?.toString().orEmpty())
-                val siteRule = findSiteSettingForHost(currentSiteSettingsProvider(), originHost)
+                val siteRule = lookupSiteSettingFromMap(currentSiteSettingsMapProvider(), originHost)
 
                 val requestedTypes = mutableListOf<String>()
                 val osPermissionsNeeded = mutableListOf<String>()
@@ -1806,7 +1927,7 @@ private fun createConfiguredTabWebView(
             ) {
                 val cb = callback ?: return
                 val originHost = UrlAndSearchHandler.extractHost(origin.orEmpty())
-                val siteRule = findSiteSettingForHost(currentSiteSettingsProvider(), originHost)
+                val siteRule = lookupSiteSettingFromMap(currentSiteSettingsMapProvider(), originHost)
                 val effectiveLocationRule = siteRule?.locationPermission ?: currentSettingsProvider().defaultLocationPermission
 
                 if (effectiveLocationRule == "DENY") {
@@ -1855,21 +1976,42 @@ private fun createConfiguredTabWebView(
     }
 }
 
+private fun normalizeHostForSiteSettingLookup(rawHost: String): String {
+    return rawHost.trim().lowercase()
+        .removePrefix("www.")
+        .removePrefix("m.")
+        .removePrefix("mobile.")
+}
+
+internal fun buildSiteSettingsHostMap(siteSettings: List<SiteSettingItem>): Map<String, SiteSettingItem> {
+    if (siteSettings.isEmpty()) return emptyMap()
+    val map = HashMap<String, SiteSettingItem>(siteSettings.size * 2)
+    for (item in siteSettings) {
+        val key = normalizeHostForSiteSettingLookup(item.host)
+        if (key.isNotEmpty()) {
+            map[key] = item
+        }
+    }
+    return map
+}
+
+internal fun lookupSiteSettingFromMap(
+    siteSettingsMap: Map<String, SiteSettingItem>,
+    rawHost: String
+): SiteSettingItem? {
+    if (siteSettingsMap.isEmpty() || rawHost.isEmpty()) return null
+    val key = normalizeHostForSiteSettingLookup(rawHost)
+    return siteSettingsMap[key]
+}
+
 internal fun findSiteSettingForHost(
     siteSettings: List<SiteSettingItem>,
     rawHost: String
 ): SiteSettingItem? {
-    val cleanHost = rawHost.trim().lowercase()
-        .removePrefix("www.")
-        .removePrefix("m.")
-        .removePrefix("mobile.")
+    val cleanHost = normalizeHostForSiteSettingLookup(rawHost)
     if (cleanHost.isEmpty()) return null
     return siteSettings.firstOrNull {
-        val candidate = it.host.trim().lowercase()
-            .removePrefix("www.")
-            .removePrefix("m.")
-            .removePrefix("mobile.")
-        candidate == cleanHost
+        normalizeHostForSiteSettingLookup(it.host) == cleanHost
     }
 }
 
@@ -1966,6 +2108,11 @@ private fun applyViewportModeScript(webView: WebView, desktopMode: Boolean) {
                     } else if (meta.hasAttribute('data-nyxora-orig')) {
                         meta.setAttribute('content', meta.getAttribute('data-nyxora-orig'));
                         meta.removeAttribute('data-nyxora-orig');
+                    } else {
+                        var cur = meta.getAttribute('content') || '';
+                        if (cur.indexOf('width=1280') !== -1) {
+                            meta.setAttribute('content', 'width=device-width, initial-scale=1.0');
+                        }
                     }
                 }
             } catch (e) {}

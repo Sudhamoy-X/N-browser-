@@ -37,9 +37,11 @@ import com.example.domain.browser.EncryptedBackupManager
 import com.example.domain.browser.InputClassification
 import com.example.domain.browser.ReaderArticle
 import com.example.domain.browser.UrlAndSearchHandler
+import com.example.domain.connect.IncomingRemoteSyncCommand
 import com.example.domain.connect.NyxoraConnectSecurity
 import com.example.domain.connect.NyxoraConnectSessionManager
 import com.example.domain.connect.RealtimeEventType
+import com.example.domain.connect.VideoCompatibilityState
 import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
@@ -199,8 +201,20 @@ class NyxoraBrowserViewModel(
     val downloadEngine: DownloadEngine
 ) : ViewModel() {
 
+    val settings: StateFlow<NyxoraSettingsState> = settingsDataStore.settingsFlow
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000L),
+            initialValue = NyxoraSettingsState()
+        )
+
     val connectManager: NyxoraConnectSessionManager = NyxoraConnectSessionManager(
-        scope = viewModelScope
+        scope = viewModelScope,
+        configuredEndpointProvider = {
+            settings.value.connectBackendEndpoint.ifBlank {
+                NyxoraConnectSecurity.configuredPublicWssEndpoint()
+            }
+        }
     )
 
     @Volatile
@@ -217,13 +231,6 @@ class NyxoraBrowserViewModel(
     private var hasOpenedPrivateWebPage: Boolean = false
 
     val currentUserId: String = "local_user"
-
-    val settings: StateFlow<NyxoraSettingsState> = settingsDataStore.settingsFlow
-        .stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5000L),
-            initialValue = NyxoraSettingsState()
-        )
 
     // Local-first Room flows — work 100% offline with zero account required
     val bookmarks: StateFlow<List<BookmarkItem>> = bookmarkDao.observeAllBookmarks()
@@ -360,6 +367,16 @@ class NyxoraBrowserViewModel(
             try {
                 val initialSettings = runCatching { settingsDataStore.settingsFlow.first() }
                     .getOrDefault(NyxoraSettingsState())
+                val defaultEndpoint = NyxoraConnectSecurity.configuredPublicWssEndpoint()
+                if (initialSettings.connectBackendEndpoint.isBlank() ||
+                    initialSettings.connectBackendEndpoint.equals(NyxoraConnectSecurity.LEGACY_PRODUCTION_WSS_ENDPOINT, ignoreCase = true)
+                ) {
+                    runCatching {
+                        settingsDataStore.updateSettings {
+                            it.copy(connectBackendEndpoint = defaultEndpoint)
+                        }
+                    }
+                }
                 if (!initialSettings.restoreTabsOnStartup) {
                     savedTabDao.clearAllSavedTabs()
                     return@launch
@@ -527,6 +544,28 @@ class NyxoraBrowserViewModel(
         }
     }
 
+    fun onParticipantRoomJoinConfirmed(cmd: IncomingRemoteSyncCommand.ParticipantJoinConfirmed) {
+        if (_activeOverlay.value == OverlaySheet.NYXORA_CONNECT) {
+            _activeOverlay.value = OverlaySheet.NONE
+        }
+        if (_isPrivateMode.value) return
+        isApplyingRemoteSyncNavigation = true
+        try {
+            navigateHome()
+            val pb = cmd.playbackState
+            if (pb != null) {
+                connectManager.updateVideoCompatibility(VideoCompatibilityState.COMPATIBLE_HTML5)
+                if (pb.pageUrl.isNotBlank()) {
+                    lastRemoteSyncedUrl = pb.pageUrl
+                }
+            } else {
+                connectManager.updateVideoCompatibility(VideoCompatibilityState.NO_VIDEO_DETECTED)
+            }
+        } finally {
+            isApplyingRemoteSyncNavigation = false
+        }
+    }
+
     fun openNewTabFromRemoteSync(url: String, title: String) {
         if (_isPrivateMode.value) return
         isApplyingRemoteSyncNavigation = true
@@ -646,10 +685,17 @@ class NyxoraBrowserViewModel(
     }
 
     fun onWebProgressChanged(tabId: String, progress: Int) {
+        val coerced = progress.coerceIn(0, 100)
+        val existing = _normalTabs.value.firstOrNull { it.id == tabId }
+            ?: _privateTabs.value.firstOrNull { it.id == tabId }
+        val nextLoading = coerced in 1..99 && existing?.pageErrorDescription == null
+        if (existing != null && existing.progress == coerced && existing.isLoading == nextLoading) {
+            return
+        }
         updateTab(tabId) { tab ->
             tab.copy(
-                progress = progress.coerceIn(0, 100),
-                isLoading = progress in 1..99 && tab.pageErrorDescription == null
+                progress = coerced,
+                isLoading = coerced in 1..99 && tab.pageErrorDescription == null
             )
         }
     }
@@ -1453,15 +1499,28 @@ class NyxoraBrowserViewModel(
      */
     fun suspendExcessInactiveTabs(forceAggressive: Boolean = false) {
         val maxKeepAlive = if (forceAggressive) 1 else 5
-        val currentActiveId = activeTab.value.id
+        val currentActiveNormalId = _activeNormalTabId.value
+        val currentActivePrivateId = _activePrivateTabId.value
         val splitId = _splitSecondaryTabId.value
         _normalTabs.update { list ->
             val sortedByRecent = list.sortedByDescending { it.lastActiveAtMillis }
-            val keepIds = sortedByRecent.take(maxKeepAlive).map { it.id }.toSet() + setOfNotNull(currentActiveId, splitId)
+            val keepIds = sortedByRecent.take(maxKeepAlive).map { it.id }.toSet() + setOfNotNull(currentActiveNormalId, splitId)
             list.map { tab ->
-                if (tab.id in keepIds) tab else tab.copy(isSuspended = true)
+                if (tab.id in keepIds) tab else tab.copy(isSuspended = true, isLoading = false)
             }
         }
+        _privateTabs.update { list ->
+            if (list.isEmpty()) list
+            else {
+                val sortedByRecent = list.sortedByDescending { it.lastActiveAtMillis }
+                val keepIds = sortedByRecent.take(maxKeepAlive).map { it.id }.toSet() + setOfNotNull(currentActivePrivateId, splitId)
+                list.map { tab ->
+                    if (tab.id in keepIds) tab else tab.copy(isSuspended = true, isLoading = false)
+                }
+            }
+        }
+        val totalSuspended = _normalTabs.value.count { it.isSuspended } + _privateTabs.value.count { it.isSuspended }
+        com.example.domain.browser.BrowserDiagnosticsEngine.updateSuspendedTabCount(totalSuspended)
         syncMultiTabState()
     }
 

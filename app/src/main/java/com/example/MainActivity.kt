@@ -129,7 +129,9 @@ class MainActivity : ComponentActivity() {
     @Suppress("DEPRECATION")
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
+        com.example.domain.browser.BrowserDiagnosticsEngine.onTrimMemory(level)
         if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+            com.example.domain.browser.FaviconCacheManager.trimMemory()
             val vm = activeBrowserViewModel
             vm?.suspendExcessInactiveTabs(forceAggressive = true)
             if (vm?.hasInitializedWebViewEngine == true && java.io.File("/dev/dri/renderD128").exists()) {

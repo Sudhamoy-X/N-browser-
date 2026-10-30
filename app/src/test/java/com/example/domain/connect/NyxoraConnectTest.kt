@@ -812,4 +812,631 @@ class NyxoraConnectTest {
             guestLocalRelay.stopServer()
         }
     }
+
+    @Test
+    fun `permanent backend configuration supports host room creation code-only participant joining non-existent room error and URL sync`() {
+        // 1. Verify permanent production WSS endpoint is configured as wss://n-browser.onrender.com/nyxora
+        assertEquals(
+            "wss://n-browser.onrender.com/nyxora",
+            NyxoraConnectSecurity.DEFAULT_PRODUCTION_WSS_ENDPOINT
+        )
+        assertEquals(
+            "wss://n-browser.onrender.com/nyxora",
+            NyxoraConnectSecurity.configuredPublicWssEndpoint()
+        )
+
+        val remoteRelay = NyxoraWebSocketRelayServer()
+        val remotePort = remoteRelay.startIfNeeded()
+        val remoteEndpoint = "ws://127.0.0.1:$remotePort/nyxora"
+
+        val hostManager = NyxoraConnectSessionManager(
+            scope = testScope,
+            localDeviceId = "code-host-device",
+            initialDeviceName = "Host Pixel 9",
+            sharedRelayServer = NyxoraWebSocketRelayServer(),
+            configuredEndpointProvider = { remoteEndpoint }
+        )
+        val participantManager = NyxoraConnectSessionManager(
+            scope = testScope,
+            localDeviceId = "code-participant-device",
+            initialDeviceName = "Participant Galaxy S24",
+            sharedRelayServer = NyxoraWebSocketRelayServer(),
+            configuredEndpointProvider = { remoteEndpoint }
+        )
+
+        val participantCommands = CopyOnWriteArrayList<IncomingRemoteSyncCommand>()
+        val collectJob = testScope.launch {
+            participantManager.remoteSyncCommands.collect { participantCommands.add(it) }
+        }
+
+        try {
+            // 2. Invalid room code rejected immediately on client
+            assertFalse(participantManager.joinRoom("INVALID-CODE"))
+            assertTrue(
+                participantManager.lastSyncError.value?.contains("Invalid Room Code", ignoreCase = true) == true
+            )
+
+            // 3. Valid format Room Code for a room that does not exist on the server -> rejected with clear error
+            assertTrue(participantManager.joinRoom("NYX-9B8C-7D6E"))
+            assertTrue(
+                "Non-existent room code must transition to DISCONNECTED with clear error",
+                awaitCondition {
+                    participantManager.connectionStatus.value == SyncConnectionStatus.DISCONNECTED &&
+                        participantManager.lastSyncError.value?.contains("does not exist", ignoreCase = true) == true
+                }
+            )
+
+            // 4. Host taps Create Room -> connects to configured backend and confirms room creation
+            val createdRoom = hostManager.createRoom(
+                mode = RoomSyncMode.BROWSE_TOGETHER,
+                initialUrl = "https://kotlinlang.org",
+                initialTitle = "Kotlin"
+            )
+            assertTrue(
+                "Host must transition to Connected only after server confirms room creation",
+                awaitCondition {
+                    hostManager.connectionStatus.value.isConnectedOrSynced &&
+                        hostManager.connectionStatus.value.label == "Connected"
+                }
+            )
+
+            // 5. Participant joins using ONLY the Room Code (or shared text containing the Room Code)
+            val sharedCodeMessage = "Join my NYXORA Room: ${createdRoom.roomId}"
+            assertTrue(participantManager.joinRoom(sharedCodeMessage))
+            assertTrue(
+                "Participant must join room using only the Room Code and display Connected",
+                awaitCondition {
+                    participantManager.connectionStatus.value.isConnectedOrSynced &&
+                        participantManager.connectionStatus.value.label == "Connected" &&
+                        hostManager.roomState.value?.members?.size == 2
+                }
+            )
+
+            // 6. Unified mode: Both video playback and URL navigation sync in the same room
+            participantCommands.clear()
+            assertTrue(
+                hostManager.publishPlaybackEvent(
+                    pageUrl = "https://kotlinlang.org",
+                    isPlaying = true,
+                    positionSeconds = 30.0,
+                    durationSeconds = 120.0
+                )
+            )
+            assertTrue(
+                "Participant must receive Host playback sync in unified room mode",
+                awaitCondition {
+                    participantCommands.any {
+                        it is IncomingRemoteSyncCommand.ApplyPlaybackState &&
+                            it.state.isPlaying &&
+                            it.state.positionSeconds >= 30.0
+                    }
+                }
+            )
+
+            // 7. URL synchronization works across code-joined devices
+            participantCommands.clear()
+            assertTrue(
+                hostManager.publishUrlNavigation(
+                    url = "https://developer.android.com/compose",
+                    title = "Jetpack Compose",
+                    isPrivateTab = false,
+                    isPrivateMode = false
+                )
+            )
+            assertTrue(
+                "Participant joined via Room Code must receive Host URL navigation",
+                awaitCondition {
+                    participantCommands.any {
+                        it is IncomingRemoteSyncCommand.NavigateToUrl &&
+                            it.url == "https://developer.android.com/compose"
+                    }
+                }
+            )
+
+            // 8. Reconnection after invite generation and network drop never triggers INVITE_UNAUTHORIZED
+            hostManager.generateShareableInviteLink()
+            hostManager.simulateNetworkInterruptionForReconnect()
+            participantManager.simulateNetworkInterruptionForReconnect()
+            assertTrue(
+                "Host and Participant must reconnect and restore Connected state without INVITE_UNAUTHORIZED",
+                awaitCondition(timeoutMs = 6000L) {
+                    hostManager.connectionStatus.value.isConnectedOrSynced &&
+                        participantManager.connectionStatus.value.isConnectedOrSynced &&
+                        hostManager.lastSyncError.value == null &&
+                        participantManager.lastSyncError.value == null &&
+                        hostManager.roomState.value?.members?.size == 2
+                }
+            )
+        } finally {
+            collectJob.cancel()
+            participantManager.leaveOrCloseRoom()
+            hostManager.leaveOrCloseRoom()
+            remoteRelay.stopServer()
+        }
+    }
+
+    @Test
+    fun `watch together playback controls synchronize play pause and 10s seeks and handle unsupported media and single join confirmation`() {
+        // 1. Verify WatchTogetherMediaBridge control calculations & JS result parsing
+        val noMediaAttempt = WatchTogetherMediaBridge.computeControlledPlaybackState(
+            currentRoomPlayback = null,
+            currentCompatibility = VideoCompatibilityState.NO_VIDEO_DETECTED,
+            shouldPlay = true,
+            seekDeltaSeconds = null
+        )
+        assertFalse("Play control must fail when no supported media is detected", noMediaAttempt.succeeded)
+        assertEquals(VideoCompatibilityState.NO_VIDEO_DETECTED, noMediaAttempt.compatibility)
+
+        val drmAttempt = WatchTogetherMediaBridge.computeControlledPlaybackState(
+            currentRoomPlayback = WatchTogetherPlaybackState(
+                pageUrl = "https://drm.example.com/movie",
+                isPlaying = true,
+                positionSeconds = 50.0,
+                durationSeconds = 300.0,
+                updatedAtMillis = 1000L,
+                updatedByDeviceId = "host-1",
+                sequenceNumber = 1L
+            ),
+            currentCompatibility = VideoCompatibilityState.DRM_PROTECTED_UNSUPPORTED,
+            shouldPlay = false,
+            seekDeltaSeconds = 10.0
+        )
+        assertFalse("Control must fail gracefully on DRM-protected media", drmAttempt.succeeded)
+        assertEquals(VideoCompatibilityState.DRM_PROTECTED_UNSUPPORTED, drmAttempt.compatibility)
+
+        val activePb = WatchTogetherPlaybackState(
+            pageUrl = "https://videos.example.org/watch",
+            isPlaying = true,
+            positionSeconds = 45.0,
+            durationSeconds = 120.0,
+            updatedAtMillis = 1000L,
+            updatedByDeviceId = "host-1",
+            sequenceNumber = 2L
+        )
+        val forward10 = WatchTogetherMediaBridge.computeControlledPlaybackState(
+            currentRoomPlayback = activePb,
+            currentCompatibility = VideoCompatibilityState.COMPATIBLE_HTML5,
+            shouldPlay = true,
+            seekDeltaSeconds = 10.0
+        )
+        assertTrue(forward10.succeeded)
+        assertEquals(55.0, forward10.positionSeconds, 0.01)
+
+        val rewind10 = WatchTogetherMediaBridge.computeControlledPlaybackState(
+            currentRoomPlayback = activePb.copy(positionSeconds = 55.0),
+            currentCompatibility = VideoCompatibilityState.COMPATIBLE_HTML5,
+            shouldPlay = true,
+            seekDeltaSeconds = -10.0
+        )
+        assertTrue(rewind10.succeeded)
+        assertEquals(45.0, rewind10.positionSeconds, 0.01)
+
+        val rewindClampZero = WatchTogetherMediaBridge.computeControlledPlaybackState(
+            currentRoomPlayback = activePb.copy(positionSeconds = 4.0),
+            currentCompatibility = VideoCompatibilityState.COMPATIBLE_HTML5,
+            shouldPlay = true,
+            seekDeltaSeconds = -10.0
+        )
+        assertTrue(rewindClampZero.succeeded)
+        assertEquals(0.0, rewindClampZero.positionSeconds, 0.01)
+
+        val parsedJsOk = WatchTogetherMediaBridge.parseControlActionResult(
+            """{"ok":true,"compat":"COMPATIBLE_HTML5","currentTime":62.5,"duration":180.0,"paused":false,"playbackRate":1.0}"""
+        )
+        assertNotNull(parsedJsOk)
+        assertTrue(parsedJsOk!!.succeeded)
+        assertTrue(parsedJsOk.isPlaying)
+        assertEquals(62.5, parsedJsOk.positionSeconds, 0.01)
+
+        val parsedJsDrm = WatchTogetherMediaBridge.parseControlActionResult(
+            """{"ok":false,"compat":"DRM_PROTECTED_UNSUPPORTED","reason":"DRM-protected video cannot be controlled"}"""
+        )
+        assertNotNull(parsedJsDrm)
+        assertFalse(parsedJsDrm!!.succeeded)
+        assertEquals(VideoCompatibilityState.DRM_PROTECTED_UNSUPPORTED, parsedJsDrm.compatibility)
+
+        // 2. Verify end-to-end WebSocket synchronization for ParticipantJoinConfirmed and Watch Together controls
+        val hostManager = NyxoraConnectSessionManager(
+            scope = testScope,
+            localDeviceId = "wt-host-1",
+            initialDeviceName = "Host Device",
+            sharedRelayServer = relayServer
+        )
+        val participantManager = NyxoraConnectSessionManager(
+            scope = testScope,
+            localDeviceId = "wt-part-2",
+            initialDeviceName = "Participant Device",
+            sharedRelayServer = relayServer
+        )
+
+        val hostCommands = CopyOnWriteArrayList<IncomingRemoteSyncCommand>()
+        val partCommands = CopyOnWriteArrayList<IncomingRemoteSyncCommand>()
+        val hostJob = testScope.launch {
+            hostManager.remoteSyncCommands.collect { hostCommands.add(it) }
+        }
+        val partJob = testScope.launch {
+            participantManager.remoteSyncCommands.collect { partCommands.add(it) }
+        }
+
+        try {
+            val room = hostManager.createRoom(
+                roomName = "Watch Together Room",
+                mode = RoomSyncMode.BROWSE_TOGETHER
+            )
+            assertTrue(awaitCondition { hostManager.connectionStatus.value == SyncConnectionStatus.SYNCED })
+
+            // Host initially has no supported video detected -> publishPlaybackEvent must return false
+            hostManager.updateVideoCompatibility(VideoCompatibilityState.NO_VIDEO_DETECTED)
+            assertFalse(
+                "publishPlaybackEvent must fail when no supported video is detected",
+                hostManager.publishPlaybackEvent(
+                    pageUrl = "https://example.com/article",
+                    isPlaying = true,
+                    positionSeconds = 10.0,
+                    durationSeconds = 0.0
+                )
+            )
+
+            // Host detects DRM-protected media -> publishPlaybackEvent must return false
+            hostManager.updateVideoCompatibility(VideoCompatibilityState.DRM_PROTECTED_UNSUPPORTED)
+            assertFalse(
+                "publishPlaybackEvent must fail on DRM-protected media",
+                hostManager.publishPlaybackEvent(
+                    pageUrl = "https://example.com/drm",
+                    isPlaying = true,
+                    positionSeconds = 10.0,
+                    durationSeconds = 100.0
+                )
+            )
+
+            // Participant joins room -> receives ParticipantJoinConfirmed strictly once on JOIN_ACCEPTED
+            assertTrue(participantManager.joinRoom(room.roomId))
+            assertTrue(
+                awaitCondition {
+                    participantManager.connectionStatus.value == SyncConnectionStatus.SYNCED &&
+                        partCommands.count { it is IncomingRemoteSyncCommand.ParticipantJoinConfirmed } == 1
+                }
+            )
+            val joinConfirmed = partCommands.filterIsInstance<IncomingRemoteSyncCommand.ParticipantJoinConfirmed>().single()
+            assertEquals(room.roomId, joinConfirmed.roomId)
+            assertNull("Host is not playing media yet, so initial playbackState is null", joinConfirmed.playbackState)
+
+            // Host starts HTML5 video playback at 25.0s -> Participant receives playback state
+            hostManager.updateVideoCompatibility(VideoCompatibilityState.COMPATIBLE_HTML5)
+            partCommands.clear()
+            assertTrue(
+                hostManager.publishPlaybackEvent(
+                    pageUrl = "https://example.com/video.mp4",
+                    isPlaying = true,
+                    positionSeconds = 25.0,
+                    durationSeconds = 200.0
+                )
+            )
+            assertTrue(
+                awaitCondition {
+                    partCommands.any {
+                        it is IncomingRemoteSyncCommand.ApplyPlaybackState &&
+                            it.state.isPlaying &&
+                            kotlin.math.abs(it.state.positionSeconds - 25.0) < 0.1
+                    }
+                }
+            )
+
+            // Participant skips forward 10 seconds (25.0s -> 35.0s) -> Host receives synchronized seek position
+            participantManager.updateVideoCompatibility(VideoCompatibilityState.COMPATIBLE_HTML5)
+            hostCommands.clear()
+            assertTrue(
+                participantManager.publishPlaybackEvent(
+                    pageUrl = "https://example.com/video.mp4",
+                    isPlaying = true,
+                    positionSeconds = 35.0,
+                    durationSeconds = 200.0
+                )
+            )
+            assertTrue(
+                "Host must receive Participant's +10s seek position",
+                awaitCondition {
+                    hostCommands.any {
+                        it is IncomingRemoteSyncCommand.ApplyPlaybackState &&
+                            it.state.isPlaying &&
+                            kotlin.math.abs(it.state.positionSeconds - 35.0) < 0.1
+                    } && kotlin.math.abs((hostManager.roomState.value?.playbackState?.positionSeconds ?: 0.0) - 35.0) < 0.1
+                }
+            )
+
+            // Host skips backward 10 seconds (35.0s -> 25.0s) and pauses -> Participant receives updated state
+            partCommands.clear()
+            assertTrue(
+                hostManager.publishPlaybackEvent(
+                    pageUrl = "https://example.com/video.mp4",
+                    isPlaying = false,
+                    positionSeconds = 25.0,
+                    durationSeconds = 200.0
+                )
+            )
+            assertTrue(
+                "Participant must receive Host's -10s seek and Pause action",
+                awaitCondition {
+                    partCommands.any {
+                        it is IncomingRemoteSyncCommand.ApplyPlaybackState &&
+                            !it.state.isPlaying &&
+                            kotlin.math.abs(it.state.positionSeconds - 25.0) < 0.1
+                    }
+                }
+            )
+
+            // Simulate Participant network drop and reconnect -> verify NO duplicate ParticipantJoinConfirmed is emitted
+            partCommands.clear()
+            participantManager.simulateNetworkInterruptionForReconnect()
+            assertTrue(
+                awaitCondition(timeoutMs = 6000L) {
+                    participantManager.connectionStatus.value == SyncConnectionStatus.SYNCED
+                }
+            )
+            assertEquals(
+                "Reconnect must never emit duplicate ParticipantJoinConfirmed events",
+                0,
+                partCommands.count { it is IncomingRemoteSyncCommand.ParticipantJoinConfirmed }
+            )
+        } finally {
+            hostJob.cancel()
+            partJob.cancel()
+            participantManager.leaveOrCloseRoom()
+            hostManager.leaveOrCloseRoom()
+        }
+    }
+
+    @Test
+    fun `realtime chat synchronization secret redaction equal participant controls and host permission switch`() {
+        val hostManager = NyxoraConnectSessionManager(
+            scope = testScope,
+            localDeviceId = "chat-host-1",
+            initialDeviceName = "Host Device",
+            sharedRelayServer = relayServer
+        )
+        val participantManager = NyxoraConnectSessionManager(
+            scope = testScope,
+            localDeviceId = "chat-part-2",
+            initialDeviceName = "Participant Device",
+            sharedRelayServer = relayServer
+        )
+
+        val hostCommands = CopyOnWriteArrayList<IncomingRemoteSyncCommand>()
+        val partCommands = CopyOnWriteArrayList<IncomingRemoteSyncCommand>()
+        val hostJob = testScope.launch {
+            hostManager.remoteSyncCommands.collect { hostCommands.add(it) }
+        }
+        val partJob = testScope.launch {
+            participantManager.remoteSyncCommands.collect { partCommands.add(it) }
+        }
+
+        try {
+            val room = hostManager.createRoom(
+                roomName = "Equal Controls & Chat Room",
+                mode = RoomSyncMode.BROWSE_TOGETHER
+            )
+            assertTrue(awaitCondition { hostManager.connectionStatus.value == SyncConnectionStatus.SYNCED })
+            assertTrue(
+                "Allow Participant Controls must be enabled by default when a room is created",
+                hostManager.roomState.value?.permissions?.allowParticipantControls == true
+            )
+
+            assertTrue(participantManager.joinRoom(room.roomId))
+            assertTrue(
+                awaitCondition {
+                    participantManager.connectionStatus.value == SyncConnectionStatus.SYNCED &&
+                        (hostManager.roomState.value?.members?.size ?: 0) == 2
+                }
+            )
+            assertTrue(
+                "Participant must see Allow Participant Controls enabled by default",
+                participantManager.roomState.value?.permissions?.allowParticipantControls == true
+            )
+            assertNull(participantManager.participantControlsDisabledNotice.value)
+
+            // 1. Real-time Chat between Host and Participant + unread count + secret redaction
+            val inviteLink = hostManager.generateShareableInviteLink()
+            assertTrue(inviteLink.isNotBlank())
+            val secretRoomKey = room.accessKey
+            assertTrue(
+                participantManager.sendChatMessage(
+                    "Hello from Participant! Key=$secretRoomKey link=$inviteLink"
+                )
+            )
+            assertTrue(
+                awaitCondition {
+                    hostManager.chatMessages.value.size == 1 &&
+                        participantManager.chatMessages.value.size == 1
+                }
+            )
+            val hostReceivedChat = hostManager.chatMessages.value.single()
+            assertEquals("Participant Device", hostReceivedChat.senderName)
+            assertTrue(hostReceivedChat.text.contains("Hello from Participant!"))
+            assertFalse(
+                "Chat messages must never expose room access keys",
+                hostReceivedChat.text.contains(secretRoomKey)
+            )
+            assertFalse(
+                "Chat messages must never expose invitation tokens",
+                hostReceivedChat.text.contains("inv=INV")
+            )
+            assertEquals(
+                "Unread chat count must increment when chat overlay is collapsed",
+                1,
+                hostManager.unreadChatCount.value
+            )
+
+            // Opening the chat overlay clears unread count
+            hostManager.setChatOverlayExpanded(true)
+            assertEquals(0, hostManager.unreadChatCount.value)
+            assertTrue(hostManager.isChatOverlayExpanded.value)
+
+            // Host replies in real time
+            assertTrue(hostManager.sendChatMessage("Welcome to the room!"))
+            assertTrue(
+                awaitCondition {
+                    participantManager.chatMessages.value.size == 2 &&
+                        hostManager.chatMessages.value.size == 2
+                }
+            )
+            assertEquals("Welcome to the room!", participantManager.chatMessages.value.last().text)
+
+            // Verify diagnostic logs never expose raw access keys or invite tokens
+            val combinedLogs = (hostManager.diagnosticLogs.value + participantManager.diagnosticLogs.value).joinToString("\n")
+            assertFalse("Logs must never expose raw room access key", combinedLogs.contains(secretRoomKey))
+
+            // 2. Equal Controls by Default: Participant can search/navigate, open new pages, and control playback
+            hostCommands.clear()
+            assertTrue(
+                participantManager.publishUrlNavigation(
+                    url = "https://developer.android.com/jetpack/compose",
+                    title = "Jetpack Compose",
+                    isPrivateTab = false,
+                    isPrivateMode = false,
+                    eventType = RealtimeEventType.NAVIGATE_URL
+                )
+            )
+            assertTrue(
+                awaitCondition {
+                    hostCommands.any {
+                        it is IncomingRemoteSyncCommand.NavigateToUrl &&
+                            it.url == "https://developer.android.com/jetpack/compose"
+                    }
+                }
+            )
+
+            hostCommands.clear()
+            assertTrue(
+                participantManager.publishUrlNavigation(
+                    url = "https://kotlinlang.org/docs/home.html",
+                    title = "Kotlin Docs",
+                    isPrivateTab = false,
+                    isPrivateMode = false,
+                    eventType = RealtimeEventType.NEW_PAGE_OPENED
+                )
+            )
+            assertTrue(
+                "Newly opened pages by Participant must synchronize to Host when shared controls are enabled",
+                awaitCondition {
+                    hostCommands.any {
+                        it is IncomingRemoteSyncCommand.OpenNewSyncedTab &&
+                            it.url == "https://kotlinlang.org/docs/home.html"
+                    }
+                }
+            )
+
+            // 3. Host disables Allow Participant Controls -> enforced immediately on client and server
+            hostManager.setAllowParticipantControls(false)
+            assertTrue(
+                awaitCondition {
+                    participantManager.roomState.value?.permissions?.allowParticipantControls == false &&
+                        !participantManager.participantControlsDisabledNotice.value.isNullOrBlank()
+                }
+            )
+
+            // Participant attempts navigation and playback control -> blocked on client with clear notice
+            hostCommands.clear()
+            assertFalse(
+                "Participant navigation must be blocked when Host disables Allow Participant Controls",
+                participantManager.publishUrlNavigation(
+                    url = "https://unauthorized.example.com",
+                    title = "Unauthorized",
+                    isPrivateTab = false,
+                    isPrivateMode = false
+                )
+            )
+            participantManager.updateVideoCompatibility(VideoCompatibilityState.COMPATIBLE_HTML5)
+            assertFalse(
+                "Participant playback control must be blocked when Host disables Allow Participant Controls",
+                participantManager.publishPlaybackEvent(
+                    pageUrl = "https://example.com/video.mp4",
+                    isPlaying = true,
+                    positionSeconds = 50.0,
+                    durationSeconds = 120.0
+                )
+            )
+            assertNotNull(participantManager.participantControlsDisabledNotice.value)
+
+            // Even if a participant client bypasses local checks and sends a signed NAVIGATE_URL frame directly,
+            // the server enforces Allow Participant Controls and responds with PERMISSION_DENIED.
+            assertTrue(
+                participantManager.sendControlFrameBypassingClientCheckForTest(
+                    type = RealtimeEventType.NAVIGATE_URL,
+                    payloadJson = """{"url":"https://bypass-attempt.example.com","title":"Bypass"}"""
+                )
+            )
+            assertTrue(
+                awaitCondition {
+                    participantManager.diagnosticLogs.value.any { it.contains("PERMISSION_DENIED") }
+                }
+            )
+            assertNotEquals(
+                "Server must reject unauthorized participant URL change",
+                "https://bypass-attempt.example.com",
+                hostManager.roomState.value?.currentSyncedUrl
+            )
+
+            // Meanwhile, Host can still control shared navigation and playback
+            partCommands.clear()
+            assertTrue(
+                hostManager.publishUrlNavigation(
+                    url = "https://host-controlled.example.com/page",
+                    title = "Host Controlled",
+                    isPrivateTab = false,
+                    isPrivateMode = false
+                )
+            )
+            assertTrue(
+                awaitCondition {
+                    partCommands.any {
+                        it is IncomingRemoteSyncCommand.NavigateToUrl &&
+                            it.url == "https://host-controlled.example.com/page"
+                    }
+                }
+            )
+
+            // 4. Host re-enables Allow Participant Controls -> restored immediately without reconnecting
+            hostManager.setAllowParticipantControls(true)
+            assertTrue(
+                awaitCondition {
+                    participantManager.roomState.value?.permissions?.allowParticipantControls == true &&
+                        participantManager.participantControlsDisabledNotice.value == null
+                }
+            )
+
+            hostCommands.clear()
+            assertTrue(
+                "Participant controls must work immediately after Host re-enables Allow Participant Controls without reconnecting",
+                participantManager.publishUrlNavigation(
+                    url = "https://restored-participant.example.com/page",
+                    title = "Restored Participant",
+                    isPrivateTab = false,
+                    isPrivateMode = false
+                )
+            )
+            assertTrue(
+                awaitCondition {
+                    hostCommands.any {
+                        it is IncomingRemoteSyncCommand.NavigateToUrl &&
+                            it.url == "https://restored-participant.example.com/page"
+                    }
+                }
+            )
+
+            // 5. Leaving the room automatically clears chat overlay state and messages
+            participantManager.setChatOverlayExpanded(true)
+            participantManager.leaveOrCloseRoom()
+            assertFalse(participantManager.isInRoom)
+            assertFalse(participantManager.isChatOverlayExpanded.value)
+            assertTrue(participantManager.chatMessages.value.isEmpty())
+            assertEquals(0, participantManager.unreadChatCount.value)
+        } finally {
+            hostJob.cancel()
+            partJob.cancel()
+            participantManager.leaveOrCloseRoom()
+            hostManager.leaveOrCloseRoom()
+        }
+    }
 }
+
+

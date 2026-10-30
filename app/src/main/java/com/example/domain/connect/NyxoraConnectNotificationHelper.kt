@@ -74,7 +74,7 @@ object NyxoraConnectNotificationHelper {
 
         val notification = NotificationCompat.Builder(appContext, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle("${roomState.mode.label} • ${connectionStatus.label}")
+            .setContentTitle("Room Sync • ${connectionStatus.label}")
             .setContentText(statusSummary)
             .setSubText(roomState.roomId)
             .setOngoing(
