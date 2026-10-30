@@ -153,11 +153,11 @@ fun NyxoraHomePage(
             contentPadding = PaddingValues(
                 start = 24.dp,
                 end = 24.dp,
-                top = if (hasShortcutsData) 48.dp else 88.dp,
-                bottom = 28.dp
+                top = if (hasShortcutsData || settings.showHomeNewsFeed) 20.dp else 72.dp,
+                bottom = 24.dp
             ),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(18.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             // 1. Center Area: Balanced NYXORA Logo
             item {
@@ -298,7 +298,7 @@ fun NyxoraHomePage(
                         onMoveShortcut = onMoveShortcut
                     )
                 }
-            } else {
+            } else if (shortcutsAllowed) {
                 // 4. Clear, useful empty state for new users when no shortcut data exists yet
                 item {
                     HomeCleanEmptyState(
@@ -310,10 +310,18 @@ fun NyxoraHomePage(
 
             // 5. Understated Creator Branding: CRAFTED BY SUDHAMOY
             item {
-                Spacer(modifier = Modifier.height(8.dp))
                 com.example.ui.components.NyxoraCreatorSignature(
                     textTestTag = "home_creator_credit"
                 )
+            }
+
+            // 6. Optional Minimal News Feed (ON by default, independently controllable in Settings > Appearance)
+            if (settings.showHomeNewsFeed && !isPrivateMode) {
+                item {
+                    HomeCuratedNewsFeedSection(
+                        onNavigateToUrl = onNavigateToUrl
+                    )
+                }
             }
         }
     }
@@ -891,4 +899,85 @@ private fun NyxoraMinimalHomeWallpaper(style: String = "AURORA_BLUE") {
         )
     }
 }
+
+private data class HomeNewsFeedEntry(
+    val id: String,
+    val source: String,
+    val title: String,
+    val url: String
+)
+
+private val CURATED_HOME_NEWS_ITEMS = listOf(
+    HomeNewsFeedEntry(
+        id = "android_dev",
+        source = "Android Developers",
+        title = "Modern Android Architecture, Jetpack Compose & WebView Engineering",
+        url = "https://developer.android.com/jetpack/compose"
+    ),
+    HomeNewsFeedEntry(
+        id = "mdn_web",
+        source = "MDN Web Docs",
+        title = "Web Standards, HTML5 Media APIs & Modern Browser Security",
+        url = "https://developer.mozilla.org/en-US/docs/Web"
+    ),
+    HomeNewsFeedEntry(
+        id = "kotlin_blog",
+        source = "Kotlin Official",
+        title = "Kotlin Coroutines, Structured Concurrency & Multiplatform Updates",
+        url = "https://kotlinlang.org/docs/coroutines-overview.html"
+    )
+)
+
+@Composable
+private fun HomeCuratedNewsFeedSection(
+    onNavigateToUrl: (String) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("home_news_feed_section"),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            text = "Web & Tech Feed",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        for (item in CURATED_HOME_NEWS_ITEMS) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(
+                        width = 1.dp,
+                        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.55f),
+                        shape = RoundedCornerShape(14.dp)
+                    )
+                    .clip(RoundedCornerShape(14.dp))
+                    .clickable { onNavigateToUrl(item.url) }
+                    .testTag("home_news_item_${item.id}"),
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surface
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    Text(
+                        text = item.source,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = item.title,
+                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+    }
+}
+
 

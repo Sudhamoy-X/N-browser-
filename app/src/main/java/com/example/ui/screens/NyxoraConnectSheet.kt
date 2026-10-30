@@ -1015,7 +1015,7 @@ private fun NyxoraConnectSimpleActiveRoom(
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("connect_compact_action_row"),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         OutlinedButton(
@@ -1030,7 +1030,7 @@ private fun NyxoraConnectSimpleActiveRoom(
                                 containerColor = NyxoraElectricBlue.copy(alpha = 0.12f),
                                 contentColor = NyxoraElectricBlue
                             ),
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp),
                             modifier = Modifier
                                 .weight(1f)
                                 .height(48.dp)
@@ -1040,13 +1040,14 @@ private fun NyxoraConnectSimpleActiveRoom(
                             Icon(
                                 imageVector = Icons.Outlined.ContentCopy,
                                 contentDescription = null,
-                                modifier = Modifier.size(16.dp)
+                                modifier = Modifier.size(15.dp)
                             )
-                            Spacer(Modifier.width(5.dp))
+                            Spacer(Modifier.width(4.dp))
                             Text(
                                 text = "Copy Code",
                                 style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
                                 maxLines = 1,
+                                softWrap = false,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
@@ -1076,7 +1077,7 @@ private fun NyxoraConnectSimpleActiveRoom(
                                 containerColor = NyxoraElectricBlue.copy(alpha = 0.12f),
                                 contentColor = NyxoraElectricBlue
                             ),
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp),
                             modifier = Modifier
                                 .weight(1f)
                                 .height(48.dp)
@@ -1086,13 +1087,14 @@ private fun NyxoraConnectSimpleActiveRoom(
                             Icon(
                                 imageVector = Icons.Outlined.Share,
                                 contentDescription = null,
-                                modifier = Modifier.size(16.dp)
+                                modifier = Modifier.size(15.dp)
                             )
-                            Spacer(Modifier.width(5.dp))
+                            Spacer(Modifier.width(4.dp))
                             Text(
                                 text = "Share Code",
                                 style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
                                 maxLines = 1,
+                                softWrap = false,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
@@ -1105,7 +1107,7 @@ private fun NyxoraConnectSimpleActiveRoom(
                                 containerColor = NyxoraDangerRed.copy(alpha = 0.12f),
                                 contentColor = NyxoraDangerRed
                             ),
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp),
                             modifier = Modifier
                                 .weight(1f)
                                 .height(48.dp)
@@ -1115,13 +1117,14 @@ private fun NyxoraConnectSimpleActiveRoom(
                             Icon(
                                 imageVector = Icons.Outlined.Close,
                                 contentDescription = null,
-                                modifier = Modifier.size(16.dp)
+                                modifier = Modifier.size(15.dp)
                             )
-                            Spacer(Modifier.width(5.dp))
+                            Spacer(Modifier.width(4.dp))
                             Text(
                                 text = "Leave Room",
                                 style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
                                 maxLines = 1,
+                                softWrap = false,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }

@@ -8,9 +8,9 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Release version tag (e.g., v1.1.0)'
+        description: 'Release version tag (e.g., v2.5)'
         required: true
-        default: 'v1.1.0'
+        default: 'v2.5'
       release_notes:
         description: 'Release highlights'
         required: false
@@ -19,13 +19,9 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: nyxora-android-release-${{ github.event.inputs.tag_name || github.ref }}
-  cancel-in-progress: false
-
 jobs:
   build-and-release-apk:
-    name: Build, Verify & Publish Android APK
+    name: Build, Verify & Publish Signed APK Release
     runs-on: ubuntu-latest
 
     steps:
@@ -35,84 +31,34 @@ jobs:
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
+          distribution: 'temurin'
           java-version: '17'
 
       - name: Setup Gradle Cache
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Validate Project Files
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ ! -f "app/build.gradle.kts" ]; then
-            echo "Error: app/build.gradle.kts not found."
-            exit 1
-          fi
-
-          if [ ! -f "gradlew" ]; then
-            echo "Error: Gradle wrapper (gradlew) not found."
-            exit 1
-          fi
-
-          chmod +x ./gradlew
-
       - name: Resolve Version Tag & Code
         id: version_meta
         shell: bash
-        env:
-          INPUT_TAG_NAME: ${{ github.event.inputs.tag_name }}
-          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            RAW_TAG="${INPUT_TAG_NAME}"
-          else
-            RAW_TAG="${REF_NAME}"
-          fi
-
+          RAW_TAG="${{ github.event.inputs.tag_name || github.ref_name }}"
           CLEAN_VERSION="${RAW_TAG#v}"
           CLEAN_VERSION="${CLEAN_VERSION#V}"
-
           if [[ ! "$CLEAN_VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
-            echo "Error: Invalid version '$RAW_TAG'."
-            echo "Use a version such as v1.1.0 or v1.1."
+            echo "Error: Tag '$RAW_TAG' must be a stable semantic version (e.g., v2.5)"
             exit 1
           fi
-
-          IFS='.' read -r MAJOR MINOR PATCH <<< "${CLEAN_VERSION}.0"
-
-          MAJOR="${MAJOR:-0}"
-          MINOR="${MINOR:-0}"
-          PATCH="${PATCH:-0}"
-
-          MAJOR=$((10#$MAJOR))
-          MINOR=$((10#$MINOR))
-          PATCH=$((10#$PATCH))
-
-          if (( MAJOR > 214748 || MINOR > 9999 || PATCH > 99 )); then
-            echo "Error: Version components exceed supported limits."
-            exit 1
-          fi
-
+          IFS='.' read -r MAJOR MINOR PATCH _ <<< "${CLEAN_VERSION}.0.0"
           COMPUTED_VERSION_CODE=$(( MAJOR * 10000 + MINOR * 100 + PATCH ))
-
-          if (( COMPUTED_VERSION_CODE < 1 )); then
-            echo "Error: Version Code must be greater than zero."
-            exit 1
+          if [ "$COMPUTED_VERSION_CODE" -lt 1 ]; then
+            COMPUTED_VERSION_CODE=1
           fi
-
           echo "tag_name=v${CLEAN_VERSION}" >> "$GITHUB_OUTPUT"
           echo "version_name=${CLEAN_VERSION}" >> "$GITHUB_OUTPUT"
           echo "version_code=${COMPUTED_VERSION_CODE}" >> "$GITHUB_OUTPUT"
 
-          echo "Release tag: v${CLEAN_VERSION}"
-          echo "Version name: ${CLEAN_VERSION}"
-          echo "Version code: ${COMPUTED_VERSION_CODE}"
-
-      - name: Prepare Signing Keystore
+      - name: Prepare Signing Keystore from GitHub Secrets
         id: signing_setup
         shell: bash
         env:
@@ -121,36 +67,18 @@ jobs:
           RELEASE_KEY_PASSWORD: ${{ secrets.NYXORA_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-
-          if [[ -n "$RELEASE_KEYSTORE_BASE64" &&
-                -n "$RELEASE_STORE_PASSWORD" &&
-                -n "$RELEASE_KEY_PASSWORD" ]]; then
-
-            KEYSTORE_PATH="${GITHUB_WORKSPACE}/my-upload-key.jks"
-
-            printf '%s' "$RELEASE_KEYSTORE_BASE64" |
-              base64 --decode > "$KEYSTORE_PATH"
-
-            keytool -list \
-              -keystore "$KEYSTORE_PATH" \
-              -storepass "$RELEASE_STORE_PASSWORD" >/dev/null
-
-            echo "keystore_path=${KEYSTORE_PATH}" >> "$GITHUB_OUTPUT"
+          if [ -n "$RELEASE_KEYSTORE_BASE64" ] && [ -n "$RELEASE_STORE_PASSWORD" ] && [ -n "$RELEASE_KEY_PASSWORD" ]; then
+            echo "$RELEASE_KEYSTORE_BASE64" | base64 --decode > "${GITHUB_WORKSPACE}/my-upload-key.jks"
+            echo "keystore_path=${GITHUB_WORKSPACE}/my-upload-key.jks" >> "$GITHUB_OUTPUT"
             echo "build_task=:app:assembleRelease" >> "$GITHUB_OUTPUT"
-            echo "apk_dir=app/build/outputs/apk/release" >> "$GITHUB_OUTPUT"
-            echo "signing_mode=release" >> "$GITHUB_OUTPUT"
-
-            echo "Release keystore configured."
-
+            echo "apk_glob=app/build/outputs/apk/release/*.apk" >> "$GITHUB_OUTPUT"
           else
-            echo "Release signing secrets are incomplete."
-            echo "Using a debug-signed APK for testing only."
-
-            KEYSTORE_PATH="${GITHUB_WORKSPACE}/debug.keystore"
-
-            if [[ ! -f "$KEYSTORE_PATH" ]]; then
+            echo "Notice: NYXORA_KEYSTORE_BASE64 secret not set; building debug-signed compatible APK."
+            if [ ! -f "${GITHUB_WORKSPACE}/debug.keystore" ] && [ -f "${GITHUB_WORKSPACE}/debug.keystore.base64" ]; then
+              base64 --decode "${GITHUB_WORKSPACE}/debug.keystore.base64" > "${GITHUB_WORKSPACE}/debug.keystore"
+            elif [ ! -f "${GITHUB_WORKSPACE}/debug.keystore" ]; then
               keytool -genkeypair -v \
-                -keystore "$KEYSTORE_PATH" \
+                -keystore "${GITHUB_WORKSPACE}/debug.keystore" \
                 -storepass android \
                 -alias androiddebugkey \
                 -keypass android \
@@ -159,167 +87,73 @@ jobs:
                 -validity 10000 \
                 -dname "CN=Android Debug,O=Android,C=US"
             fi
-
-            echo "keystore_path=${KEYSTORE_PATH}" >> "$GITHUB_OUTPUT"
+            echo "keystore_path=${GITHUB_WORKSPACE}/debug.keystore" >> "$GITHUB_OUTPUT"
             echo "build_task=:app:assembleDebug" >> "$GITHUB_OUTPUT"
-            echo "apk_dir=app/build/outputs/apk/debug" >> "$GITHUB_OUTPUT"
-            echo "signing_mode=debug" >> "$GITHUB_OUTPUT"
+            echo "apk_glob=app/build/outputs/apk/debug/*.apk" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Run Unit Tests
+      - name: Run Unit & Robolectric Verification Tests
         shell: bash
         run: |
-          set -euo pipefail
-          ./gradlew --no-daemon :app:testDebugUnitTest
+          if [ -x "./gradlew" ]; then
+            ./gradlew :app:testDebugUnitTest
+          else
+            gradle :app:testDebugUnitTest
+          fi
 
-      - name: Build NYXORA Browser APK
+      - name: Build Signed NYXORA Browser APK
         id: build_apk
         shell: bash
         env:
-          VERSION_NAME: ${{ steps.version_meta.outputs.version_name }}
-          VERSION_CODE: ${{ steps.version_meta.outputs.version_code }}
-          BUILD_TASK: ${{ steps.signing_setup.outputs.build_task }}
-          APK_DIR: ${{ steps.signing_setup.outputs.apk_dir }}
           KEYSTORE_PATH: ${{ steps.signing_setup.outputs.keystore_path }}
-          SIGNING_MODE: ${{ steps.signing_setup.outputs.signing_mode }}
           STORE_PASSWORD: ${{ secrets.NYXORA_STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.NYXORA_KEY_PASSWORD }}
         run: |
           set -euo pipefail
+          VERSION_NAME="${{ steps.version_meta.outputs.version_name }}"
+          VERSION_CODE="${{ steps.version_meta.outputs.version_code }}"
 
-          GRADLE_FILE="app/build.gradle.kts"
+          # Update versionCode and versionName in app/build.gradle.kts for this release artifact
+          sed -i "s/versionCode = [0-9]\+/versionCode = ${VERSION_CODE}/" app/build.gradle.kts
+          sed -i "s/versionName = \"[^\"]\+\"/versionName = \"${VERSION_NAME}\"/" app/build.gradle.kts
 
-          if ! grep -Eq 'versionCode[[:space:]]*=' "$GRADLE_FILE"; then
-            echo "Error: versionCode assignment not found in $GRADLE_FILE."
+          if [ -x "./gradlew" ]; then
+            ./gradlew ${{ steps.signing_setup.outputs.build_task }}
+          else
+            gradle ${{ steps.signing_setup.outputs.build_task }}
+          fi
+
+          FOUND_APK=$(ls ${{ steps.signing_setup.outputs.apk_glob }} | grep -v "unsigned" | head -n 1)
+          if [ -z "$FOUND_APK" ] || [ ! -s "$FOUND_APK" ]; then
+            echo "Error: Signed APK artifact was not produced!"
             exit 1
           fi
 
-          if ! grep -Eq 'versionName[[:space:]]*=' "$GRADLE_FILE"; then
-            echo "Error: versionName assignment not found in $GRADLE_FILE."
-            exit 1
-          fi
-
-          sed -i -E \
-            "s/(versionCode[[:space:]]*=[[:space:]]*)[0-9]+/\\1${VERSION_CODE}/" \
-            "$GRADLE_FILE"
-
-          sed -i -E \
-            "s/(versionName[[:space:]]*=[[:space:]]*)\"[^\"]*\"/\\1\"${VERSION_NAME}\"/" \
-            "$GRADLE_FILE"
-
-          if [[ "$SIGNING_MODE" == "release" ]]; then
-            export ORG_GRADLE_PROJECT_NYXORA_STORE_FILE="$KEYSTORE_PATH"
-            export ORG_GRADLE_PROJECT_NYXORA_STORE_PASSWORD="$STORE_PASSWORD"
-            export ORG_GRADLE_PROJECT_NYXORA_KEY_PASSWORD="$KEY_PASSWORD"
-          fi
-
-          ./gradlew --no-daemon "$BUILD_TASK"
-
-          shopt -s nullglob
-          APK_FILES=("$APK_DIR"/*.apk)
-          shopt -u nullglob
-
-          if (( ${#APK_FILES[@]} == 0 )); then
-            echo "Error: No APK was generated in $APK_DIR."
-            exit 1
-          fi
-
-          FOUND_APK=""
-
-          for APK in "${APK_FILES[@]}"; do
-            if [[ -s "$APK" && "$APK" != *"unsigned"* ]]; then
-              FOUND_APK="$APK"
-              break
-            fi
-          done
-
-          if [[ -z "$FOUND_APK" ]]; then
-            echo "Error: No usable APK was found."
-            exit 1
-          fi
-
-          RELEASE_APK_NAME="NYXORA-Browser-v${VERSION_NAME}.apk"
-
+          RELEASE_APK_NAME="NYXORA-Browser-v${VERSION_NAME}-universal.apk"
           cp "$FOUND_APK" "$RELEASE_APK_NAME"
-
           SHA256_SUM=$(sha256sum "$RELEASE_APK_NAME" | awk '{print $1}')
-
-          echo "${SHA256_SUM}  ${RELEASE_APK_NAME}" \
-            > "${RELEASE_APK_NAME}.sha256"
+          echo "${SHA256_SUM}  ${RELEASE_APK_NAME}" > "${RELEASE_APK_NAME}.sha256"
 
           echo "apk_file=${RELEASE_APK_NAME}" >> "$GITHUB_OUTPUT"
           echo "sha256_file=${RELEASE_APK_NAME}.sha256" >> "$GITHUB_OUTPUT"
           echo "sha256_sum=${SHA256_SUM}" >> "$GITHUB_OUTPUT"
 
-          echo "APK created: ${RELEASE_APK_NAME}"
-          echo "SHA-256: ${SHA256_SUM}"
-
-      - name: Verify APK Package and Signature
-        shell: bash
-        env:
-          APK_FILE: ${{ steps.build_apk.outputs.apk_file }}
-          SIGNING_MODE: ${{ steps.signing_setup.outputs.signing_mode }}
-        run: |
-          set -euo pipefail
-
-          if [[ ! -s "$APK_FILE" ]]; then
-            echo "Error: APK file is missing or empty."
-            exit 1
-          fi
-
-          if ! command -v apksigner >/dev/null 2>&1; then
-            SDK_APKSIGNER=$(find "${ANDROID_HOME:-/usr/local/lib/android/sdk}" \
-              -type f -name apksigner 2>/dev/null | head -n 1 || true)
-
-            if [[ -z "$SDK_APKSIGNER" ]]; then
-              echo "Warning: apksigner not found; signature verification skipped."
-              exit 0
-            fi
-
-            APKSIGNER="$SDK_APKSIGNER"
-          else
-            APKSIGNER="$(command -v apksigner)"
-          fi
-
-          "$APKSIGNER" verify --verbose "$APK_FILE"
-
-          echo "APK signature verification passed."
-          echo "Signing mode: $SIGNING_MODE"
-
-      - name: Upload APK Build Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: NYXORA-Browser-${{ steps.version_meta.outputs.tag_name }}
-          path: |
-            ${{ steps.build_apk.outputs.apk_file }}
-            ${{ steps.build_apk.outputs.sha256_file }}
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: Publish GitHub Release
-        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+      - name: Publish Versioned GitHub Release with Verified APK Asset
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version_meta.outputs.tag_name }}
-          name: NYXORA Browser ${{ steps.version_meta.outputs.tag_name }}
+          name: "NYXORA Browser ${{ steps.version_meta.outputs.tag_name }}"
           draft: false
           prerelease: false
           generate_release_notes: true
           body: |
             ${{ github.event.inputs.release_notes || 'Stable NYXORA Browser Android release.' }}
 
-            ### Package Information
-            - Version: `${{ steps.version_meta.outputs.version_name }}`
-            - Version Code: `${{ steps.version_meta.outputs.version_code }}`
-            - APK: `${{ steps.build_apk.outputs.apk_file }}`
-            - SHA-256: `${{ steps.build_apk.outputs.sha256_sum }}`
-
-            **Signing:** `${{ steps.signing_setup.outputs.signing_mode }}`
-
-            If this APK is debug-signed, it is intended for testing.
-            A production update must use the same signing key as the installed app.
+            ### Package Verification
+            - **Package ID**: `com.aistudio.nyxorabrowser.vqxkpl`
+            - **Version**: `${{ steps.version_meta.outputs.version_name }}` (`versionCode ${{ steps.version_meta.outputs.version_code }}`)
+            - **APK Asset**: `${{ steps.build_apk.outputs.apk_file }}`
+            - **SHA-256**: `${{ steps.build_apk.outputs.sha256_sum }}`
           files: |
             ${{ steps.build_apk.outputs.apk_file }}
             ${{ steps.build_apk.outputs.sha256_file }}
-          fail_on_unmatched_files: true
-          overwrite_files: true

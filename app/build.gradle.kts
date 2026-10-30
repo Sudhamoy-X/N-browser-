@@ -17,8 +17,8 @@ android {
     applicationId = "com.aistudio.nyxorabrowser.vqxkpl"
     minSdk = 26
     targetSdk = 36
-    versionCode = 2
-    versionName = "2.0.0"
+    versionCode = 3
+    versionName = "2.5"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

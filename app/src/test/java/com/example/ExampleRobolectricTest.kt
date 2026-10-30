@@ -507,9 +507,9 @@ class ExampleRobolectricTest {
         // Verify easy bookmark access directly below the homepage search bar
         composeTestRule.onNodeWithTag("home_bookmarks_quick_access_button").assertIsDisplayed()
 
-        // Verify Version 2.0.0 build metadata
-        assertEquals("2.0.0", BuildConfig.VERSION_NAME)
-        assertEquals(2, BuildConfig.VERSION_CODE)
+        // Verify Version 2.5 build metadata
+        assertEquals("2.5", BuildConfig.VERSION_NAME)
+        assertEquals(3, BuildConfig.VERSION_CODE)
 
         // 3. Open bottom menu -> Settings -> Verify 7 categories, Room Sync removed from Settings, and About NYXORA works
         composeTestRule.onNodeWithTag("toolbar_overflow_menu_button").performClick()
@@ -2319,6 +2319,118 @@ class ExampleRobolectricTest {
         composeTestRule.waitForIdle()
     }
 
+    @Test
+    fun `nyxora browser 2_5 verifies version 2_5 homepage shortcuts and news feed toggles and truthful public app sharing`() {
+        composeTestRule.mainClock.advanceTimeBy(2100L)
+        composeTestRule.waitForIdle()
+
+        val vm = checkNotNull(composeTestRule.activity.activeBrowserViewModel)
+
+        // 1. Verify Version 2.5 and incremented VersionCode (3 > 2)
+        assertEquals("2.5", BuildConfig.VERSION_NAME)
+        assertEquals(3, BuildConfig.VERSION_CODE)
+        assertTrue(
+            "2.6 must be recognized as newer than 2.5",
+            com.example.domain.update.NyxoraApkUpdateManager.compareVersions("2.5", "v2.6") < 0
+        )
+        assertTrue(
+            "2.7 must be recognized as newer than 2.6",
+            com.example.domain.update.NyxoraApkUpdateManager.compareVersions("2.6", "v2.7") < 0
+        )
+        assertEquals(
+            "2.5 must be equal to v2.5",
+            0,
+            com.example.domain.update.NyxoraApkUpdateManager.compareVersions("2.5", "v2.5")
+        )
+
+        // 2. Verify Website Shortcuts and News Feed are ON by default and independently toggleable
+        val defaultState = NyxoraSettingsState()
+        assertTrue("Homepage shortcuts must be ON by default", defaultState.homepageShortcutsEnabled)
+        assertTrue("Homepage news feed must be ON by default", defaultState.showHomeNewsFeed)
+
+        vm.switchBrowsingMode(false)
+        vm.closeAllTabs(inPrivateMode = false)
+        vm.updateSettings {
+            it.copy(
+                homepageShortcutsEnabled = true,
+                showHomeNewsFeed = true
+            )
+        }
+        val feedReadyDeadline = System.currentTimeMillis() + 3000L
+        while (
+            (!vm.settings.value.showHomeNewsFeed ||
+                composeTestRule.onAllNodesWithTag("home_news_feed_section").fetchSemanticsNodes().isEmpty()) &&
+            System.currentTimeMillis() < feedReadyDeadline
+        ) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            composeTestRule.mainClock.advanceTimeBy(50L)
+            composeTestRule.waitForIdle()
+            Thread.sleep(20L)
+        }
+        composeTestRule.onNodeWithTag("home_news_feed_section").assertIsDisplayed()
+
+        // Turn OFF News Feed via Settings > Appearance while keeping Shortcuts ON
+        vm.setOverlaySheet(com.example.ui.viewmodel.OverlaySheet.SETTINGS)
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("settings_category_customization").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("setting_home_shortcuts_toggle").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("setting_home_news_feed_toggle").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("setting_home_news_feed_toggle").performClick()
+        val feedOffDeadline = System.currentTimeMillis() + 3000L
+        while (vm.settings.value.showHomeNewsFeed && System.currentTimeMillis() < feedOffDeadline) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            composeTestRule.mainClock.advanceTimeBy(50L)
+            composeTestRule.waitForIdle()
+            Thread.sleep(20L)
+        }
+        assertFalse("News feed must be OFF after toggling", vm.settings.value.showHomeNewsFeed)
+        assertTrue("Shortcuts must remain ON when News Feed is turned OFF", vm.settings.value.homepageShortcutsEnabled)
+
+        // Return to Homepage and verify News Feed is hidden cleanly while homepage layout remains intact
+        vm.setOverlaySheet(com.example.ui.viewmodel.OverlaySheet.NONE)
+        composeTestRule.waitForIdle()
+        assertEquals(
+            "News feed section must not be rendered when disabled",
+            0,
+            composeTestRule.onAllNodesWithTag("home_news_feed_section").fetchSemanticsNodes().size
+        )
+        composeTestRule.onNodeWithTag("home_search_bar_trigger").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("home_bookmarks_quick_access_button").assertIsDisplayed()
+
+        // Restore News Feed ON
+        vm.updateSettings { it.copy(showHomeNewsFeed = true) }
+        composeTestRule.waitForIdle()
+
+        // 3. Verify App Sharing uses real public GitHub Releases link and never fake nyxora.browser or file:// paths
+        val (noApkShareText, hasPublishedApk) = com.example.domain.update.NyxoraApkUpdateManager.buildAppSharePayload(
+            com.example.domain.update.ApkUpdateUiState.Idle
+        )
+        assertFalse(hasPublishedApk)
+        assertTrue(noApkShareText.contains("https://github.com/sudhamoy-nyxora/nyxora-browser/releases"))
+        assertFalse(noApkShareText.contains("nyxora.browser"))
+        assertFalse(noApkShareText.contains("file://"))
+
+        // Verify About NYXORA 2.5 title and Share NYXORA Browser button launch native share chooser
+        vm.setOverlaySheet(com.example.ui.viewmodel.OverlaySheet.SETTINGS)
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("settings_category_about").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("about_nyxora_title").performScrollTo().assertIsDisplayed()
+        assertTrue(
+            composeTestRule.onAllNodesWithText("NYXORA Browser 2.5", substring = true).fetchSemanticsNodes().isNotEmpty()
+        )
+        shadowOf(composeTestRule.activity.application).clearNextStartedActivities()
+        composeTestRule.onNodeWithTag("about_share_app_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        val chooserIntent = shadowOf(composeTestRule.activity.application).nextStartedActivity
+        assertNotNull("Expected native share chooser intent when tapping Share NYXORA Browser", chooserIntent)
+        assertEquals(android.content.Intent.ACTION_CHOOSER, chooserIntent.action)
+
+        vm.setOverlaySheet(com.example.ui.viewmodel.OverlaySheet.NONE)
+        composeTestRule.waitForIdle()
+    }
+
     private fun findFirstWebView(root: View?): WebView? {
         if (root == null) return null
         if (root is WebView) return root
@@ -2331,6 +2443,7 @@ class ExampleRobolectricTest {
         return null
     }
 }
+
 
 
 

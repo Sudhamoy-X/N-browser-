@@ -1033,7 +1033,7 @@ enum class SettingsCategory(val title: String, val subtitle: String) {
     ),
     ABOUT(
         title = "About NYXORA",
-        subtitle = "NYXORA Browser 2.0, Automatic APK Updates, Engine Capabilities, Licenses"
+        subtitle = "NYXORA Browser 2.5, Automatic APK Updates, Share App, Engine Capabilities"
     )
 }
 
@@ -1395,6 +1395,18 @@ fun NyxoraSettingsScreen(
                             }
                         },
                         testTag = "setting_home_shortcuts_toggle"
+                    )
+
+                    SettingToggleItem(
+                        title = "Homepage News Feed",
+                        subtitle = "Display curated web & technology feed cards on the homepage",
+                        checked = settings.showHomeNewsFeed,
+                        onCheckedChange = { v ->
+                            onUpdateSettings {
+                                it.copy(showHomeNewsFeed = v)
+                            }
+                        },
+                        testTag = "setting_home_news_feed_toggle"
                     )
 
                     SettingToggleItem(
@@ -1912,7 +1924,7 @@ fun NyxoraSettingsScreen(
 
             // 7. ABOUT NYXORA
             if (selectedCategory == SettingsCategory.ABOUT ||
-                matchesSearch("About", "NYXORA", "Sudhamoy", "Crafted", "Version", "2.0", "Update", "APK", "Release", "Engine", "WebView", "Capability", "Licenses")
+                matchesSearch("About", "NYXORA", "Sudhamoy", "Crafted", "Version", "2.5", "2.0", "Update", "APK", "Release", "Share", "Engine", "WebView", "Capability", "Licenses")
             ) {
                 SettingsSectionCard(title = "About NYXORA") {
                     Row(
@@ -1922,7 +1934,7 @@ fun NyxoraSettingsScreen(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "NYXORA Browser 2.0",
+                                text = "NYXORA Browser 2.5",
                                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                                 modifier = Modifier.testTag("about_nyxora_title")
                             )
@@ -1980,6 +1992,34 @@ fun NyxoraSettingsScreen(
                     )
 
                     HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+
+                    OutlinedButton(
+                        onClick = {
+                            val (shareMessage, hasPublishedApk) = com.example.domain.update.NyxoraApkUpdateManager.buildAppSharePayload(apkUpdateState)
+                            if (!hasPublishedApk) {
+                                onToast("Sharing GitHub Releases page — publish a release APK on GitHub first for direct APK downloads")
+                            }
+                            runCatching {
+                                val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_SUBJECT, "NYXORA Browser ${BuildConfig.VERSION_NAME}")
+                                    putExtra(Intent.EXTRA_TEXT, shareMessage)
+                                }
+                                context.startActivity(
+                                    Intent.createChooser(sendIntent, "Share NYXORA Browser").apply {
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                )
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("about_share_app_button")
+                    ) {
+                        Icon(Icons.Outlined.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Share NYXORA Browser")
+                    }
 
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(

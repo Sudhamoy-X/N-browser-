@@ -1137,10 +1137,23 @@ fun NyxoraMainBrowserScreen(
                 onToggleDesktopSite = { viewModel.toggleDesktopSiteForActiveTab() },
                 onOpenRoomSync = { viewModel.setOverlaySheet(OverlaySheet.NYXORA_CONNECT) },
                 onSharePage = {
-                    val shareText = if (activeTab.isHomePage) "https://nyxora.browser" else activeTab.url
+                    val shareText: String
+                    val shareSubject: String
+                    if (activeTab.isHomePage) {
+                        val (appShareMsg, hasPublishedApk) =
+                            com.example.domain.update.NyxoraApkUpdateManager.buildAppSharePayload(apkUpdateState)
+                        if (!hasPublishedApk) {
+                            viewModel.emitToast("Sharing GitHub Releases page — publish a release APK on GitHub first for direct APK downloads")
+                        }
+                        shareText = appShareMsg
+                        shareSubject = "NYXORA Browser ${com.example.BuildConfig.VERSION_NAME}"
+                    } else {
+                        shareText = activeTab.url
+                        shareSubject = activeTab.title
+                    }
                     val sendIntent = Intent(Intent.ACTION_SEND).apply {
                         type = "text/plain"
-                        putExtra(Intent.EXTRA_SUBJECT, activeTab.title)
+                        putExtra(Intent.EXTRA_SUBJECT, shareSubject)
                         putExtra(Intent.EXTRA_TEXT, shareText)
                     }
                     runCatching {

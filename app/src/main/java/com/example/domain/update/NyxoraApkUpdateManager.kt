@@ -803,16 +803,69 @@ class NyxoraApkUpdateManager(
         )
         private val SHA256_HEX_REGEX = Regex("\\b([a-fA-F0-9]{64})\\b")
 
+        fun configuredGitHubRepoSlug(): String {
+            val raw = runCatching { BuildConfig.NYXORA_GITHUB_REPO }.getOrDefault("").trim()
+                .removePrefix("https://github.com/")
+                .removeSuffix("/")
+                .removeSuffix(".git")
+            return if (
+                raw.isNotBlank() &&
+                raw.contains('/') &&
+                !raw.equals("DEFAULT_VALUE", ignoreCase = true) &&
+                !raw.startsWith("MY_", ignoreCase = true)
+            ) {
+                raw
+            } else {
+                DEFAULT_GITHUB_REPO
+            }
+        }
+
+        fun configuredPublicReleasesPageUrl(): String {
+            val repoSlug = configuredGitHubRepoSlug()
+            return "https://github.com/$repoSlug/releases"
+        }
+
+        /**
+         * Builds the truthful public share message for NYXORA Browser without generating fake download links
+         * or exposing internal file paths. Returns Pair(shareText, hasPublishedReleaseApk).
+         */
+        fun buildAppSharePayload(
+            updateState: ApkUpdateUiState,
+            installedVersionName: String = BuildConfig.VERSION_NAME
+        ): Pair<String, Boolean> {
+            val activeRelease = updateState.activeReleaseInfo
+            val verifiedDownloadUrl = activeRelease?.downloadUrl?.takeIf {
+                it.startsWith("https://", ignoreCase = true)
+            }
+            val verifiedReleasePage = activeRelease?.releaseHtmlUrl?.takeIf {
+                it.startsWith("https://", ignoreCase = true)
+            }
+            val publicReleasesUrl = configuredPublicReleasesPageUrl()
+            return if (!verifiedDownloadUrl.isNullOrBlank()) {
+                val verLabel = activeRelease.cleanVersion.ifBlank { installedVersionName }
+                Pair(
+                    "NYXORA Browser v$verLabel — Download the official Android release APK: $verifiedDownloadUrl",
+                    true
+                )
+            } else if (!verifiedReleasePage.isNullOrBlank()) {
+                Pair(
+                    "NYXORA Browser v$installedVersionName — Official GitHub Release: $verifiedReleasePage",
+                    true
+                )
+            } else {
+                Pair(
+                    "NYXORA Browser v$installedVersionName — Official GitHub Releases: $publicReleasesUrl (Note: A public release APK must be published on GitHub Releases before direct APK download is available.)",
+                    false
+                )
+            }
+        }
+
         fun configuredReleaseApiEndpoint(): String {
             val explicitUrl = runCatching { BuildConfig.NYXORA_GITHUB_RELEASE_API_URL }.getOrDefault("").trim()
             if (explicitUrl.startsWith("https://", ignoreCase = true)) {
                 return explicitUrl
             }
-            val repoSlug = runCatching { BuildConfig.NYXORA_GITHUB_REPO }.getOrDefault("").trim()
-                .removePrefix("https://github.com/")
-                .removeSuffix("/")
-                .removeSuffix(".git")
-                .ifBlank { DEFAULT_GITHUB_REPO }
+            val repoSlug = configuredGitHubRepoSlug()
             return "https://api.github.com/repos/$repoSlug/releases/latest"
         }
 

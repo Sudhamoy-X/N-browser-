@@ -76,6 +76,7 @@ object NyxoraConnectNotificationHelper {
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle("Room Sync • ${connectionStatus.label}")
             .setContentText(statusSummary)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(statusSummary))
             .setSubText(roomState.roomId)
             .setOngoing(
                 connectionStatus == SyncConnectionStatus.CONNECTED ||
