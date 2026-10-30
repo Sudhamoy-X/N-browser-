@@ -9,11 +9,13 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -21,36 +23,52 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.ArrowForward
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Shield
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarData
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -529,15 +547,30 @@ fun NyxoraMainBrowserScreen(
         contentWindowInsets = if (isFullscreenVideo) WindowInsets(0, 0, 0, 0) else WindowInsets.systemBars,
         snackbarHost = {
             if (!isFullscreenVideo) {
-                SnackbarHost(hostState = snackbarHostState)
+                SnackbarHost(
+                    hostState = snackbarHostState,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal))
+                        .displayCutoutPadding()
+                ) { snackbarData ->
+                    NyxoraNotificationBanner(
+                        snackbarData = snackbarData,
+                        onDismiss = {
+                            snackbarData.dismiss()
+                            viewModel.dismissRedirectWarning()
+                        }
+                    )
+                }
             }
         },
         topBar = {
             if (!isFullscreenVideo) {
+                val showTopAddressBar = !activeTab.isHomePage || findInPageVisible
                 Column(modifier = Modifier.fillMaxWidth()) {
                     // 1. Minimalist Top Bar: Shown only while browsing websites or searching in page.
                     // On the homepage, only the primary search bar below the NYXORA logo is displayed.
-                    if (!activeTab.isHomePage || findInPageVisible) {
+                    if (showTopAddressBar) {
                         NyxoraTopAddressBar(
                             activeTab = activeTab,
                             settings = settings,
@@ -603,6 +636,7 @@ fun NyxoraMainBrowserScreen(
                             isExpanded = isConnectBannerExpanded,
                             onExpandedChange = { isConnectBannerExpanded = it },
                             unreadChatCount = unreadChatCount,
+                            applyTopStatusBarInsets = !showTopAddressBar,
                             onOpenChatOverlay = {
                                 viewModel.connectManager.reopenChatOverlay()
                             },
@@ -1544,4 +1578,124 @@ private fun NyxoraEdgeSwipeIndicator(
         )
     }
 }
+
+/**
+ * Custom NYXORA dark-premium notification banner rendered inside [SnackbarHost].
+ *
+ * - Grows height naturally when text wraps without fixed-height clipping.
+ * - Keeps leading icon, message text, action button ("Allow once"), and close button fully visible.
+ * - Supports vertical scrolling when a notification message is exceptionally long.
+ */
+@Composable
+internal fun NyxoraNotificationBanner(
+    snackbarData: SnackbarData,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val visuals = snackbarData.visuals
+    val messageScrollState = rememberScrollState()
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .widthIn(max = 560.dp)
+                .heightIn(min = 48.dp)
+                .wrapContentHeight()
+                .testTag("nyxora_notification_banner"),
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
+            border = BorderStroke(1.dp, NyxoraElectricBlue.copy(alpha = 0.55f)),
+            tonalElevation = 6.dp,
+            shadowElevation = 8.dp
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .wrapContentHeight()
+                    .padding(start = 12.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .weight(1f)
+                        .wrapContentHeight()
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Shield,
+                        contentDescription = "NYXORA Notification",
+                        tint = NyxoraElectricBlue,
+                        modifier = Modifier
+                            .size(18.dp)
+                            .testTag("nyxora_notification_banner_icon")
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(max = 120.dp)
+                            .verticalScroll(messageScrollState)
+                    ) {
+                        Text(
+                            text = visuals.message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("nyxora_notification_banner_text")
+                        )
+                    }
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    val actionLabel = visuals.actionLabel
+                    if (!actionLabel.isNullOrBlank()) {
+                        TextButton(
+                            onClick = { snackbarData.performAction() },
+                            colors = ButtonDefaults.textButtonColors(contentColor = NyxoraElectricBlue),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            modifier = Modifier
+                                .heightIn(min = 36.dp)
+                                .wrapContentHeight()
+                                .testTag("nyxora_notification_banner_action_button")
+                        ) {
+                            Text(
+                                text = actionLabel,
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                    }
+
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .size(36.dp)
+                            .testTag("nyxora_notification_banner_close_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Close,
+                            contentDescription = "Dismiss notification",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 

@@ -1807,16 +1807,16 @@ class NyxoraBrowserViewModel(
     }
 
     fun onPopupBlocked(blockedUrl: String) {
+        if (settings.value.showBlockedMessages) {
+            _blockedSnackbar.tryEmit(
+                BlockedEventSnackbar(
+                    message = "Pop-up blocked",
+                    blockedUrl = blockedUrl
+                )
+            )
+        }
         viewModelScope.launch {
             settingsDataStore.incrementBlockedMetric(popups = 1)
-            if (settings.value.showBlockedMessages) {
-                _blockedSnackbar.tryEmit(
-                    BlockedEventSnackbar(
-                        message = "Pop-up blocked",
-                        blockedUrl = blockedUrl
-                    )
-                )
-            }
         }
     }
 
@@ -1826,11 +1826,11 @@ class NyxoraBrowserViewModel(
             blockedUrl = blockedUrl
         )
         _pendingRedirectWarning.value = event
+        if (settings.value.showBlockedMessages) {
+            _blockedSnackbar.tryEmit(event)
+        }
         viewModelScope.launch {
             settingsDataStore.incrementBlockedMetric(redirects = 1)
-            if (settings.value.showBlockedMessages) {
-                _blockedSnackbar.tryEmit(event)
-            }
         }
     }
 

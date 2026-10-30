@@ -50,6 +50,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -1183,6 +1184,7 @@ fun NyxoraWebEngineView(
                     Row(
                         modifier = Modifier
                             .align(Alignment.TopStart)
+                            .displayCutoutPadding()
                             .padding(top = 12.dp, start = 12.dp),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -1267,6 +1269,7 @@ fun NyxoraWebEngineView(
                     Row(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
+                            .displayCutoutPadding()
                             .padding(top = 12.dp, end = 12.dp)
                             .clip(RoundedCornerShape(10.dp))
                             .background(Color(0x990A0D14))

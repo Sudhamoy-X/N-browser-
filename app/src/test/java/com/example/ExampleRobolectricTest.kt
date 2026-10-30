@@ -2431,6 +2431,129 @@ class ExampleRobolectricTest {
         composeTestRule.waitForIdle()
     }
 
+    @Test
+    fun `notifications and banners render without clipping and keep text icons close buttons and actions fully visible`() {
+        composeTestRule.mainClock.advanceTimeBy(2100L)
+        composeTestRule.waitForIdle()
+
+        val vm = checkNotNull(composeTestRule.activity.activeBrowserViewModel)
+        vm.switchBrowsingMode(false)
+        vm.closeAllTabs(inPrivateMode = false)
+        composeTestRule.waitForIdle()
+
+        // 1. Create a NYXORA Connect room while on the Homepage (where NyxoraTopAddressBar is hidden)
+        val createdRoom = vm.connectManager.createRoom(
+            roomName = "Banner Verification Room",
+            mode = com.example.domain.connect.RoomSyncMode.BROWSE_TOGETHER,
+            permissions = com.example.domain.connect.RoomPermissionsConfig(),
+            initialUrl = "nyxora://home",
+            initialTitle = "NYXORA Home",
+            isPrivateMode = false
+        )
+        assertNotNull(createdRoom)
+        composeTestRule.waitForIdle()
+
+        // Verify compact NyxoraConnectStatusBanner on Homepage has positive bounds and does not overlap bottom bar
+        composeTestRule.onNodeWithTag("nyxora_connect_status_banner").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_banner_status_icon", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_banner_room_code", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_banner_status_text", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_banner_chat_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_banner_expand_toggle").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_banner_menu_button").assertIsDisplayed()
+
+        val compactBannerBounds = composeTestRule
+            .onNodeWithTag("nyxora_connect_status_banner")
+            .fetchSemanticsNode()
+            .boundsInRoot
+        val bottomBarBounds = composeTestRule
+            .onNodeWithTag("nyxora_bottom_tab_bar")
+            .fetchSemanticsNode()
+            .boundsInRoot
+        assertTrue("Compact status banner must have positive height", compactBannerBounds.height >= 30f)
+        assertTrue(
+            "Top status banner must not overlap bottom navigation bar",
+            compactBannerBounds.bottom <= bottomBarBounds.top
+        )
+
+        // Expand NyxoraConnectStatusBanner and verify all expanded action buttons are visible and unclipped
+        composeTestRule.onNodeWithTag("connect_banner_expand_toggle").performClick()
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("connect_banner_expanded_row").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_banner_status_text", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_banner_pause_toggle").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_banner_stop_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_banner_collapse_button").assertIsDisplayed()
+
+        val pauseBounds = composeTestRule.onNodeWithTag("connect_banner_pause_toggle").fetchSemanticsNode().boundsInRoot
+        val stopBounds = composeTestRule.onNodeWithTag("connect_banner_stop_button").fetchSemanticsNode().boundsInRoot
+        assertTrue("Expanded Pause button must have unclipped width and height", pauseBounds.width > 20f && pauseBounds.height >= 28f)
+        assertTrue("Expanded Leave button must have unclipped width and height", stopBounds.width > 20f && stopBounds.height >= 28f)
+
+        // Collapse banner back
+        composeTestRule.onNodeWithTag("connect_banner_collapse_button").performClick()
+        composeTestRule.waitForIdle()
+
+        // 2. Open NYXORA Connect Sheet and trigger a long multi-line error message to verify connect_error_banner
+        vm.setOverlaySheet(com.example.ui.viewmodel.OverlaySheet.NYXORA_CONNECT)
+        composeTestRule.waitForIdle()
+        // Trigger an invalid join to populate lastSyncError while in sheet or verify active room buttons
+        composeTestRule.onNodeWithTag("connect_copy_code_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_share_code_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_leave_or_close_button").assertIsDisplayed()
+
+        vm.connectManager.leaveOrCloseRoom(notifyServer = false)
+        composeTestRule.waitForIdle()
+        vm.connectManager.joinRoom(rawRoomOrInvite = "INVALID", explicitAccessKey = "", explicitEndpointUrl = "")
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("connect_error_banner").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_error_icon", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_error_text", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_error_dismiss_button").assertIsDisplayed()
+
+        val errorBannerBounds = composeTestRule.onNodeWithTag("connect_error_banner").fetchSemanticsNode().boundsInRoot
+        val dismissBtnBounds = composeTestRule.onNodeWithTag("connect_error_dismiss_button").fetchSemanticsNode().boundsInRoot
+        assertTrue("Error banner must grow naturally in height", errorBannerBounds.height >= 36f)
+        assertTrue("Error banner dismiss button must remain fully visible inside banner", dismissBtnBounds.right <= errorBannerBounds.right + 2f)
+
+        composeTestRule.onNodeWithTag("connect_error_dismiss_button").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals(0, composeTestRule.onAllNodesWithTag("connect_error_banner").fetchSemanticsNodes().size)
+
+        vm.setOverlaySheet(com.example.ui.viewmodel.OverlaySheet.NONE)
+        composeTestRule.waitForIdle()
+
+        // 3. Trigger in-app NyxoraNotificationBanner via blocked auto-redirect with a long message
+        composeTestRule.mainClock.autoAdvance = false
+        vm.onAutoRedirectBlocked("https://malicious-redirect-tracker.example.org/long/path/with/parameters?redirect=1&tracking=full")
+        composeTestRule.mainClock.advanceTimeByFrame()
+        composeTestRule.mainClock.advanceTimeBy(500L)
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("nyxora_notification_banner").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("nyxora_notification_banner_icon", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("nyxora_notification_banner_text", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("nyxora_notification_banner_action_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("nyxora_notification_banner_close_button").assertIsDisplayed()
+
+        val notifBounds = composeTestRule.onNodeWithTag("nyxora_notification_banner").fetchSemanticsNode().boundsInRoot
+        val currentBottomBarBounds = composeTestRule.onNodeWithTag("nyxora_bottom_tab_bar").fetchSemanticsNode().boundsInRoot
+        assertTrue("Notification banner must have natural unclipped height", notifBounds.height >= 44f)
+        assertTrue(
+            "Notification banner must stay inside visible screen area above bottom toolbar",
+            notifBounds.bottom <= currentBottomBarBounds.top + 1f
+        )
+
+        // Dismiss the notification banner via its close button
+        composeTestRule.onNodeWithTag("nyxora_notification_banner_close_button").performClick()
+        composeTestRule.mainClock.autoAdvance = true
+        composeTestRule.mainClock.advanceTimeBy(300L)
+        composeTestRule.waitForIdle()
+        assertEquals(0, composeTestRule.onAllNodesWithTag("nyxora_notification_banner").fetchSemanticsNodes().size)
+    }
+
     private fun findFirstWebView(root: View?): WebView? {
         if (root == null) return null
         if (root is WebView) return root

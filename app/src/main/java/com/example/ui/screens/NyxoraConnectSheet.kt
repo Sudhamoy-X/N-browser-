@@ -15,16 +15,27 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.Chat
@@ -113,6 +124,7 @@ fun NyxoraConnectStatusBanner(
     isExpanded: Boolean = false,
     onExpandedChange: (Boolean) -> Unit = {},
     unreadChatCount: Int = 0,
+    applyTopStatusBarInsets: Boolean = false,
     onOpenChatOverlay: () -> Unit = {},
     onOpenConnectSheet: () -> Unit,
     onManualResync: () -> Unit,
@@ -141,21 +153,32 @@ fun NyxoraConnectStatusBanner(
         else -> connectionStatus.label
     }
 
+    val horizontalSafeInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal)
+
     Surface(
         modifier = Modifier
             .fillMaxWidth()
+            .wrapContentHeight()
             .testTag("nyxora_connect_status_banner"),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.94f),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.96f),
         tonalElevation = 1.dp
     ) {
-        Column(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .wrapContentHeight()
+                .then(if (applyTopStatusBarInsets) Modifier.statusBarsPadding() else Modifier)
+                .windowInsetsPadding(horizontalSafeInsets)
+                .displayCutoutPadding()
+        ) {
             if (!isExpanded) {
-                // Compact single-line indicator: small status icon, room code, restore/expand button, and compact menu
+                // Compact indicator: status icon, room code, natural multi-line status wrapping, and quick actions
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(32.dp)
-                        .padding(horizontal = 10.dp),
+                        .heightIn(min = 38.dp)
+                        .wrapContentHeight()
+                        .padding(horizontal = 12.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
@@ -163,15 +186,16 @@ fun NyxoraConnectStatusBanner(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .weight(1f)
+                            .wrapContentHeight()
                             .clickable(onClick = onOpenConnectSheet)
-                            .padding(vertical = 4.dp)
+                            .padding(top = 4.dp, bottom = 4.dp, end = 6.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Outlined.CastConnected,
                             contentDescription = "Room Sync Status",
                             tint = statusColor,
                             modifier = Modifier
-                                .size(14.dp)
+                                .size(15.dp)
                                 .testTag("connect_banner_status_icon")
                         )
                         Spacer(Modifier.width(6.dp))
@@ -190,6 +214,7 @@ fun NyxoraConnectStatusBanner(
                             ),
                             color = MaterialTheme.colorScheme.onSurface,
                             maxLines = 1,
+                            softWrap = false,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.testTag("connect_banner_room_code")
                         )
@@ -198,9 +223,11 @@ fun NyxoraConnectStatusBanner(
                             text = "• $statusLabel",
                             style = MaterialTheme.typography.labelSmall,
                             color = statusColor,
-                            maxLines = 1,
+                            maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.testTag("connect_banner_status_text")
+                            modifier = Modifier
+                                .weight(1f, fill = false)
+                                .testTag("connect_banner_status_text")
                         )
                     }
 
@@ -211,28 +238,28 @@ fun NyxoraConnectStatusBanner(
                         IconButton(
                             onClick = onOpenChatOverlay,
                             modifier = Modifier
-                                .size(28.dp)
+                                .size(32.dp)
                                 .testTag("connect_banner_chat_button")
                         ) {
                             Icon(
                                 imageVector = Icons.AutoMirrored.Outlined.Chat,
                                 contentDescription = "Open Room Chat",
                                 tint = if (unreadChatCount > 0) NyxoraElectricBlue else MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(15.dp)
+                                modifier = Modifier.size(16.dp)
                             )
                         }
 
                         IconButton(
                             onClick = { onExpandedChange(true) },
                             modifier = Modifier
-                                .size(28.dp)
+                                .size(32.dp)
                                 .testTag("connect_banner_expand_toggle")
                         ) {
                             Icon(
                                 imageVector = Icons.Outlined.ExpandMore,
                                 contentDescription = "Expand sync status bar",
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(16.dp)
+                                modifier = Modifier.size(18.dp)
                             )
                         }
 
@@ -240,14 +267,14 @@ fun NyxoraConnectStatusBanner(
                             IconButton(
                                 onClick = { showCompactMenu = true },
                                 modifier = Modifier
-                                    .size(28.dp)
+                                    .size(32.dp)
                                     .testTag("connect_banner_menu_button")
                             ) {
                                 Icon(
                                     imageVector = Icons.Outlined.MoreVert,
                                     contentDescription = "Room Sync actions",
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(16.dp)
+                                    modifier = Modifier.size(17.dp)
                                 )
                             }
 
@@ -272,6 +299,8 @@ fun NyxoraConnectStatusBanner(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .heightIn(min = 46.dp)
+                        .wrapContentHeight()
                         .clickable(onClick = onOpenConnectSheet)
                         .padding(horizontal = 12.dp, vertical = 6.dp)
                         .testTag("connect_banner_expanded_row"),
@@ -280,38 +309,44 @@ fun NyxoraConnectStatusBanner(
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier
+                            .weight(1f)
+                            .wrapContentHeight()
+                            .padding(end = 6.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Outlined.CastConnected,
                             contentDescription = "Room Sync Status",
                             tint = statusColor,
                             modifier = Modifier
-                                .size(15.dp)
+                                .size(16.dp)
                                 .testTag("connect_banner_status_icon")
                         )
                         Spacer(Modifier.width(8.dp))
-                        Column {
+                        Column(modifier = Modifier.wrapContentHeight()) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
                                     text = "Room Sync • ${if (isHost) "Host" else "Participant"}",
                                     style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
                                     color = MaterialTheme.colorScheme.onSurface,
                                     maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f, fill = false)
                                 )
                                 Spacer(Modifier.width(6.dp))
                                 Text(
                                     text = "(${roomState.members.size}/${roomState.permissions.maxParticipants})",
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    softWrap = false
                                 )
                             }
                             Text(
                                 text = "$statusLabel • ${roomState.roomId}",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = statusColor,
-                                maxLines = 1,
+                                maxLines = 2,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.testTag("connect_banner_status_text")
                             )
@@ -325,9 +360,10 @@ fun NyxoraConnectStatusBanner(
                         if (!isHost) {
                             TextButton(
                                 onClick = onManualResync,
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                                 modifier = Modifier
-                                    .height(30.dp)
+                                    .heightIn(min = 34.dp)
+                                    .wrapContentHeight()
                                     .testTag("connect_banner_resync_button")
                             ) {
                                 Icon(
@@ -336,19 +372,27 @@ fun NyxoraConnectStatusBanner(
                                     modifier = Modifier.size(14.dp)
                                 )
                                 Spacer(Modifier.width(4.dp))
-                                Text("Resync", style = MaterialTheme.typography.labelSmall)
+                                Text(
+                                    text = "Resync",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
                             }
                         } else {
                             TextButton(
                                 onClick = onTogglePauseOrSync,
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                                 modifier = Modifier
-                                    .height(30.dp)
+                                    .heightIn(min = 34.dp)
+                                    .wrapContentHeight()
                                     .testTag("connect_banner_pause_toggle")
                             ) {
                                 Text(
                                     text = if (roomState.isSyncActive) "Pause" else "Resume",
-                                    style = MaterialTheme.typography.labelSmall
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1,
+                                    softWrap = false
                                 )
                             }
                         }
@@ -356,28 +400,31 @@ fun NyxoraConnectStatusBanner(
                         TextButton(
                             onClick = onStopOrLeaveImmediate,
                             colors = ButtonDefaults.textButtonColors(contentColor = NyxoraDangerRed),
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                             modifier = Modifier
-                                .height(30.dp)
+                                .heightIn(min = 34.dp)
+                                .wrapContentHeight()
                                 .testTag("connect_banner_stop_button")
                         ) {
                             Text(
                                 text = "Leave",
-                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                maxLines = 1,
+                                softWrap = false
                             )
                         }
 
                         IconButton(
                             onClick = { onExpandedChange(false) },
                             modifier = Modifier
-                                .size(28.dp)
+                                .size(32.dp)
                                 .testTag("connect_banner_collapse_button")
                         ) {
                             Icon(
                                 imageVector = Icons.Outlined.ExpandLess,
                                 contentDescription = "Hide expanded sync status bar",
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(16.dp)
+                                modifier = Modifier.size(18.dp)
                             )
                         }
 
@@ -385,14 +432,14 @@ fun NyxoraConnectStatusBanner(
                             IconButton(
                                 onClick = { showCompactMenu = true },
                                 modifier = Modifier
-                                    .size(28.dp)
+                                    .size(32.dp)
                                     .testTag("connect_banner_menu_button")
                             ) {
                                 Icon(
                                     imageVector = Icons.Outlined.MoreVert,
                                     contentDescription = "Room Sync actions",
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(16.dp)
+                                    modifier = Modifier.size(17.dp)
                                 )
                             }
 
@@ -413,6 +460,10 @@ fun NyxoraConnectStatusBanner(
                     }
                 }
             }
+            HorizontalDivider(
+                thickness = 0.5.dp,
+                color = NyxoraElectricBlue.copy(alpha = 0.25f)
+            )
         }
     }
 }
@@ -634,7 +685,9 @@ fun NyxoraConnectSheet(
         color = MaterialTheme.colorScheme.background
     ) {
         Box(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.safeDrawing),
             contentAlignment = Alignment.TopCenter
         ) {
             Column(
@@ -692,12 +745,18 @@ fun NyxoraConnectSheet(
                     Surface(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(bottom = 10.dp),
-                        shape = RoundedCornerShape(10.dp),
-                        color = NyxoraVibrantViolet.copy(alpha = 0.14f)
+                            .wrapContentHeight()
+                            .padding(bottom = 10.dp)
+                            .testTag("connect_incognito_notice_banner"),
+                        shape = RoundedCornerShape(12.dp),
+                        color = NyxoraVibrantViolet.copy(alpha = 0.14f),
+                        border = BorderStroke(1.dp, NyxoraVibrantViolet.copy(alpha = 0.45f))
                     ) {
                         Row(
-                            modifier = Modifier.padding(12.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .wrapContentHeight()
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(
@@ -710,7 +769,8 @@ fun NyxoraConnectSheet(
                             Text(
                                 text = "Private tabs are isolated and never synchronized with any room.",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.weight(1f)
                             )
                         }
                     }
@@ -718,43 +778,67 @@ fun NyxoraConnectSheet(
 
                 // Error Banner
                 if (!lastSyncError.isNullOrBlank()) {
+                    val errorScrollState = rememberScrollState()
                     Surface(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .wrapContentHeight()
                             .padding(bottom = 10.dp)
                             .testTag("connect_error_banner"),
-                        shape = RoundedCornerShape(10.dp),
-                        color = NyxoraDangerRed.copy(alpha = 0.14f)
+                        shape = RoundedCornerShape(12.dp),
+                        color = NyxoraDangerRed.copy(alpha = 0.14f),
+                        border = BorderStroke(1.dp, NyxoraDangerRed.copy(alpha = 0.5f))
                     ) {
                         Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .wrapContentHeight()
+                                .padding(start = 12.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.weight(1f)
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .wrapContentHeight()
                             ) {
                                 Icon(
                                     imageVector = Icons.Outlined.WarningAmber,
-                                    contentDescription = null,
+                                    contentDescription = "Sync warning",
                                     tint = NyxoraDangerRed,
-                                    modifier = Modifier.size(18.dp)
+                                    modifier = Modifier
+                                        .size(18.dp)
+                                        .testTag("connect_error_icon")
                                 )
-                                Spacer(Modifier.width(8.dp))
-                                Text(
-                                    text = lastSyncError,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
+                                Spacer(Modifier.width(10.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .heightIn(max = 120.dp)
+                                        .verticalScroll(errorScrollState)
+                                ) {
+                                    Text(
+                                        text = lastSyncError,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("connect_error_text")
+                                    )
+                                }
                             }
+                            Spacer(Modifier.width(4.dp))
                             IconButton(
                                 onClick = onClearError,
-                                modifier = Modifier.minimumInteractiveComponentSize()
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("connect_error_dismiss_button")
                             ) {
                                 Icon(
                                     imageVector = Icons.Outlined.Close,
                                     contentDescription = "Dismiss error",
+                                    tint = MaterialTheme.colorScheme.onSurface,
                                     modifier = Modifier.size(18.dp)
                                 )
                             }
@@ -1014,6 +1098,7 @@ private fun NyxoraConnectSimpleActiveRoom(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .wrapContentHeight()
                             .testTag("connect_compact_action_row"),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -1030,10 +1115,11 @@ private fun NyxoraConnectSimpleActiveRoom(
                                 containerColor = NyxoraElectricBlue.copy(alpha = 0.12f),
                                 contentColor = NyxoraElectricBlue
                             ),
-                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                             modifier = Modifier
                                 .weight(1f)
-                                .height(48.dp)
+                                .heightIn(min = 48.dp)
+                                .wrapContentHeight()
                                 .semantics { contentDescription = "Copy Room Code" }
                                 .testTag("connect_copy_code_button")
                         ) {
@@ -1047,7 +1133,6 @@ private fun NyxoraConnectSimpleActiveRoom(
                                 text = "Copy Code",
                                 style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
                                 maxLines = 1,
-                                softWrap = false,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
@@ -1077,10 +1162,11 @@ private fun NyxoraConnectSimpleActiveRoom(
                                 containerColor = NyxoraElectricBlue.copy(alpha = 0.12f),
                                 contentColor = NyxoraElectricBlue
                             ),
-                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                             modifier = Modifier
                                 .weight(1f)
-                                .height(48.dp)
+                                .heightIn(min = 48.dp)
+                                .wrapContentHeight()
                                 .semantics { contentDescription = "Share Room Code" }
                                 .testTag("connect_share_code_button")
                         ) {
@@ -1094,7 +1180,6 @@ private fun NyxoraConnectSimpleActiveRoom(
                                 text = "Share Code",
                                 style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
                                 maxLines = 1,
-                                softWrap = false,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
@@ -1107,10 +1192,11 @@ private fun NyxoraConnectSimpleActiveRoom(
                                 containerColor = NyxoraDangerRed.copy(alpha = 0.12f),
                                 contentColor = NyxoraDangerRed
                             ),
-                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                             modifier = Modifier
                                 .weight(1f)
-                                .height(48.dp)
+                                .heightIn(min = 48.dp)
+                                .wrapContentHeight()
                                 .semantics { contentDescription = "Leave Room" }
                                 .testTag("connect_leave_or_close_button")
                         ) {
@@ -1124,7 +1210,6 @@ private fun NyxoraConnectSimpleActiveRoom(
                                 text = "Leave Room",
                                 style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
                                 maxLines = 1,
-                                softWrap = false,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
@@ -1135,6 +1220,7 @@ private fun NyxoraConnectSimpleActiveRoom(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .wrapContentHeight()
                                 .testTag("connect_allow_participant_controls_row"),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
@@ -1162,15 +1248,19 @@ private fun NyxoraConnectSimpleActiveRoom(
                         }
                     } else if (!room.permissions.allowParticipantControls || !participantControlsDisabledNotice.isNullOrBlank()) {
                         Surface(
-                            shape = RoundedCornerShape(8.dp),
+                            shape = RoundedCornerShape(10.dp),
                             color = NyxoraWarningAmber.copy(alpha = 0.14f),
                             border = BorderStroke(1.dp, NyxoraWarningAmber.copy(alpha = 0.45f)),
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .wrapContentHeight()
                                 .testTag("connect_participant_controls_disabled_notice")
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .wrapContentHeight()
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Icon(
@@ -1184,7 +1274,8 @@ private fun NyxoraConnectSimpleActiveRoom(
                                     text = participantControlsDisabledNotice
                                         ?: "Shared controls are disabled by the host — only the host can control shared navigation and playback.",
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurface
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.weight(1f)
                                 )
                             }
                         }
