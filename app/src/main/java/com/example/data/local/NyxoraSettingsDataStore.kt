@@ -96,10 +96,17 @@ data class NyxoraSettingsState(
     val defaultCameraPermission: String = "ASK",
     val defaultMicPermission: String = "ASK",
     val defaultNotificationPermission: String = "ASK",
-    // Privacy & Security
+    // Privacy, Security & NYXORA Shield
+    val shieldMasterEnabled: Boolean = true,
     val adBlockingEnabled: Boolean = true,
+    val trackerProtectionEnabled: Boolean = true,
     val popupBlockingEnabled: Boolean = true,
     val redirectBlockingEnabled: Boolean = true,
+    val cosmeticFilteringEnabled: Boolean = true,
+    val urlTrackingProtectionEnabled: Boolean = true,
+    val dnsProtectionEnabled: Boolean = true,
+    val enabledFilterLists: Set<String> = com.example.domain.browser.ShieldFilterListId.defaultEnabledIds(),
+    val whitelistedWebsites: Set<String> = emptySet(),
     val showBlockedMessages: Boolean = true,
     val httpsOnlyMode: Boolean = false,
     val blockThirdPartyCookies: Boolean = true,
@@ -108,10 +115,14 @@ data class NyxoraSettingsState(
     val privateTabsPinHash: String = "",
     // Blocking Metrics
     val totalAdsBlockedCount: Long = 0L,
+    val totalTrackersBlockedCount: Long = 0L,
     val totalPopupsBlockedCount: Long = 0L,
     val totalRedirectsBlockedCount: Long = 0L,
+    val totalTrackingParamsStrippedCount: Long = 0L,
+    val totalDnsThreatsBlockedCount: Long = 0L,
     val lastFilterUpdateMillis: Long = 0L,
-    val filterRuleCount: Int = 48,
+    val lastFilterUpdateStatus: String = "Active (Built-in + Cached Rules)",
+    val filterRuleCount: Int = com.example.domain.browser.NyxoraShieldEngine.getTotalActiveRuleCount(),
     // Downloads
     val downloadConfirmRiskyFiles: Boolean = true,
     val downloadNotificationsEnabled: Boolean = true,
@@ -171,9 +182,16 @@ class NyxoraSettingsDataStore(private val context: Context) {
         val DEFAULT_MIC_PERMISSION = stringPreferencesKey("default_mic_permission")
         val DEFAULT_NOTIFICATION_PERMISSION = stringPreferencesKey("default_notification_permission")
 
+        val SHIELD_MASTER_ENABLED = booleanPreferencesKey("shield_master_enabled")
         val AD_BLOCKING = booleanPreferencesKey("ad_blocking")
+        val TRACKER_PROTECTION = booleanPreferencesKey("tracker_protection")
         val POPUP_BLOCKING = booleanPreferencesKey("popup_blocking")
         val REDIRECT_BLOCKING = booleanPreferencesKey("redirect_blocking")
+        val COSMETIC_FILTERING = booleanPreferencesKey("cosmetic_filtering")
+        val URL_TRACKING_PROTECTION = booleanPreferencesKey("url_tracking_protection")
+        val DNS_PROTECTION = booleanPreferencesKey("dns_protection")
+        val SHIELD_ENABLED_FILTER_LISTS = stringPreferencesKey("shield_enabled_filter_lists")
+        val SHIELD_WHITELISTED_WEBSITES = stringPreferencesKey("shield_whitelisted_websites")
         val SHOW_BLOCKED_MSG = booleanPreferencesKey("show_blocked_msg")
         val HTTPS_ONLY = booleanPreferencesKey("https_only")
         val BLOCK_3P_COOKIES = booleanPreferencesKey("block_3p_cookies")
@@ -182,9 +200,13 @@ class NyxoraSettingsDataStore(private val context: Context) {
         val PRIVATE_TABS_PIN = stringPreferencesKey("private_tabs_pin")
 
         val ADS_BLOCKED_COUNT = longPreferencesKey("ads_blocked_count")
+        val TRACKERS_BLOCKED_COUNT = longPreferencesKey("trackers_blocked_count")
         val POPUPS_BLOCKED_COUNT = longPreferencesKey("popups_blocked_count")
         val REDIRECTS_BLOCKED_COUNT = longPreferencesKey("redirects_blocked_count")
+        val TRACKING_PARAMS_STRIPPED_COUNT = longPreferencesKey("tracking_params_stripped_count")
+        val DNS_THREATS_BLOCKED_COUNT = longPreferencesKey("dns_threats_blocked_count")
         val LAST_FILTER_UPDATE = longPreferencesKey("last_filter_update")
+        val LAST_FILTER_UPDATE_STATUS = stringPreferencesKey("last_filter_update_status")
         val FILTER_RULE_COUNT = intPreferencesKey("filter_rule_count")
 
         val CONFIRM_RISKY_FILES = booleanPreferencesKey("confirm_risky_files")
@@ -221,6 +243,24 @@ class NyxoraSettingsDataStore(private val context: Context) {
         } else {
             rawConnectEndpoint
         }
+        val rawEnabledLists = prefs[Keys.SHIELD_ENABLED_FILTER_LISTS]
+        val parsedEnabledLists = when {
+            rawEnabledLists == null -> com.example.domain.browser.ShieldFilterListId.defaultEnabledIds()
+            rawEnabledLists.isBlank() || rawEnabledLists == "NONE" -> emptySet()
+            else -> rawEnabledLists.split(',')
+                .map { it.trim().lowercase() }
+                .filter { it.isNotEmpty() }
+                .toSet()
+        }
+        val rawWhitelist = prefs[Keys.SHIELD_WHITELISTED_WEBSITES]
+        val parsedWhitelist = if (rawWhitelist.isNullOrBlank()) {
+            emptySet()
+        } else {
+            rawWhitelist.split(',')
+                .map { com.example.domain.browser.NyxoraShieldEngine.normalizeDomain(it) }
+                .filter { it.isNotEmpty() }
+                .toSet()
+        }
         return NyxoraSettingsState(
             themeMode = runCatching { ThemeMode.valueOf(prefs[Keys.THEME_MODE] ?: ThemeMode.DARK.name) }.getOrDefault(ThemeMode.DARK),
             homepageUrl = (prefs[Keys.HOMEPAGE_URL] ?: "nyxora://home").ifBlank { "nyxora://home" },
@@ -252,9 +292,16 @@ class NyxoraSettingsDataStore(private val context: Context) {
             defaultCameraPermission = prefs[Keys.DEFAULT_CAMERA_PERMISSION] ?: "ASK",
             defaultMicPermission = prefs[Keys.DEFAULT_MIC_PERMISSION] ?: "ASK",
             defaultNotificationPermission = prefs[Keys.DEFAULT_NOTIFICATION_PERMISSION] ?: "ASK",
+            shieldMasterEnabled = prefs[Keys.SHIELD_MASTER_ENABLED] ?: true,
             adBlockingEnabled = prefs[Keys.AD_BLOCKING] ?: true,
+            trackerProtectionEnabled = prefs[Keys.TRACKER_PROTECTION] ?: true,
             popupBlockingEnabled = prefs[Keys.POPUP_BLOCKING] ?: true,
             redirectBlockingEnabled = prefs[Keys.REDIRECT_BLOCKING] ?: true,
+            cosmeticFilteringEnabled = prefs[Keys.COSMETIC_FILTERING] ?: true,
+            urlTrackingProtectionEnabled = prefs[Keys.URL_TRACKING_PROTECTION] ?: true,
+            dnsProtectionEnabled = prefs[Keys.DNS_PROTECTION] ?: true,
+            enabledFilterLists = parsedEnabledLists,
+            whitelistedWebsites = parsedWhitelist,
             showBlockedMessages = prefs[Keys.SHOW_BLOCKED_MSG] ?: true,
             httpsOnlyMode = prefs[Keys.HTTPS_ONLY] ?: false,
             blockThirdPartyCookies = prefs[Keys.BLOCK_3P_COOKIES] ?: true,
@@ -262,10 +309,14 @@ class NyxoraSettingsDataStore(private val context: Context) {
             privateTabsLockEnabled = prefs[Keys.PRIVATE_TABS_LOCK] ?: false,
             privateTabsPinHash = prefs[Keys.PRIVATE_TABS_PIN] ?: "",
             totalAdsBlockedCount = prefs[Keys.ADS_BLOCKED_COUNT] ?: 0L,
+            totalTrackersBlockedCount = prefs[Keys.TRACKERS_BLOCKED_COUNT] ?: 0L,
             totalPopupsBlockedCount = prefs[Keys.POPUPS_BLOCKED_COUNT] ?: 0L,
             totalRedirectsBlockedCount = prefs[Keys.REDIRECTS_BLOCKED_COUNT] ?: 0L,
+            totalTrackingParamsStrippedCount = prefs[Keys.TRACKING_PARAMS_STRIPPED_COUNT] ?: 0L,
+            totalDnsThreatsBlockedCount = prefs[Keys.DNS_THREATS_BLOCKED_COUNT] ?: 0L,
             lastFilterUpdateMillis = prefs[Keys.LAST_FILTER_UPDATE] ?: 0L,
-            filterRuleCount = prefs[Keys.FILTER_RULE_COUNT] ?: 48,
+            lastFilterUpdateStatus = prefs[Keys.LAST_FILTER_UPDATE_STATUS] ?: "Active (Built-in + Cached Rules)",
+            filterRuleCount = prefs[Keys.FILTER_RULE_COUNT] ?: com.example.domain.browser.NyxoraShieldEngine.getTotalActiveRuleCount(),
             downloadConfirmRiskyFiles = prefs[Keys.CONFIRM_RISKY_FILES] ?: true,
             downloadNotificationsEnabled = prefs[Keys.DOWNLOAD_NOTIFICATIONS] ?: true,
             edgeSwipeBackForward = prefs[Keys.EDGE_SWIPE] ?: true,
@@ -322,9 +373,24 @@ class NyxoraSettingsDataStore(private val context: Context) {
             prefs[Keys.DEFAULT_CAMERA_PERMISSION] = updated.defaultCameraPermission
             prefs[Keys.DEFAULT_MIC_PERMISSION] = updated.defaultMicPermission
             prefs[Keys.DEFAULT_NOTIFICATION_PERMISSION] = updated.defaultNotificationPermission
+            prefs[Keys.SHIELD_MASTER_ENABLED] = updated.shieldMasterEnabled
             prefs[Keys.AD_BLOCKING] = updated.adBlockingEnabled
+            prefs[Keys.TRACKER_PROTECTION] = updated.trackerProtectionEnabled
             prefs[Keys.POPUP_BLOCKING] = updated.popupBlockingEnabled
             prefs[Keys.REDIRECT_BLOCKING] = updated.redirectBlockingEnabled
+            prefs[Keys.COSMETIC_FILTERING] = updated.cosmeticFilteringEnabled
+            prefs[Keys.URL_TRACKING_PROTECTION] = updated.urlTrackingProtectionEnabled
+            prefs[Keys.DNS_PROTECTION] = updated.dnsProtectionEnabled
+            prefs[Keys.SHIELD_ENABLED_FILTER_LISTS] = if (updated.enabledFilterLists.isEmpty()) {
+                "NONE"
+            } else {
+                updated.enabledFilterLists.joinToString(",")
+            }
+            prefs[Keys.SHIELD_WHITELISTED_WEBSITES] = updated.whitelistedWebsites
+                .map { com.example.domain.browser.NyxoraShieldEngine.normalizeDomain(it) }
+                .filter { it.isNotEmpty() }
+                .distinct()
+                .joinToString(",")
             prefs[Keys.SHOW_BLOCKED_MSG] = updated.showBlockedMessages
             prefs[Keys.HTTPS_ONLY] = updated.httpsOnlyMode
             prefs[Keys.BLOCK_3P_COOKIES] = updated.blockThirdPartyCookies
@@ -332,9 +398,13 @@ class NyxoraSettingsDataStore(private val context: Context) {
             prefs[Keys.PRIVATE_TABS_LOCK] = updated.privateTabsLockEnabled
             prefs[Keys.PRIVATE_TABS_PIN] = updated.privateTabsPinHash
             prefs[Keys.ADS_BLOCKED_COUNT] = updated.totalAdsBlockedCount
+            prefs[Keys.TRACKERS_BLOCKED_COUNT] = updated.totalTrackersBlockedCount
             prefs[Keys.POPUPS_BLOCKED_COUNT] = updated.totalPopupsBlockedCount
             prefs[Keys.REDIRECTS_BLOCKED_COUNT] = updated.totalRedirectsBlockedCount
+            prefs[Keys.TRACKING_PARAMS_STRIPPED_COUNT] = updated.totalTrackingParamsStrippedCount
+            prefs[Keys.DNS_THREATS_BLOCKED_COUNT] = updated.totalDnsThreatsBlockedCount
             prefs[Keys.LAST_FILTER_UPDATE] = updated.lastFilterUpdateMillis
+            prefs[Keys.LAST_FILTER_UPDATE_STATUS] = updated.lastFilterUpdateStatus
             prefs[Keys.FILTER_RULE_COUNT] = updated.filterRuleCount
             prefs[Keys.CONFIRM_RISKY_FILES] = updated.downloadConfirmRiskyFiles
             prefs[Keys.DOWNLOAD_NOTIFICATIONS] = updated.downloadNotificationsEnabled
@@ -360,11 +430,27 @@ class NyxoraSettingsDataStore(private val context: Context) {
         updateSettings { NyxoraSettingsState() }
     }
 
-    suspend fun incrementBlockedMetric(ads: Int = 0, popups: Int = 0, redirects: Int = 0) {
+    suspend fun incrementBlockedMetric(
+        ads: Int = 0,
+        popups: Int = 0,
+        redirects: Int = 0,
+        trackers: Int = 0,
+        trackingParams: Int = 0,
+        dnsThreats: Int = 0
+    ) {
         context.nyxoraDataStore.edit { prefs ->
             if (ads > 0) prefs[Keys.ADS_BLOCKED_COUNT] = (prefs[Keys.ADS_BLOCKED_COUNT] ?: 0L) + ads
+            if (trackers > 0) prefs[Keys.TRACKERS_BLOCKED_COUNT] = (prefs[Keys.TRACKERS_BLOCKED_COUNT] ?: 0L) + trackers
             if (popups > 0) prefs[Keys.POPUPS_BLOCKED_COUNT] = (prefs[Keys.POPUPS_BLOCKED_COUNT] ?: 0L) + popups
             if (redirects > 0) prefs[Keys.REDIRECTS_BLOCKED_COUNT] = (prefs[Keys.REDIRECTS_BLOCKED_COUNT] ?: 0L) + redirects
+            if (trackingParams > 0) {
+                prefs[Keys.TRACKING_PARAMS_STRIPPED_COUNT] =
+                    (prefs[Keys.TRACKING_PARAMS_STRIPPED_COUNT] ?: 0L) + trackingParams
+            }
+            if (dnsThreats > 0) {
+                prefs[Keys.DNS_THREATS_BLOCKED_COUNT] =
+                    (prefs[Keys.DNS_THREATS_BLOCKED_COUNT] ?: 0L) + dnsThreats
+            }
         }
     }
 }

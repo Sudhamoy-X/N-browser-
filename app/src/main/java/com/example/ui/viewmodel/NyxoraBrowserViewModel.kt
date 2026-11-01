@@ -34,8 +34,13 @@ import com.example.data.model.SyncedTabItem
 import com.example.domain.browser.ContentBlockingEngine
 import com.example.domain.browser.DownloadEngine
 import com.example.domain.browser.EncryptedBackupManager
+import com.example.domain.browser.FilterListStatusItem
 import com.example.domain.browser.InputClassification
+import com.example.domain.browser.NyxoraShieldEngine
 import com.example.domain.browser.ReaderArticle
+import com.example.domain.browser.ShieldBlockOutcome
+import com.example.domain.browser.ShieldFilterListId
+import com.example.domain.browser.ShieldProtectionConfig
 import com.example.domain.browser.UrlAndSearchHandler
 import com.example.domain.connect.IncomingRemoteSyncCommand
 import com.example.domain.connect.NyxoraConnectSecurity
@@ -362,11 +367,49 @@ class NyxoraBrowserViewModel(
         _activeTab.value = nextState.activeTab
     }
 
+    private fun syncShieldEngineConfig(
+        s: NyxoraSettingsState = settings.value,
+        sites: List<SiteSettingItem> = siteSettings.value
+    ) {
+        val siteAllowedHosts = sites.asSequence()
+            .filter { it.allowAds }
+            .map { NyxoraShieldEngine.normalizeDomain(it.host) }
+            .filter { it.isNotEmpty() }
+            .toSet()
+        val localAllowedHosts = localSiteSettingCache.values.asSequence()
+            .filter { it.allowAds }
+            .map { NyxoraShieldEngine.normalizeDomain(it.host) }
+            .filter { it.isNotEmpty() }
+            .toSet()
+        val combinedWhitelist = s.whitelistedWebsites + siteAllowedHosts + localAllowedHosts
+        NyxoraShieldEngine.updateProtectionConfig(
+            ShieldProtectionConfig(
+                shieldMasterEnabled = s.shieldMasterEnabled,
+                adBlockingEnabled = s.adBlockingEnabled,
+                trackerProtectionEnabled = s.trackerProtectionEnabled,
+                popupProtectionEnabled = s.popupBlockingEnabled,
+                redirectProtectionEnabled = s.redirectBlockingEnabled,
+                cosmeticFilteringEnabled = s.cosmeticFilteringEnabled,
+                urlTrackingProtectionEnabled = s.urlTrackingProtectionEnabled,
+                dnsProtectionEnabled = s.dnsProtectionEnabled,
+                enabledFilterListIds = s.enabledFilterLists,
+                whitelistedHosts = combinedWhitelist
+            )
+        )
+    }
+
     init {
-        // Keep ContentBlockingEngine updated with custom rules on a background thread
+        // Keep ContentBlockingEngine and NyxoraShieldEngine updated with custom rules on a background thread
         viewModelScope.launch(Dispatchers.Default) {
             customFilterRules.collect { rules ->
                 ContentBlockingEngine.updateCustomRules(rules)
+            }
+        }
+
+        // Keep NyxoraShieldEngine synchronized with settings and per-site whitelist overrides
+        viewModelScope.launch(Dispatchers.Default) {
+            combine(settings, siteSettings) { s, sites -> s to sites }.collect { (s, sites) ->
+                syncShieldEngineConfig(s, sites)
             }
         }
 
@@ -375,6 +418,7 @@ class NyxoraBrowserViewModel(
             try {
                 val initialSettings = runCatching { settingsDataStore.settingsFlow.first() }
                     .getOrDefault(NyxoraSettingsState())
+                syncShieldEngineConfig(initialSettings, siteSettings.value)
                 val defaultEndpoint = NyxoraConnectSecurity.configuredPublicWssEndpoint()
                 if (initialSettings.connectBackendEndpoint.isBlank() ||
                     initialSettings.connectBackendEndpoint.equals(NyxoraConnectSecurity.LEGACY_PRODUCTION_WSS_ENDPOINT, ignoreCase = true)
@@ -514,11 +558,21 @@ class NyxoraBrowserViewModel(
                 val effectiveDesktop = siteOverride?.desktopMode ?: currentActive.desktopMode
                 val effectiveZoom = siteOverride?.textZoom ?: currentSettings.globalTextZoom
                 val isHome = target.finalUrl.equals("nyxora://home", ignoreCase = true)
-                val finalNavUrl = if (!isHome && effectiveDesktop) {
+                val desktopAdjustedUrl = if (!isHome && effectiveDesktop) {
                     rewriteMobileSubdomainToDesktopUrl(target.finalUrl)
                 } else {
                     target.finalUrl
                 }
+                val cleanResult = if (!isHome) {
+                    NyxoraShieldEngine.cleanUrlTrackingParameters(
+                        rawUrl = desktopAdjustedUrl,
+                        siteSetting = siteOverride
+                    )
+                } else null
+                if (cleanResult?.wasModified == true) {
+                    recordTrackingParamsStripped(cleanResult.removedParams.size)
+                }
+                val finalNavUrl = cleanResult?.cleanedUrl ?: desktopAdjustedUrl
                 val newTitle = if (isHome) "Home" else target.safeDisplayHost.ifBlank { finalNavUrl }
 
                 updateTab(currentActive.id) { tab ->
@@ -551,7 +605,7 @@ class NyxoraBrowserViewModel(
 
                 if (!isApplyingRemoteSyncNavigation && !currentActive.isPrivate && !_isPrivateMode.value) {
                     connectManager.publishUrlNavigation(
-                        url = target.finalUrl,
+                        url = finalNavUrl,
                         title = newTitle,
                         isPrivateTab = false,
                         isPrivateMode = false,
@@ -1143,15 +1197,25 @@ class NyxoraBrowserViewModel(
         val isHome = resolvedUrl.equals("nyxora://home", ignoreCase = true)
         val host = UrlAndSearchHandler.extractHost(resolvedUrl)
         val siteOverride = getSiteSettingForHost(host)
+        val cleanResult = if (!isHome) {
+            NyxoraShieldEngine.cleanUrlTrackingParameters(
+                rawUrl = resolvedUrl,
+                siteSetting = siteOverride
+            )
+        } else null
+        if (cleanResult?.wasModified == true) {
+            recordTrackingParamsStripped(cleanResult.removedParams.size)
+        }
+        val finalTabUrl = cleanResult?.cleanedUrl ?: resolvedUrl
         val cleanGroup = groupName.trim().ifBlank { "Default" }
         val newTab = BrowserTab(
             id = UUID.randomUUID().toString(),
             title = if (isHome) {
                 if (inPrivateMode) "Private Home" else "Home"
             } else {
-                UrlAndSearchHandler.formatSafeDisplayHost(resolvedUrl).ifBlank { host.ifBlank { "New Tab" } }
+                UrlAndSearchHandler.formatSafeDisplayHost(finalTabUrl).ifBlank { host.ifBlank { "New Tab" } }
             },
-            url = resolvedUrl,
+            url = finalTabUrl,
             isPrivate = inPrivateMode,
             groupName = cleanGroup,
             isLoading = !isHome,
@@ -1670,14 +1734,25 @@ class NyxoraBrowserViewModel(
             host = cleanHost
         )
         localSiteSettingCache[cleanHost] = normalized
+        syncShieldEngineConfig(settings.value, siteSettings.value)
         viewModelScope.launch {
             siteSettingDao.upsertSiteSetting(normalized)
+            if (normalized.allowAds) {
+                settingsDataStore.updateSettings { s ->
+                    s.copy(whitelistedWebsites = s.whitelistedWebsites + cleanHost)
+                }
+            } else if (cleanHost in settings.value.whitelistedWebsites) {
+                settingsDataStore.updateSettings { s ->
+                    s.copy(whitelistedWebsites = s.whitelistedWebsites - cleanHost)
+                }
+            }
         }
     }
 
     fun deleteSiteSetting(host: String) {
         val cleanHost = normalizeSiteHostKey(host)
         localSiteSettingCache.remove(cleanHost)
+        syncShieldEngineConfig(settings.value, siteSettings.value)
         viewModelScope.launch {
             siteSettingDao.deleteSiteSettingByHost(cleanHost)
         }
@@ -1699,6 +1774,7 @@ class NyxoraBrowserViewModel(
 
     fun resetAllSitePermissions() {
         localSiteSettingCache.clear()
+        syncShieldEngineConfig(settings.value, emptyList())
         viewModelScope.launch {
             siteSettingDao.clearAllSiteSettings()
             settingsDataStore.updateSettings {
@@ -1715,6 +1791,8 @@ class NyxoraBrowserViewModel(
 
     fun resetBrowserSettings() {
         localSiteSettingCache.clear()
+        val defaults = NyxoraSettingsState()
+        syncShieldEngineConfig(defaults, emptyList())
         viewModelScope.launch {
             settingsDataStore.resetToDefaults()
             siteSettingDao.clearAllSiteSettings()
@@ -1808,11 +1886,95 @@ class NyxoraBrowserViewModel(
         }
     }
 
-    // --- BLOCKING EVENTS & ALLOW ONCE ---
+    // --- NYXORA SHIELD BLOCKING EVENTS, FILTER LISTS & WHITELIST ---
 
     fun recordAdBlocked() {
         viewModelScope.launch {
             settingsDataStore.incrementBlockedMetric(ads = 1)
+        }
+    }
+
+    fun recordShieldSubresourceBlocked(outcome: ShieldBlockOutcome) {
+        viewModelScope.launch {
+            when (outcome) {
+                ShieldBlockOutcome.BLOCKED_AD -> settingsDataStore.incrementBlockedMetric(ads = 1)
+                ShieldBlockOutcome.BLOCKED_TRACKER -> settingsDataStore.incrementBlockedMetric(trackers = 1)
+                ShieldBlockOutcome.BLOCKED_MALICIOUS_DNS -> settingsDataStore.incrementBlockedMetric(ads = 1, dnsThreats = 1)
+                else -> settingsDataStore.incrementBlockedMetric(ads = 1)
+            }
+        }
+    }
+
+    fun recordTrackingParamsStripped(count: Int = 1) {
+        if (count <= 0) return
+        viewModelScope.launch {
+            settingsDataStore.incrementBlockedMetric(trackingParams = count)
+        }
+    }
+
+    fun getShieldFilterListStatuses(): List<FilterListStatusItem> {
+        return NyxoraShieldEngine.getFilterListStatuses()
+    }
+
+    fun toggleFilterList(listId: String, enabled: Boolean) {
+        val cleanId = listId.trim().lowercase()
+        if (cleanId.isEmpty()) return
+        val currentLists = settings.value.enabledFilterLists
+        val nextLists = if (enabled) currentLists + cleanId else currentLists - cleanId
+        val nextState = settings.value.copy(enabledFilterLists = nextLists)
+        syncShieldEngineConfig(nextState, siteSettings.value)
+        val updatedRuleCount = NyxoraShieldEngine.getTotalActiveRuleCount()
+        viewModelScope.launch {
+            settingsDataStore.updateSettings { s ->
+                val lists = if (enabled) s.enabledFilterLists + cleanId else s.enabledFilterLists - cleanId
+                s.copy(
+                    enabledFilterLists = lists,
+                    filterRuleCount = updatedRuleCount
+                )
+            }
+            val listTitle = ShieldFilterListId.fromId(cleanId)?.title ?: cleanId
+            emitToast(if (enabled) "Enabled $listTitle" else "Disabled $listTitle")
+        }
+    }
+
+    fun addWhitelistedWebsite(rawHostOrUrl: String) {
+        val cleanHost = NyxoraShieldEngine.normalizeDomain(rawHostOrUrl)
+        if (cleanHost.isEmpty() || (!cleanHost.contains('.') && cleanHost != "localhost")) {
+            emitToast("Enter a valid domain (e.g. example.com)")
+            return
+        }
+        val existingSite = getSiteSettingForHost(cleanHost) ?: SiteSettingItem(userId = currentUserId, host = cleanHost)
+        val updatedSite = existingSite.copy(id = existingSite.id.ifBlank { cleanHost }, host = cleanHost, allowAds = true)
+        localSiteSettingCache[cleanHost] = updatedSite
+        val nextSettings = settings.value.copy(whitelistedWebsites = settings.value.whitelistedWebsites + cleanHost)
+        syncShieldEngineConfig(nextSettings, siteSettings.value)
+        viewModelScope.launch {
+            siteSettingDao.upsertSiteSetting(updatedSite)
+            settingsDataStore.updateSettings { s ->
+                s.copy(whitelistedWebsites = s.whitelistedWebsites + cleanHost)
+            }
+            emitToast("Added $cleanHost to NYXORA Shield whitelist")
+        }
+    }
+
+    fun removeWhitelistedWebsite(rawHostOrUrl: String) {
+        val cleanHost = NyxoraShieldEngine.normalizeDomain(rawHostOrUrl)
+        if (cleanHost.isEmpty()) return
+        val existingSite = getSiteSettingForHost(cleanHost)
+        if (existingSite != null && existingSite.allowAds) {
+            val updatedSite = existingSite.copy(allowAds = false)
+            localSiteSettingCache[cleanHost] = updatedSite
+            viewModelScope.launch {
+                siteSettingDao.upsertSiteSetting(updatedSite)
+            }
+        }
+        val nextSettings = settings.value.copy(whitelistedWebsites = settings.value.whitelistedWebsites - cleanHost)
+        syncShieldEngineConfig(nextSettings, siteSettings.value.filterNot { normalizeSiteHostKey(it.host) == cleanHost && it.allowAds })
+        viewModelScope.launch {
+            settingsDataStore.updateSettings { s ->
+                s.copy(whitelistedWebsites = s.whitelistedWebsites - cleanHost)
+            }
+            emitToast("Removed $cleanHost from NYXORA Shield whitelist")
         }
     }
 
@@ -1858,28 +2020,46 @@ class NyxoraBrowserViewModel(
 
     fun refreshRemoteFilterList() {
         viewModelScope.launch {
-            emitToast("Updating filter rules…")
+            emitToast("Updating NYXORA Shield filter lists in background…")
             val result = ContentBlockingEngine.fetchRemoteFilterListUpdate()
             result.onSuccess { newRules ->
-                filterRuleDao.deleteBySourceList("Remote Update")
-                filterRuleDao.insertRules(newRules)
-                val totalCount = ContentBlockingEngine.getTotalActiveRuleCount() + newRules.size
-                settingsDataStore.updateSettings {
-                    it.copy(
-                        lastFilterUpdateMillis = System.currentTimeMillis(),
-                        filterRuleCount = totalCount
-                    )
+                if (newRules.isNotEmpty()) {
+                    filterRuleDao.deleteBySourceList("Remote Update")
+                    filterRuleDao.insertRules(newRules)
+                    val totalCount = ContentBlockingEngine.getTotalActiveRuleCount() + newRules.size
+                    val statusMsg = "Updated (${totalCount} active rules)"
+                    settingsDataStore.updateSettings {
+                        it.copy(
+                            lastFilterUpdateMillis = System.currentTimeMillis(),
+                            lastFilterUpdateStatus = statusMsg,
+                            filterRuleCount = totalCount
+                        )
+                    }
+                    emitToast("NYXORA Shield filters updated ($totalCount active rules)")
+                } else {
+                    val retainedCount = ContentBlockingEngine.getTotalActiveRuleCount()
+                    val statusMsg = "Retained last working filter database ($retainedCount active rules)"
+                    settingsDataStore.updateSettings {
+                        it.copy(
+                            lastFilterUpdateMillis = System.currentTimeMillis(),
+                            lastFilterUpdateStatus = statusMsg,
+                            filterRuleCount = retainedCount
+                        )
+                    }
+                    emitToast(statusMsg)
                 }
-                emitToast("Filter list updated ($totalCount active rules)")
             }.onFailure { err ->
-                val builtInCount = ContentBlockingEngine.getTotalActiveRuleCount()
+                // Retain the last working filter database (never delete cached rules on failure)
+                val retainedCount = ContentBlockingEngine.getTotalActiveRuleCount()
+                val statusMsg = "Retained last working filter database ($retainedCount active rules)"
                 settingsDataStore.updateSettings {
                     it.copy(
                         lastFilterUpdateMillis = System.currentTimeMillis(),
-                        filterRuleCount = builtInCount
+                        lastFilterUpdateStatus = statusMsg,
+                        filterRuleCount = retainedCount
                     )
                 }
-                emitToast("Using verified built-in rules ($builtInCount active) — remote list unreachable: ${err.message ?: "offline"}")
+                emitToast("$statusMsg — remote list unreachable: ${err.message ?: "offline"}")
             }
         }
     }
@@ -2050,6 +2230,7 @@ class NyxoraBrowserViewModel(
     fun updateSettings(transform: (NyxoraSettingsState) -> NyxoraSettingsState) {
         val before = settings.value
         val after = transform(before)
+        syncShieldEngineConfig(after, siteSettings.value)
         if (after.globalTextZoom != before.globalTextZoom || after.defaultDesktopSite != before.defaultDesktopSite) {
             val propagateToTab: (BrowserTab) -> BrowserTab = { tab ->
                 val siteOverride = getSiteSettingForHost(tab.host)

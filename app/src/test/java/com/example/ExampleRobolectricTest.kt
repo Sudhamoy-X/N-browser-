@@ -2743,6 +2743,374 @@ class ExampleRobolectricTest {
         assertEquals(0, composeTestRule.onAllNodesWithTag("nyxora_notification_banner").fetchSemanticsNodes().size)
     }
 
+    @Test
+    fun `nyxora shield engine blocks ad domains trackers and malicious dns while preserving login payment video and whitelisted websites`() {
+        val shield = com.example.domain.browser.NyxoraShieldEngine
+        shield.syncCustomAndRemoteRules(emptyList())
+
+        val defaultConfig = com.example.domain.browser.ShieldProtectionConfig(
+            shieldMasterEnabled = true,
+            adBlockingEnabled = true,
+            trackerProtectionEnabled = true,
+            popupProtectionEnabled = true,
+            redirectProtectionEnabled = true,
+            cosmeticFilteringEnabled = true,
+            urlTrackingProtectionEnabled = true,
+            dnsProtectionEnabled = true,
+            enabledFilterListIds = com.example.domain.browser.ShieldFilterListId.defaultEnabledIds(),
+            whitelistedHosts = emptySet()
+        )
+        shield.updateProtectionConfig(defaultConfig)
+
+        // 1. Ad domain blocking (AdGuard Base / EasyList / Peter Lowe's List)
+        val doubleClickEval = shield.evaluateSubresourceRequest(
+            requestUrl = "https://securepubads.g.doubleclick.net/gpt/pubads_impl_2026.js",
+            pageUrl = "https://www.theverge.com/tech",
+            config = defaultConfig
+        )
+        assertTrue("DoubleClick ad script must be blocked", doubleClickEval.blocked)
+        assertEquals(
+            com.example.domain.browser.ShieldBlockOutcome.BLOCKED_AD,
+            doubleClickEval.outcome
+        )
+
+        val taboolaEval = shield.evaluateSubresourceRequest(
+            requestUrl = "https://cdn.taboola.com/libtrc/impl.js",
+            pageUrl = "https://news.example.com/article",
+            config = defaultConfig
+        )
+        assertTrue("Taboola widget script must be blocked", taboolaEval.blocked)
+
+        // 2. Third-party tracker blocking (EasyPrivacy) & independent toggle verification
+        val analyticsEval = shield.evaluateSubresourceRequest(
+            requestUrl = "https://www.google-analytics.com/analytics.js",
+            pageUrl = "https://blog.example.com/post",
+            config = defaultConfig
+        )
+        assertTrue("Google Analytics tracker must be blocked when Tracker Protection is ON", analyticsEval.blocked)
+        assertEquals(
+            com.example.domain.browser.ShieldBlockOutcome.BLOCKED_TRACKER,
+            analyticsEval.outcome
+        )
+
+        val trackerDisabledConfig = defaultConfig.copy(
+            trackerProtectionEnabled = false,
+            enabledFilterListIds = setOf(com.example.domain.browser.ShieldFilterListId.EASYPRIVACY.id)
+        )
+        val analyticsWhenDisabledEval = shield.evaluateSubresourceRequest(
+            requestUrl = "https://www.google-analytics.com/analytics.js",
+            pageUrl = "https://blog.example.com/post",
+            config = trackerDisabledConfig
+        )
+        assertFalse(
+            "Tracker must be allowed when Tracker Protection toggle is OFF",
+            analyticsWhenDisabledEval.blocked
+        )
+
+        // 3. DNS / Malvertising Guard
+        val malvertisingEval = shield.evaluateSubresourceRequest(
+            requestUrl = "https://malware-adserver.net/payload.js",
+            pageUrl = "https://news.example.com",
+            config = defaultConfig
+        )
+        assertTrue("Malvertising domain must be blocked by DNS guard", malvertisingEval.blocked)
+        assertEquals(
+            com.example.domain.browser.ShieldBlockOutcome.BLOCKED_MALICIOUS_DNS,
+            malvertisingEval.outcome
+        )
+
+        // 4. First-party allow rules & essential login/OAuth/payment/banking safelists
+        val firstPartyScriptEval = shield.evaluateSubresourceRequest(
+            requestUrl = "https://example.com/static/js/app-bundle.js",
+            pageUrl = "https://example.com/dashboard",
+            config = defaultConfig
+        )
+        assertFalse("First-party application bundle must never be blocked", firstPartyScriptEval.blocked)
+
+        val googleAuthEval = shield.evaluateSubresourceRequest(
+            requestUrl = "https://accounts.google.com/o/oauth2/v2/auth?client_id=123",
+            pageUrl = "https://app.example.com/login",
+            config = defaultConfig
+        )
+        assertFalse("Google OAuth login endpoint must never be blocked", googleAuthEval.blocked)
+
+        val stripePaymentEval = shield.evaluateSubresourceRequest(
+            requestUrl = "https://js.stripe.com/v3/",
+            pageUrl = "https://shop.example.com/checkout",
+            config = defaultConfig
+        )
+        assertFalse("Stripe payment script must never be blocked", stripePaymentEval.blocked)
+
+        val paypalEval = shield.evaluateSubresourceRequest(
+            requestUrl = "https://www.paypal.com/sdk/js?client-id=test",
+            pageUrl = "https://shop.example.com/checkout",
+            config = defaultConfig
+        )
+        assertFalse("PayPal checkout SDK must never be blocked", paypalEval.blocked)
+
+        // 5. YouTube & HTML5 Video compatibility
+        val youtubeStreamEval = shield.evaluateSubresourceRequest(
+            requestUrl = "https://rr3---sn-ab5l6nzl.googlevideo.com/videoplayback?expire=1700000000&id=o-test",
+            pageUrl = "https://m.youtube.com/watch?v=dQw4w9WgXcQ",
+            config = defaultConfig
+        )
+        assertFalse("YouTube googlevideo.com media stream must never be blocked", youtubeStreamEval.blocked)
+        assertEquals(
+            com.example.domain.browser.ShieldBlockOutcome.ALLOWED,
+            youtubeStreamEval.outcome
+        )
+
+        val youtubePlayerApiEval = shield.evaluateSubresourceRequest(
+            requestUrl = "https://m.youtube.com/youtubei/v1/player?key=AIzaSyTest",
+            pageUrl = "https://m.youtube.com/watch?v=dQw4w9WgXcQ",
+            config = defaultConfig
+        )
+        assertFalse("YouTube player API must never be blocked", youtubePlayerApiEval.blocked)
+
+        val youtubeAdPingEval = shield.evaluateSubresourceRequest(
+            requestUrl = "https://m.youtube.com/pagead/lvz?adformat=15_2",
+            pageUrl = "https://m.youtube.com/watch?v=dQw4w9WgXcQ",
+            config = defaultConfig
+        )
+        assertTrue("Known non-essential YouTube ad telemetry ping (/pagead/) should be blocked", youtubeAdPingEval.blocked)
+
+        val vimeoCdnEval = shield.evaluateSubresourceRequest(
+            requestUrl = "https://vod-progressive.akamaized.net/exp=123/vimeo-prod-skyfire-std-us/01/video.mp4",
+            pageUrl = "https://vimeo.com/123456",
+            config = defaultConfig
+        )
+        assertFalse("HTML5 video stream on Vimeo must never be blocked", vimeoCdnEval.blocked)
+
+        val youtubeCosmeticScript = shield.buildSafeCosmeticScript(
+            pageUrl = "https://m.youtube.com/watch?v=dQw4w9WgXcQ",
+            hideCookieBanners = true,
+            forceDarkWebPages = false,
+            adBlockingEnabled = true,
+            cosmeticFilteringEnabled = true,
+            shieldMasterEnabled = true
+        )
+        assertFalse(
+            "Cosmetic script on YouTube must never hide #movie_player or .html5-video-player",
+            youtubeCosmeticScript.contains("#movie_player") || youtubeCosmeticScript.contains(".html5-video-player")
+        )
+
+        // 6. Website Whitelist & @@|| allowlist exception rules
+        val whitelistedConfig = defaultConfig.copy(whitelistedHosts = setOf("theverge.com"))
+        val whitelistedPageAdEval = shield.evaluateSubresourceRequest(
+            requestUrl = "https://securepubads.g.doubleclick.net/gpt/pubads_impl_2026.js",
+            pageUrl = "https://www.theverge.com/tech",
+            config = whitelistedConfig
+        )
+        assertFalse("Requests on a whitelisted website must be allowed", whitelistedPageAdEval.blocked)
+        assertEquals(
+            com.example.domain.browser.ShieldBlockOutcome.ALLOWED,
+            whitelistedPageAdEval.outcome
+        )
+
+        // Custom rule with resource-type modifier ($script,third-party) and @@|| exception rule
+        shield.syncCustomAndRemoteRules(
+            listOf(
+                com.example.data.model.CustomFilterRule(
+                    pattern = "||custom-ad-cdn.example.net^\$script,third-party",
+                    isAllowRule = false
+                ),
+                com.example.data.model.CustomFilterRule(
+                    pattern = "@@||allowed-sub.custom-ad-cdn.example.net^",
+                    isAllowRule = true
+                )
+            )
+        )
+        val customBlockedScript = shield.evaluateSubresourceRequest(
+            requestUrl = "https://custom-ad-cdn.example.net/banner.js",
+            pageUrl = "https://publisher.org/home",
+            config = defaultConfig
+        )
+        assertTrue("Custom \$script,third-party rule must block matching third-party script", customBlockedScript.blocked)
+
+        val customAllowedImage = shield.evaluateSubresourceRequest(
+            requestUrl = "https://custom-ad-cdn.example.net/logo.png",
+            pageUrl = "https://publisher.org/home",
+            config = defaultConfig
+        )
+        assertFalse("Custom \$script rule must not block image resource", customAllowedImage.blocked)
+
+        val customExceptionSubdomain = shield.evaluateSubresourceRequest(
+            requestUrl = "https://allowed-sub.custom-ad-cdn.example.net/banner.js",
+            pageUrl = "https://publisher.org/home",
+            config = defaultConfig
+        )
+        assertFalse("Exception rule @@|| must override blocking rule", customExceptionSubdomain.blocked)
+        assertEquals(
+            com.example.domain.browser.ShieldBlockOutcome.ALLOWED,
+            customExceptionSubdomain.outcome
+        )
+
+        // 7. URL Tracking Parameter Stripping
+        val dirtyUrl = "https://example.com/articles/nyxora-shield?id=42&utm_source=newsletter&utm_medium=email&fbclid=IwAR12345&gclid=Cj0KCQ&q=kotlin#section-2"
+        val cleanResult = shield.cleanUrlTrackingParameters(
+            rawUrl = dirtyUrl,
+            config = defaultConfig
+        )
+        assertEquals("https://example.com/articles/nyxora-shield?id=42&q=kotlin#section-2", cleanResult.cleanedUrl)
+        assertEquals(4, cleanResult.removedParams.size)
+        assertTrue(cleanResult.removedParams.containsAll(listOf("utm_source", "utm_medium", "fbclid", "gclid")))
+        assertTrue(cleanResult.wasModified)
+
+        // Verify OAuth callback URLs with code= / state= are never mutated by URL parameter stripping
+        val oauthCallbackUrl = "https://app.example.com/oauth/callback?code=auth_code_987&state=csrf_token_123&utm_source=login"
+        val oauthCleanResult = shield.cleanUrlTrackingParameters(
+            rawUrl = oauthCallbackUrl,
+            config = defaultConfig
+        )
+        assertEquals(
+            "OAuth callback URLs must never be modified by URL tracking parameter cleaner",
+            oauthCallbackUrl,
+            oauthCleanResult.cleanedUrl
+        )
+        assertEquals(0, oauthCleanResult.removedParams.size)
+        assertFalse(oauthCleanResult.wasModified)
+
+        // 8. Redirect & Malicious Navigation Protection
+        val crossSiteAdRedirect = com.example.domain.browser.ContentBlockingEngine.evaluateTopLevelNavigation(
+            requestUrl = "https://onclickads.net/redirect?zone=99",
+            currentPageUrl = "https://blog.example.com/article",
+            hasUserGesture = true,
+            isServerRedirect = true,
+            timeSinceLastUserInteractionMs = 100L,
+            globalRedirectBlockingEnabled = true,
+            httpsOnlyMode = false,
+            siteSetting = null,
+            allowOnceUrls = emptySet()
+        )
+        assertEquals(
+            "Navigation to known ad-redirect/malvertising host must be blocked",
+            com.example.domain.browser.NavigationDecision.BLOCK_AUTO_REDIRECT,
+            crossSiteAdRedirect
+        )
+
+        shield.syncCustomAndRemoteRules(emptyList())
+    }
+
+    @Test
+    fun `nyxora shield settings ui persistence and filter update fallback retain last working database`() {
+        composeTestRule.mainClock.advanceTimeBy(2100L)
+        composeTestRule.waitForIdle()
+
+        val vm = checkNotNull(composeTestRule.activity.activeBrowserViewModel)
+        vm.switchBrowsingMode(false)
+        vm.closeAllTabs(inPrivateMode = false)
+        composeTestRule.waitForIdle()
+
+        // 1. Seed existing working custom/remote rules in database and verify failed filter update retains them
+        vm.addCustomFilterRule("||retained-working-filter.example.org^", isAllowRule = false)
+        val seedDeadline = System.currentTimeMillis() + 3000L
+        while (
+            vm.customFilterRules.value.none { it.pattern.contains("retained-working-filter.example.org") } &&
+            System.currentTimeMillis() < seedDeadline
+        ) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            composeTestRule.mainClock.advanceTimeBy(50L)
+            composeTestRule.waitForIdle()
+            Thread.sleep(20L)
+        }
+        val countBeforeFailedRefresh = vm.customFilterRules.value.size
+        assertTrue("Expected seeded filter rule before refresh", countBeforeFailedRefresh >= 1)
+
+        // Trigger filter update (in Robolectric test environment without external internet, remote fetch fails or falls back safely)
+        vm.refreshRemoteFilterList()
+        composeTestRule.mainClock.advanceTimeBy(200L)
+        composeTestRule.waitForIdle()
+
+        // Verify the existing working filter database is still intact
+        assertTrue(
+            "Last working filter rules must be retained when remote filter update fails",
+            vm.customFilterRules.value.any { it.pattern.contains("retained-working-filter.example.org") }
+        )
+
+        // 2. Verify URL Tracking Parameter Protection strips tracking params during tab navigation
+        vm.navigateInActiveTab("https://example.com/watch?v=abc123xyz&utm_source=twitter&fbclid=fb999")
+        composeTestRule.mainClock.advanceTimeBy(200L)
+        composeTestRule.waitForIdle()
+        assertEquals(
+            "Active tab navigation should strip utm_source and fbclid while preserving v=abc123xyz",
+            "https://example.com/watch?v=abc123xyz",
+            vm.activeTab.value.url
+        )
+
+        // 3. Open Settings -> Privacy & Security and verify all NYXORA Shield controls are rendered and interactive
+        vm.setOverlaySheet(com.example.ui.viewmodel.OverlaySheet.SETTINGS)
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("settings_category_privacy").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("shield_master_toggle").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("shield_ad_blocking_toggle").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("shield_tracker_protection_toggle").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("shield_popup_protection_toggle").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("shield_redirect_protection_toggle").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("shield_cosmetic_filtering_toggle").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("shield_url_tracking_toggle").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("shield_dns_protection_toggle").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("shield_statistics_section").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("shield_active_rule_count_text").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("shield_last_update_text").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("shield_update_filters_now_button").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("shield_filter_list_manager_section").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("shield_filter_list_toggle_adguard_base").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("shield_filter_list_toggle_easylist").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("shield_filter_list_toggle_easyprivacy").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("shield_filter_list_toggle_peter_lowe").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("shield_whitelist_section").performScrollTo().assertIsDisplayed()
+
+        // 4. Add a domain to the Website Whitelist via UI and verify persistence in settings
+        composeTestRule.onNodeWithTag("shield_whitelist_input").performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("shield_whitelist_input").performTextReplacement("trusted-news.example.com")
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("shield_whitelist_add_button").performScrollTo().performClick()
+
+        val whitelistAddDeadline = System.currentTimeMillis() + 3000L
+        while (
+            !vm.settings.value.whitelistedWebsites.contains("trusted-news.example.com") &&
+            System.currentTimeMillis() < whitelistAddDeadline
+        ) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            composeTestRule.mainClock.advanceTimeBy(50L)
+            composeTestRule.waitForIdle()
+            Thread.sleep(20L)
+        }
+        assertTrue(
+            "trusted-news.example.com must be added to whitelistedWebsites",
+            vm.settings.value.whitelistedWebsites.contains("trusted-news.example.com")
+        )
+        composeTestRule.onNodeWithTag("shield_whitelist_item_trusted-news.example.com").performScrollTo().assertIsDisplayed()
+
+        // Toggle Peter Lowe's list OFF and verify enabledFilterLists updates and persists
+        composeTestRule.onNodeWithTag("shield_filter_list_toggle_peter_lowe").performScrollTo().performClick()
+        val filterToggleDeadline = System.currentTimeMillis() + 3000L
+        while (
+            vm.settings.value.enabledFilterLists.contains("peter_lowe") &&
+            System.currentTimeMillis() < filterToggleDeadline
+        ) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            composeTestRule.mainClock.advanceTimeBy(50L)
+            composeTestRule.waitForIdle()
+            Thread.sleep(20L)
+        }
+        assertFalse(
+            "Peter Lowe filter list should be disabled after toggling OFF",
+            vm.settings.value.enabledFilterLists.contains("peter_lowe")
+        )
+
+        // Remove whitelisted website and restore Peter Lowe list
+        composeTestRule.onNodeWithTag("shield_whitelist_remove_trusted-news.example.com").performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("shield_filter_list_toggle_peter_lowe").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+
+        vm.setOverlaySheet(com.example.ui.viewmodel.OverlaySheet.NONE)
+        vm.closeAllTabs(inPrivateMode = false)
+        composeTestRule.waitForIdle()
+    }
+
     private fun findFirstWebView(root: View?): WebView? {
         if (root == null) return null
         if (root is WebView) return root

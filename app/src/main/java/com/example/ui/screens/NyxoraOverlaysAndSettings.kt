@@ -101,11 +101,17 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.BuildConfig
 import com.example.domain.browser.BrowserDiagnosticsEngine
+import com.example.domain.browser.ContentBlockingEngine
 import com.example.domain.browser.DownloadEngine
 import com.example.domain.browser.EngineCapabilityMatrix
+import com.example.domain.browser.NyxoraShieldEngine
 import com.example.domain.browser.ReaderArticle
+import com.example.domain.browser.ShieldFilterListId
 import com.example.domain.update.ApkUpdateUiState
 import com.example.ui.components.rememberNyxoraGentleMomentumFlingBehavior
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlin.math.roundToInt
 
 // --- BOOKMARKS SHEET ---
@@ -1093,6 +1099,29 @@ fun NyxoraSettingsScreen(
     onRefreshFilterList: () -> Unit,
     onAddCustomFilterRule: (String, Boolean) -> Unit,
     onRemoveCustomFilterRule: (String) -> Unit,
+    onToggleFilterList: (String, Boolean) -> Unit = { listId, enabled ->
+        onUpdateSettings { st ->
+            val updated = st.enabledFilterLists.toMutableSet()
+            if (enabled) updated.add(listId) else updated.remove(listId)
+            st.copy(enabledFilterLists = updated)
+        }
+    },
+    onAddWhitelistedWebsite: (String) -> Unit = { rawHost ->
+        val normalized = NyxoraShieldEngine.normalizeDomain(rawHost)
+        if (normalized.isNotBlank()) {
+            onUpdateSettings { st ->
+                st.copy(whitelistedWebsites = st.whitelistedWebsites + normalized)
+            }
+        }
+    },
+    onRemoveWhitelistedWebsite: (String) -> Unit = { rawHost ->
+        val normalized = NyxoraShieldEngine.normalizeDomain(rawHost)
+        if (normalized.isNotBlank()) {
+            onUpdateSettings { st ->
+                st.copy(whitelistedWebsites = st.whitelistedWebsites - normalized)
+            }
+        }
+    },
     onOpenSiteSettings: () -> Unit,
     onOpenDownloads: () -> Unit = {},
     onOpenNyxoraConnect: () -> Unit = {},
@@ -1562,40 +1591,310 @@ fun NyxoraSettingsScreen(
                 }
             }
 
-            // 3. PRIVACY & SECURITY
+            // 3. PRIVACY & SECURITY (NYXORA SHIELD)
             if (selectedCategory == SettingsCategory.PRIVACY ||
-                matchesSearch("Privacy", "Security", "Ad", "Pop-up", "Incognito", "Clear", "Cookie", "Do Not Track", "HTTPS", "Backup")
+                matchesSearch(
+                    "Privacy",
+                    "Security",
+                    "Shield",
+                    "NYXORA Shield",
+                    "Ad",
+                    "Tracker",
+                    "Pop-up",
+                    "Cosmetic",
+                    "URL Tracking",
+                    "DNS",
+                    "Filter",
+                    "Whitelist",
+                    "Incognito",
+                    "Clear",
+                    "Cookie",
+                    "Do Not Track",
+                    "HTTPS",
+                    "Backup"
+                )
             ) {
-                SettingsSectionCard(title = "Privacy & Security") {
-                    SettingToggleItem(
-                        title = "Ad & Tracker Blocking",
-                        subtitle = "Block intrusive ads and trackers (${settings.totalAdsBlockedCount} blocked)",
-                        checked = settings.adBlockingEnabled,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(adBlockingEnabled = v) } }
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = onRefreshFilterList) {
-                            Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("Update Filters")
-                        }
-                        OutlinedButton(onClick = { showCustomRuleDialog = true }) {
-                            Text("Custom Rules (${customFilterRules.size})")
+                SettingsSectionCard(title = "NYXORA Shield — Ad & Tracker Protection") {
+                    var whitelistInput by remember { mutableStateOf("") }
+                    val filterListStatuses = remember(settings.enabledFilterLists, settings.lastFilterUpdateMillis, customFilterRules.size) {
+                        NyxoraShieldEngine.getFilterListStatuses()
+                    }
+                    val activeShieldRuleCount = remember(settings.enabledFilterLists, customFilterRules.size) {
+                        ContentBlockingEngine.getTotalActiveRuleCount()
+                    }
+                    val formattedLastFilterUpdate = remember(settings.lastFilterUpdateMillis, settings.lastFilterUpdateStatus) {
+                        if (settings.lastFilterUpdateMillis <= 0L) {
+                            settings.lastFilterUpdateStatus.ifBlank { "Built-in protection active (never updated online)" }
+                        } else {
+                            val dateStr = SimpleDateFormat("MMM d, yyyy HH:mm", Locale.US)
+                                .format(Date(settings.lastFilterUpdateMillis))
+                            val statusPart = settings.lastFilterUpdateStatus.takeIf { it.isNotBlank() }
+                            if (statusPart != null) "$dateStr • $statusPart" else dateStr
                         }
                     }
 
+                    // 1. Master Shield ON / OFF
                     SettingToggleItem(
-                        title = "Pop-up Blocking",
-                        subtitle = "Block unrequested pop-up windows (${settings.totalPopupsBlockedCount} blocked)",
-                        checked = settings.popupBlockingEnabled,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(popupBlockingEnabled = v) } }
+                        title = "Master Shield Protection",
+                        subtitle = if (settings.shieldMasterEnabled) {
+                            "NYXORA Shield active ($activeShieldRuleCount rules loaded)"
+                        } else {
+                            "NYXORA Shield is paused across all websites"
+                        },
+                        checked = settings.shieldMasterEnabled,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(shieldMasterEnabled = v) } },
+                        testTag = "shield_master_toggle"
                     )
+
+                    // 2. Advertisement Blocking
+                    SettingToggleItem(
+                        title = "Advertisement Blocking",
+                        subtitle = "Block intrusive ad domains, banners, and video ad scripts (${settings.totalAdsBlockedCount} blocked)",
+                        checked = settings.adBlockingEnabled,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(adBlockingEnabled = v) } },
+                        testTag = "shield_ad_blocking_toggle"
+                    )
+
+                    // 3. Tracker Protection
+                    SettingToggleItem(
+                        title = "Tracker Protection",
+                        subtitle = "Block third-party analytics, telemetry, and fingerprinting scripts (${settings.totalTrackersBlockedCount} blocked)",
+                        checked = settings.trackerProtectionEnabled,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(trackerProtectionEnabled = v) } },
+                        testTag = "shield_tracker_protection_toggle"
+                    )
+
+                    // 4. Pop-up Protection
+                    SettingToggleItem(
+                        title = "Pop-up Protection",
+                        subtitle = "Block unrequested pop-up windows and tab-unders (${settings.totalPopupsBlockedCount} blocked)",
+                        checked = settings.popupBlockingEnabled,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(popupBlockingEnabled = v) } },
+                        testTag = "shield_popup_protection_toggle"
+                    )
+
+                    // 5. Auto-Redirect Protection
                     SettingToggleItem(
                         title = "Auto-Redirect Protection",
-                        subtitle = "Block automatic cross-site redirects without user interaction",
+                        subtitle = "Block automatic cross-site redirects without user interaction (${settings.totalRedirectsBlockedCount} blocked)",
                         checked = settings.redirectBlockingEnabled,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(redirectBlockingEnabled = v) } }
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(redirectBlockingEnabled = v) } },
+                        testTag = "shield_redirect_protection_toggle"
                     )
+
+                    // 6. Cosmetic Filtering
+                    SettingToggleItem(
+                        title = "Cosmetic Filtering",
+                        subtitle = "Hide webpage advertisement containers and empty sponsor slots safely",
+                        checked = settings.cosmeticFilteringEnabled,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(cosmeticFilteringEnabled = v) } },
+                        testTag = "shield_cosmetic_filtering_toggle"
+                    )
+
+                    // 7. URL Tracking Protection
+                    SettingToggleItem(
+                        title = "URL Tracking Parameter Protection",
+                        subtitle = "Strip utm_*, fbclid, gclid, msclkid, and affiliate tracking parameters (${settings.totalTrackingParamsStrippedCount} cleaned)",
+                        checked = settings.urlTrackingProtectionEnabled,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(urlTrackingProtectionEnabled = v) } },
+                        testTag = "shield_url_tracking_toggle"
+                    )
+
+                    // 8. DNS & Malvertising Protection (Browser-level without VPN or system DNS modification)
+                    SettingToggleItem(
+                        title = "DNS & Malvertising Guard",
+                        subtitle = "Block malicious advertising and phishing domains inside NYXORA without VPN (${settings.totalDnsThreatsBlockedCount} blocked)",
+                        checked = settings.dnsProtectionEnabled,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(dnsProtectionEnabled = v) } },
+                        testTag = "shield_dns_protection_toggle"
+                    )
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+
+                    // 9. Blocked Requests Statistics
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("shield_statistics_section"),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "Blocked Requests Statistics",
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                        Text(
+                            text = "Ads Blocked: ${settings.totalAdsBlockedCount} • Trackers Blocked: ${settings.totalTrackersBlockedCount}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag("shield_stats_ads_trackers_text")
+                        )
+                        Text(
+                            text = "Pop-ups Blocked: ${settings.totalPopupsBlockedCount} • Redirects Blocked: ${settings.totalRedirectsBlockedCount}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag("shield_stats_popups_redirects_text")
+                        )
+                        Text(
+                            text = "Tracking URLs Cleaned: ${settings.totalTrackingParamsStrippedCount} • DNS Threats Blocked: ${settings.totalDnsThreatsBlockedCount}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag("shield_stats_urls_dns_text")
+                        )
+                    }
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+
+                    // 10. Last Filter Update & Update Filters Now
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("shield_filter_update_section"),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "Active Rules: $activeShieldRuleCount rules",
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.testTag("shield_active_rule_count_text")
+                        )
+                        Text(
+                            text = "Last Filter Update: $formattedLastFilterUpdate",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag("shield_last_update_text")
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(
+                                onClick = onRefreshFilterList,
+                                modifier = Modifier.testTag("shield_update_filters_now_button")
+                            ) {
+                                Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Update Filters Now")
+                            }
+                            OutlinedButton(
+                                onClick = { showCustomRuleDialog = true },
+                                modifier = Modifier.testTag("shield_custom_rules_button")
+                            ) {
+                                Text("Custom Rules (${customFilterRules.size})")
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+
+                    // 11. Filter List Manager
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("shield_filter_list_manager_section"),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "Filter List Manager",
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                        Text(
+                            text = "Maintain reputable filter sources (AdGuard Base, EasyList, EasyPrivacy, Peter Lowe's List, Malvertising Guard)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        for (listStatus in filterListStatuses) {
+                            SettingToggleItem(
+                                title = listStatus.listId.title,
+                                subtitle = "${listStatus.listId.description} (${listStatus.builtInRuleCount + listStatus.remoteRuleCount} rules)",
+                                checked = listStatus.listId.id in settings.enabledFilterLists,
+                                onCheckedChange = { enabled ->
+                                    onToggleFilterList(listStatus.listId.id, enabled)
+                                },
+                                testTag = "shield_filter_list_toggle_${listStatus.listId.id}"
+                            )
+                        }
+                    }
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+
+                    // 12. Website Whitelist Manager
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("shield_whitelist_section"),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "Website Whitelist (${settings.whitelistedWebsites.size})",
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                        Text(
+                            text = "Disable NYXORA Shield filtering on trusted domains where you want ads or trackers allowed",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedTextField(
+                                value = whitelistInput,
+                                onValueChange = { whitelistInput = it },
+                                placeholder = { Text("example.com") },
+                                singleLine = true,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("shield_whitelist_input")
+                            )
+                            Button(
+                                onClick = {
+                                    val candidate = whitelistInput.trim()
+                                    if (candidate.isNotBlank()) {
+                                        onAddWhitelistedWebsite(candidate)
+                                        whitelistInput = ""
+                                    }
+                                },
+                                modifier = Modifier.testTag("shield_whitelist_add_button")
+                            ) {
+                                Text("Add")
+                            }
+                        }
+                        val sortedWhitelist = remember(settings.whitelistedWebsites) {
+                            settings.whitelistedWebsites.sorted()
+                        }
+                        for (whitelistedHost in sortedWhitelist) {
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("shield_whitelist_item_$whitelistedHost")
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = whitelistedHost,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    IconButton(
+                                        onClick = { onRemoveWhitelistedWebsite(whitelistedHost) },
+                                        modifier = Modifier.testTag("shield_whitelist_remove_$whitelistedHost")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Outlined.DeleteOutline,
+                                            contentDescription = "Remove $whitelistedHost from whitelist"
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     HorizontalDivider(color = MaterialTheme.colorScheme.outline)
 

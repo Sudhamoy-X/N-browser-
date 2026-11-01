@@ -237,13 +237,11 @@ object ContentBlockingEngine {
         dynamicAllowDomains = allowedDomains
         dynamicBlockedPathTokens = blockedPaths
         hostDecisionCache.clear()
+        NyxoraShieldEngine.syncCustomAndRemoteRules(rules)
     }
 
     fun getTotalActiveRuleCount(): Int {
-        return BUILT_IN_BLOCKED_DOMAINS.size +
-            BUILT_IN_BLOCKED_PATH_TOKENS.size +
-            dynamicBlockedDomains.size +
-            dynamicBlockedPathTokens.size
+        return NyxoraShieldEngine.getTotalActiveRuleCount()
     }
 
     private fun getOrComputeHostFlags(host: String): Int {
@@ -270,7 +268,7 @@ object ContentBlockingEngine {
     }
 
     /**
-     * Checks whether a subresource request should be blocked by the filter engine.
+     * Checks whether a subresource request should be blocked by the NYXORA Shield filter engine.
      * Avoids breaking first-party content, login flows, or video playback streams.
      */
     fun shouldBlockSubresource(
@@ -281,6 +279,20 @@ object ContentBlockingEngine {
     ): Boolean {
         if (!globalAdBlockingEnabled) return false
         if (siteSetting?.allowAds == true) return false
+
+        val shieldConfig = NyxoraShieldEngine.getProtectionConfig()
+        if (!shieldConfig.shieldMasterEnabled) return false
+        if (NyxoraShieldEngine.isWebsiteWhitelisted(pageUrl, siteSetting, shieldConfig.whitelistedHosts)) {
+            return false
+        }
+
+        val shieldResult = NyxoraShieldEngine.evaluateSubresourceRequest(
+            requestUrl = requestUrl,
+            pageUrl = pageUrl,
+            config = shieldConfig.copy(adBlockingEnabled = globalAdBlockingEnabled),
+            siteSetting = siteSetting
+        )
+        if (shieldResult.blocked) return true
 
         val startNs = System.nanoTime()
         val blocked = evaluateSubresourceInternal(requestUrl, pageUrl)
@@ -447,14 +459,20 @@ object ContentBlockingEngine {
         if (targetUrl != null && isUrlAllowedOnce(targetUrl, allowOnceUrls)) {
             return PopupDecision(allowed = true, reason = "Allowed once by user")
         }
-        if (!globalPopupBlockingEnabled || siteSetting?.allowPopups == true) {
+        val shieldConfig = NyxoraShieldEngine.getProtectionConfig()
+        if (!shieldConfig.shieldMasterEnabled || !globalPopupBlockingEnabled || siteSetting?.allowPopups == true) {
             return PopupDecision(allowed = true, reason = "Pop-up blocking disabled for site")
+        }
+        if (NyxoraShieldEngine.isWebsiteWhitelisted(pageUrl, siteSetting, shieldConfig.whitelistedHosts)) {
+            return PopupDecision(allowed = true, reason = "Website whitelisted in NYXORA Shield")
         }
         if (!targetUrl.isNullOrBlank()) {
             val targetHost = UrlAndSearchHandler.extractHost(targetUrl)
+            val pageHost = UrlAndSearchHandler.extractHost(pageUrl)
             if (targetHost.isNotEmpty() &&
                 (matchesDomainSet(targetHost, BUILT_IN_BLOCKED_DOMAINS) ||
-                    matchesDomainSet(targetHost, dynamicBlockedDomains))
+                    matchesDomainSet(targetHost, dynamicBlockedDomains) ||
+                    NyxoraShieldEngine.isBlockedTopLevelMaliciousOrAdDomain(targetHost, pageHost, shieldConfig, siteSetting))
             ) {
                 return PopupDecision(allowed = false, reason = "Blocked known ad/pop-up network")
             }
@@ -496,9 +514,11 @@ object ContentBlockingEngine {
             return NavigationDecision.BLOCK_DANGEROUS_SCHEME
         }
 
+        val shieldConfig = NyxoraShieldEngine.getProtectionConfig()
+
         // External app schemes (intent://, market://, tel:, mailto:, etc.)
         if (!lower.startsWith("http://") && !lower.startsWith("https://") && !lower.startsWith("nyxora://") && !lower.startsWith("about:")) {
-            val redirectBlockActive = globalRedirectBlockingEnabled && (siteSetting?.allowRedirects != true)
+            val redirectBlockActive = shieldConfig.shieldMasterEnabled && globalRedirectBlockingEnabled && (siteSetting?.allowRedirects != true)
             val recentGesture = hasUserGesture || timeSinceLastUserInteractionMs in 0L..1500L
             return if (redirectBlockActive && !recentGesture) {
                 NavigationDecision.BLOCK_AUTO_REDIRECT
@@ -512,17 +532,22 @@ object ContentBlockingEngine {
             return NavigationDecision.PROMPT_HTTP_ON_HTTPS_ONLY
         }
 
-        val redirectBlockActive = globalRedirectBlockingEnabled && (siteSetting?.allowRedirects != true)
+        val redirectBlockActive = shieldConfig.shieldMasterEnabled && globalRedirectBlockingEnabled && (siteSetting?.allowRedirects != true)
         if (!redirectBlockActive) return NavigationDecision.ALLOW
 
         val targetHost = UrlAndSearchHandler.extractHost(trimmed)
         val currentHost = UrlAndSearchHandler.extractHost(currentPageUrl)
 
+        if (currentHost.isNotEmpty() && NyxoraShieldEngine.isWebsiteWhitelisted(currentHost, siteSetting, shieldConfig.whitelistedHosts)) {
+            return NavigationDecision.ALLOW
+        }
+
         // Block automatic redirects to known ad / pop-under / malvertising domains even on click/redirect
         if (targetHost.isNotEmpty() &&
             targetHost != currentHost &&
             (matchesDomainSet(targetHost, BUILT_IN_BLOCKED_DOMAINS) ||
-                matchesDomainSet(targetHost, dynamicBlockedDomains)) &&
+                matchesDomainSet(targetHost, dynamicBlockedDomains) ||
+                NyxoraShieldEngine.isBlockedTopLevelMaliciousOrAdDomain(targetHost, currentHost, shieldConfig, siteSetting)) &&
             !matchesDomainSet(targetHost, dynamicAllowDomains)
         ) {
             return NavigationDecision.BLOCK_AUTO_REDIRECT
@@ -531,7 +556,8 @@ object ContentBlockingEngine {
         // Same-origin / same-registrable-domain navigations and essential OAuth/SSO/payment flows are allowed
         if (targetHost.isNotEmpty() &&
             (isSameRegistrableDomain(targetHost, currentHost) ||
-                matchesDomainSet(targetHost, ESSENTIAL_AUTH_AND_PAYMENT_HOSTS))
+                matchesDomainSet(targetHost, ESSENTIAL_AUTH_AND_PAYMENT_HOSTS) ||
+                matchesDomainSet(targetHost, NyxoraShieldEngine.ESSENTIAL_AUTH_PAYMENT_BANKING_HOSTS))
         ) {
             return NavigationDecision.ALLOW
         }
@@ -660,77 +686,20 @@ object ContentBlockingEngine {
     fun buildCosmeticAndDarkModeScript(
         hideCookieBanners: Boolean,
         forceDarkWebPages: Boolean,
-        adBlockingEnabled: Boolean = true
+        adBlockingEnabled: Boolean = true,
+        pageUrl: String = "",
+        cosmeticFilteringEnabled: Boolean = true,
+        shieldMasterEnabled: Boolean = true,
+        siteSetting: SiteSettingItem? = null
     ): String {
-        if (!adBlockingEnabled && !hideCookieBanners && !forceDarkWebPages) return ""
-        val cssParts = StringBuilder()
-        if (adBlockingEnabled) {
-            cssParts.append(
-                """
-                ins.adsbygoogle, .adsbygoogle,
-                [id^="div-gpt-ad"], [id^="google_ads_iframe"],
-                iframe[src*="doubleclick.net"], iframe[src*="googlesyndication.com"],
-                iframe[src*="adnxs.com"], iframe[src*="taboola.com"],
-                .taboola-container, [id^="taboola-"],
-                .OUTBRAIN, [data-widget-id^="outbrain"],
-                .ad-banner:not(:has(video)), .ad-slot:not(:has(video)),
-                [id*="ad-container"]:not(:has(video)) {
-                    display: none !important;
-                    visibility: hidden !important;
-                    height: 0 !important;
-                    min-height: 0 !important;
-                    max-height: 0 !important;
-                    overflow: hidden !important;
-                    pointer-events: none !important;
-                }
-                """.trimIndent()
-            )
-        }
-        if (hideCookieBanners) {
-            cssParts.append(
-                """
-                #onetrust-consent-sdk, #onetrust-banner-sdk,
-                #CybotCookiebotDialog, #CybotCookiebotDialogBodyUnderlay,
-                .qc-cmp2-container, .qc-cmp-cleanslate,
-                #truste-consent-track, .trustarc-banner,
-                [id*="cookie-banner"], [class*="cookie-banner"],
-                [id*="cookie-consent"], [class*="cookie-consent"],
-                [aria-label*="cookie" i][role="dialog"],
-                .cc-window, .cc-banner, #gdpr-cookie-message {
-                    display: none !important;
-                    visibility: hidden !important;
-                    opacity: 0 !important;
-                    pointer-events: none !important;
-                }
-                """.trimIndent()
-            )
-        }
-        if (forceDarkWebPages) {
-            cssParts.append(
-                """
-                html {
-                    background-color: #0D1017 !important;
-                    color: #E2E8F0 !important;
-                }
-                body {
-                    background-color: #0D1017 !important;
-                    color: #E2E8F0 !important;
-                }
-                a { color: #60A5FA !important; }
-                """.trimIndent()
-            )
-        }
-        val escapedCss = cssParts.toString().replace("\n", " ").replace("'", "\\'")
-        return """
-            (function() {
-                var styleId = 'nyxora-cosmetic-style';
-                var existing = document.getElementById(styleId);
-                if (existing) existing.remove();
-                var style = document.createElement('style');
-                style.id = styleId;
-                style.textContent = '$escapedCss';
-                (document.head || document.documentElement).appendChild(style);
-            })();
-        """.trimIndent()
+        return NyxoraShieldEngine.buildSafeCosmeticScript(
+            pageUrl = pageUrl,
+            hideCookieBanners = hideCookieBanners,
+            forceDarkWebPages = forceDarkWebPages,
+            adBlockingEnabled = adBlockingEnabled,
+            cosmeticFilteringEnabled = cosmeticFilteringEnabled,
+            shieldMasterEnabled = shieldMasterEnabled,
+            siteSetting = siteSetting
+        )
     }
 }

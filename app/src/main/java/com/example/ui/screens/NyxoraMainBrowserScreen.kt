@@ -873,6 +873,8 @@ fun NyxoraMainBrowserScreen(
                                             onPageError = viewModel::onWebPageError,
                                             onSslError = viewModel::onSslCertificateError,
                                             onAdBlocked = viewModel::recordAdBlocked,
+                                            onShieldSubresourceBlocked = viewModel::recordShieldSubresourceBlocked,
+                                            onTrackingParamsStripped = viewModel::recordTrackingParamsStripped,
                                             onPopupBlocked = viewModel::onPopupBlocked,
                                             onRedirectBlocked = viewModel::onAutoRedirectBlocked,
                                             onOpenNewTab = { url, priv, bg ->
@@ -916,6 +918,8 @@ fun NyxoraMainBrowserScreen(
                                             onPageError = viewModel::onWebPageError,
                                             onSslError = viewModel::onSslCertificateError,
                                             onAdBlocked = viewModel::recordAdBlocked,
+                                            onShieldSubresourceBlocked = viewModel::recordShieldSubresourceBlocked,
+                                            onTrackingParamsStripped = viewModel::recordTrackingParamsStripped,
                                             onPopupBlocked = viewModel::onPopupBlocked,
                                             onRedirectBlocked = viewModel::onAutoRedirectBlocked,
                                             onOpenNewTab = { url, priv, bg ->
@@ -956,6 +960,8 @@ fun NyxoraMainBrowserScreen(
                                             onPageError = viewModel::onWebPageError,
                                             onSslError = viewModel::onSslCertificateError,
                                             onAdBlocked = viewModel::recordAdBlocked,
+                                            onShieldSubresourceBlocked = viewModel::recordShieldSubresourceBlocked,
+                                            onTrackingParamsStripped = viewModel::recordTrackingParamsStripped,
                                             onPopupBlocked = viewModel::onPopupBlocked,
                                             onRedirectBlocked = viewModel::onAutoRedirectBlocked,
                                             onOpenNewTab = { url, priv, bg ->
@@ -999,6 +1005,8 @@ fun NyxoraMainBrowserScreen(
                                             onPageError = viewModel::onWebPageError,
                                             onSslError = viewModel::onSslCertificateError,
                                             onAdBlocked = viewModel::recordAdBlocked,
+                                            onShieldSubresourceBlocked = viewModel::recordShieldSubresourceBlocked,
+                                            onTrackingParamsStripped = viewModel::recordTrackingParamsStripped,
                                             onPopupBlocked = viewModel::onPopupBlocked,
                                             onRedirectBlocked = viewModel::onAutoRedirectBlocked,
                                             onOpenNewTab = { url, priv, bg ->
@@ -1037,6 +1045,8 @@ fun NyxoraMainBrowserScreen(
                             onPageError = viewModel::onWebPageError,
                             onSslError = viewModel::onSslCertificateError,
                             onAdBlocked = viewModel::recordAdBlocked,
+                            onShieldSubresourceBlocked = viewModel::recordShieldSubresourceBlocked,
+                            onTrackingParamsStripped = viewModel::recordTrackingParamsStripped,
                             onPopupBlocked = viewModel::onPopupBlocked,
                             onRedirectBlocked = viewModel::onAutoRedirectBlocked,
                             onOpenNewTab = { url, priv, bg ->
@@ -1388,6 +1398,9 @@ fun NyxoraMainBrowserScreen(
                 onRefreshFilterList = viewModel::refreshRemoteFilterList,
                 onAddCustomFilterRule = viewModel::addCustomFilterRule,
                 onRemoveCustomFilterRule = viewModel::removeCustomFilterRule,
+                onToggleFilterList = viewModel::toggleFilterList,
+                onAddWhitelistedWebsite = viewModel::addWhitelistedWebsite,
+                onRemoveWhitelistedWebsite = viewModel::removeWhitelistedWebsite,
                 onOpenSiteSettings = { viewModel.setOverlaySheet(OverlaySheet.SITE_SETTINGS) },
                 onOpenDownloads = { viewModel.setOverlaySheet(OverlaySheet.DOWNLOADS) },
                 onOpenNyxoraConnect = { viewModel.setOverlaySheet(OverlaySheet.NYXORA_CONNECT) },

@@ -117,8 +117,10 @@ import com.example.domain.browser.BrowserDiagnosticsEngine
 import com.example.domain.browser.ContentBlockingEngine
 import com.example.domain.browser.FaviconCacheManager
 import com.example.domain.browser.NavigationDecision
+import com.example.domain.browser.NyxoraShieldEngine
 import com.example.domain.browser.ReaderArticle
 import com.example.domain.browser.ReaderModeExtractor
+import com.example.domain.browser.ShieldBlockOutcome
 import com.example.domain.browser.UrlAndSearchHandler
 import com.example.domain.connect.MediaControlActionResult
 import com.example.domain.connect.VideoCompatibilityState
@@ -660,6 +662,8 @@ fun NyxoraWebEngineView(
     onToast: (String) -> Unit,
     openTabIds: Set<String> = emptySet(),
     onHistoryUpdated: (tabId: String, url: String, canGoBack: Boolean, canGoForward: Boolean) -> Unit = { _, _, _, _ -> },
+    onShieldSubresourceBlocked: (ShieldBlockOutcome) -> Unit = { onAdBlocked() },
+    onTrackingParamsStripped: (Int) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -997,6 +1001,8 @@ fun NyxoraWebEngineView(
                                 onPageError = onPageError,
                                 onSslError = onSslError,
                                 onAdBlocked = onAdBlocked,
+                                onShieldSubresourceBlocked = onShieldSubresourceBlocked,
+                                onTrackingParamsStripped = onTrackingParamsStripped,
                                 onPopupBlocked = onPopupBlocked,
                                 onRedirectBlocked = onRedirectBlocked,
                                 onOpenNewTab = onOpenNewTab,
@@ -1630,6 +1636,8 @@ private fun createConfiguredTabWebView(
     onPageError: (tabId: String, failingUrl: String, description: String) -> Unit,
     onSslError: (tabId: String, failingUrl: String, errorName: String, onDecision: (Boolean) -> Unit) -> Unit,
     onAdBlocked: () -> Unit,
+    onShieldSubresourceBlocked: (ShieldBlockOutcome) -> Unit,
+    onTrackingParamsStripped: (Int) -> Unit,
     onPopupBlocked: (String) -> Unit,
     onRedirectBlocked: (String) -> Unit,
     onOpenNewTab: (url: String, inPrivate: Boolean, inBackground: Boolean) -> Unit,
@@ -1806,15 +1814,31 @@ private fun createConfiguredTabWebView(
                 val pageUrl = tabSnapshot.url
                 val pageHost = UrlAndSearchHandler.extractHost(pageUrl)
                 val siteOverride = lookupSiteSettingFromMap(currentSiteSettingsMapProvider(), pageHost)
+                val settingsSnapshot = currentSettingsProvider()
 
-                val shouldBlock = ContentBlockingEngine.shouldBlockSubresource(
+                if (!settingsSnapshot.shieldMasterEnabled) {
+                    return super.shouldInterceptRequest(view, request)
+                }
+
+                val shieldEval = NyxoraShieldEngine.evaluateWebResourceRequest(
+                    request = req,
+                    pageUrl = pageUrl,
+                    siteSetting = siteOverride,
+                    isPrivateTab = tabSnapshot.isPrivate
+                )
+                if (shieldEval.blocked) {
+                    onShieldSubresourceBlocked(shieldEval.outcome)
+                    return ContentBlockingEngine.createBlockedSubresourceResponse(reqUrl)
+                }
+
+                val shouldBlockFallback = ContentBlockingEngine.shouldBlockSubresource(
                     requestUrl = reqUrl,
                     pageUrl = pageUrl,
-                    globalAdBlockingEnabled = currentSettingsProvider().adBlockingEnabled,
+                    globalAdBlockingEnabled = settingsSnapshot.adBlockingEnabled,
                     siteSetting = siteOverride
                 )
-                if (shouldBlock) {
-                    onAdBlocked()
+                if (shouldBlockFallback) {
+                    onShieldSubresourceBlocked(ShieldBlockOutcome.BLOCKED_AD)
                     return ContentBlockingEngine.createBlockedSubresourceResponse(reqUrl)
                 }
                 return super.shouldInterceptRequest(view, request)
@@ -1863,7 +1887,21 @@ private fun createConfiguredTabWebView(
                 )
 
                 return when (decision) {
-                    NavigationDecision.ALLOW -> false
+                    NavigationDecision.ALLOW -> {
+                        val targetHost = UrlAndSearchHandler.extractHost(targetUrl)
+                        val targetSiteOverride = lookupSiteSettingFromMap(currentSiteSettingsMapProvider(), targetHost)
+                        val cleanResult = NyxoraShieldEngine.cleanUrlTrackingParameters(
+                            rawUrl = targetUrl,
+                            siteSetting = targetSiteOverride
+                        )
+                        if (cleanResult.wasModified) {
+                            onTrackingParamsStripped(cleanResult.removedParams.size)
+                            view?.loadUrl(cleanResult.cleanedUrl)
+                            true
+                        } else {
+                            false
+                        }
+                    }
                     NavigationDecision.BLOCK_DANGEROUS_SCHEME -> {
                         onToast("Blocked unsafe navigation scheme")
                         true
@@ -1899,11 +1937,16 @@ private fun createConfiguredTabWebView(
 
                 val pageHost = UrlAndSearchHandler.extractHost(safeUrl)
                 val siteOverride = lookupSiteSettingFromMap(currentSiteSettingsMapProvider(), pageHost)
-                val adBlockActive = currentSettingsProvider().adBlockingEnabled && (siteOverride?.allowAds != true)
+                val settingsSnap = currentSettingsProvider()
+                val adBlockActive = settingsSnap.adBlockingEnabled && (siteOverride?.allowAds != true)
                 val cosmeticJs = ContentBlockingEngine.buildCosmeticAndDarkModeScript(
-                    hideCookieBanners = currentSettingsProvider().hideCookieConsentBanners,
-                    forceDarkWebPages = currentSettingsProvider().forceDarkWebPages,
-                    adBlockingEnabled = adBlockActive
+                    hideCookieBanners = settingsSnap.hideCookieConsentBanners,
+                    forceDarkWebPages = settingsSnap.forceDarkWebPages,
+                    adBlockingEnabled = adBlockActive,
+                    pageUrl = safeUrl,
+                    cosmeticFilteringEnabled = settingsSnap.cosmeticFilteringEnabled,
+                    shieldMasterEnabled = settingsSnap.shieldMasterEnabled,
+                    siteSetting = siteOverride
                 )
                 if (cosmeticJs.isNotEmpty()) {
                     view?.evaluateJavascript(cosmeticJs, null)
@@ -1942,11 +1985,16 @@ private fun createConfiguredTabWebView(
                 view?.tag = safeUrl
                 val pageHost = UrlAndSearchHandler.extractHost(safeUrl)
                 val siteOverride = lookupSiteSettingFromMap(currentSiteSettingsMapProvider(), pageHost)
-                val adBlockActive = currentSettingsProvider().adBlockingEnabled && (siteOverride?.allowAds != true)
+                val settingsSnap = currentSettingsProvider()
+                val adBlockActive = settingsSnap.adBlockingEnabled && (siteOverride?.allowAds != true)
                 val cosmeticJs = ContentBlockingEngine.buildCosmeticAndDarkModeScript(
-                    hideCookieBanners = currentSettingsProvider().hideCookieConsentBanners,
-                    forceDarkWebPages = currentSettingsProvider().forceDarkWebPages,
-                    adBlockingEnabled = adBlockActive
+                    hideCookieBanners = settingsSnap.hideCookieConsentBanners,
+                    forceDarkWebPages = settingsSnap.forceDarkWebPages,
+                    adBlockingEnabled = adBlockActive,
+                    pageUrl = safeUrl,
+                    cosmeticFilteringEnabled = settingsSnap.cosmeticFilteringEnabled,
+                    shieldMasterEnabled = settingsSnap.shieldMasterEnabled,
+                    siteSetting = siteOverride
                 )
                 if (cosmeticJs.isNotEmpty()) {
                     view?.evaluateJavascript(cosmeticJs, null)
