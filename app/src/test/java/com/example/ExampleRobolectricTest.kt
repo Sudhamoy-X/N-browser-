@@ -2596,7 +2596,8 @@ class ExampleRobolectricTest {
             com.example.domain.update.ApkUpdateUiState.Idle
         )
         assertFalse(hasPublishedApk)
-        assertTrue(noApkShareText.contains("https://github.com/sudhamoy-nyxora/nyxora-browser/releases"))
+        assertTrue(noApkShareText.contains(com.example.domain.update.NyxoraApkUpdateManager.configuredPublicReleasesPageUrl()))
+        assertTrue(noApkShareText.contains("https://github.com/"))
         assertFalse(noApkShareText.contains("nyxora.browser"))
         assertFalse(noApkShareText.contains("file://"))
 

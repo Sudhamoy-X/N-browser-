@@ -842,7 +842,9 @@ fun NyxoraWebEngineView(
     // Hoisted LRU pool of live WebViews keyed by tabId so tab switching AND Home-page transitions never reload pages
     val webViewPool = controllerHandle.webViewPool
     val appliedTabConfigMap = controllerHandle.appliedTabConfigMap
-    var useSoftwareLayerFallback by remember { mutableStateOf(false) }
+    var useSoftwareLayerFallback by remember {
+        mutableStateOf(!java.io.File("/dev/dri/renderD128").exists())
+    }
     var renderRecoveryEpoch by remember { mutableIntStateOf(0) }
     var lastRendererCrashRealtime by remember { mutableLongStateOf(0L) }
 
@@ -2110,7 +2112,11 @@ private fun createConfiguredTabWebView(
                 }
 
                 val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
-                val tempWebView = WebView(hostView.context)
+                val tempWebView = WebView(hostView.context).apply {
+                    if (forceSoftwareLayer) {
+                        setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+                    }
+                }
                 tempWebView.webViewClient = object : WebViewClient() {
                     override fun onRenderProcessGone(
                         v: WebView?,

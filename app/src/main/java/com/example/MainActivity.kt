@@ -35,10 +35,12 @@ class MainActivity : ComponentActivity() {
     private var pendingIntentUrl by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        window.setFlags(
-            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
-            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
-        )
+        if (java.io.File("/dev/dri/renderD128").exists()) {
+            window.setFlags(
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
+            )
+        }
         super.onCreate(savedInstanceState)
         val darkWindowBg = AndroidColor.parseColor("#060E1B")
         val darkNavBarBg = AndroidColor.parseColor("#071222")
