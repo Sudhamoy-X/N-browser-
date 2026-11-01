@@ -339,13 +339,16 @@ class WebViewControllerHandle {
     }
 
     /**
-     * Applies GPU-friendly CSS transform strictly to the active HTML5 `<video>` element on the page
-     * (never scaling the entire webpage), and gracefully detects DRM or native player limitations.
+     * Applies high-clarity, aspect-preserving scaling and pan strictly to the active HTML5 `<video>`
+     * element on the page (never scaling playback controls, captions, or the entire webpage).
+     * Avoids `will-change: transform` bitmap layer caching so Chromium renders video frames at full
+     * native viewport resolution, and requests highest available playback quality when zooming.
      */
     fun applyHtml5VideoZoomTransform(
         scale: Float,
         panX: Float,
         panY: Float,
+        aspectMode: VideoAspectMode = VideoAspectMode.FIT,
         onResult: ((supported: Boolean, reason: String?) -> Unit)? = null
     ) {
         val wv = webView
@@ -354,6 +357,9 @@ class WebViewControllerHandle {
             return
         }
         val clampedScale = scale.coerceIn(MIN_VIDEO_ZOOM, MAX_VIDEO_ZOOM)
+        val isFillMode = aspectMode == VideoAspectMode.FILL
+        val objectFitValue = if (isFillMode) "cover" else "contain"
+        val aspectAttr = if (isFillMode) "fill" else "fit"
         val js = """
             (function() {
                 try {
@@ -375,12 +381,38 @@ class WebViewControllerHandle {
                     if (v.mediaKeys || v.webkitKeys) {
                         return JSON.stringify({supported: false, reason: 'DRM-protected video restricts custom zoom'});
                     }
+                    try {
+                        var ytPlayer = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+                        if (ytPlayer) {
+                            if (typeof ytPlayer.setPlaybackQualityRange === 'function') {
+                                ytPlayer.setPlaybackQualityRange('hd1080', 'highres');
+                            } else if (typeof ytPlayer.setPlaybackQuality === 'function') {
+                                ytPlayer.setPlaybackQuality('hd1080');
+                            }
+                        }
+                    } catch (qe) {}
+                    var container = v.closest('.html5-video-container');
+                    if (container && (document.fullscreenElement || document.webkitFullscreenElement)) {
+                        container.style.setProperty('width', '100%', 'important');
+                        container.style.setProperty('height', '100%', 'important');
+                        container.style.setProperty('position', 'absolute', 'important');
+                        container.style.setProperty('inset', '0', 'important');
+                        container.style.setProperty('display', 'flex', 'important');
+                        container.style.setProperty('align-items', 'center', 'important');
+                        container.style.setProperty('justify-content', 'center', 'important');
+                    }
+                    v.setAttribute('data-nyxora-aspect', '${aspectAttr}');
+                    v.style.setProperty('object-fit', '${objectFitValue}', 'important');
+                    v.style.setProperty('object-position', 'center center', 'important');
+                    v.style.willChange = 'auto';
                     if (${clampedScale} <= 1.001 && Math.abs(${panX}) < 0.5 && Math.abs(${panY}) < 0.5) {
                         if (v.getAttribute('data-nyxora-zoomed') === 'true') {
                             v.style.transform = v.getAttribute('data-nyxora-orig-transform') || '';
                             v.style.transformOrigin = v.getAttribute('data-nyxora-orig-origin') || '';
-                            v.style.willChange = '';
                             v.removeAttribute('data-nyxora-zoomed');
+                        }
+                        if (!${isFillMode}) {
+                            v.removeAttribute('data-nyxora-aspect');
                         }
                     } else {
                         if (v.getAttribute('data-nyxora-zoomed') !== 'true') {
@@ -388,9 +420,14 @@ class WebViewControllerHandle {
                             v.setAttribute('data-nyxora-orig-origin', v.style.transformOrigin || '');
                             v.setAttribute('data-nyxora-zoomed', 'true');
                         }
+                        v.style.setProperty('width', '100%', 'important');
+                        v.style.setProperty('height', '100%', 'important');
+                        v.style.setProperty('max-width', '100vw', 'important');
+                        v.style.setProperty('max-height', '100dvh', 'important');
+                        v.style.setProperty('top', '0', 'important');
+                        v.style.setProperty('left', '0', 'important');
                         v.style.transformOrigin = 'center center';
-                        v.style.willChange = 'transform';
-                        v.style.transform = 'translate3d(${panX}px, ${panY}px, 0px) scale(${clampedScale})';
+                        v.style.transform = 'translate(${panX}px, ${panY}px) scale(${clampedScale})';
                     }
                     return JSON.stringify({supported: true, reason: null});
                 } catch (e) {
@@ -416,7 +453,8 @@ class WebViewControllerHandle {
     /**
      * Synchronizes HTML5 / YouTube fullscreen video layout inside the active WebView so the
      * fullscreen `<video>` and player container expand to 100% of the available screen dimensions
-     * instead of remaining constrained to their inline WebView dimensions, and restores cleanly on exit.
+     * with zero wasted bottom space, keeps playback controls overlaid near the bottom edge,
+     * requests the highest available video resolution, and restores cleanly on exit.
      */
     internal fun syncHtml5FullscreenVideoLayout(enteringFullscreen: Boolean) {
         val wv = webView ?: return
@@ -428,26 +466,73 @@ class WebViewControllerHandle {
                     if (!styleEl) {
                         styleEl = document.createElement('style');
                         styleEl.id = '__nyxora_fs_style__';
-                        styleEl.textContent =
-                            ':fullscreen, :-webkit-full-screen { ' +
-                            'width: 100vw !important; height: 100vh !important; ' +
-                            'max-width: 100vw !important; max-height: 100vh !important; ' +
-                            'margin: 0 !important; padding: 0 !important; ' +
-                            'top: 0 !important; left: 0 !important; right: 0 !important; bottom: 0 !important; ' +
-                            'background-color: #000 !important; ' +
-                            '} ' +
-                            ':fullscreen video, :-webkit-full-screen video, ' +
-                            'video:fullscreen, video:-webkit-full-screen, ' +
-                            '.html5-video-player:fullscreen video.html5-main-video, ' +
-                            '.html5-video-player:-webkit-full-screen video.html5-main-video, ' +
-                            '#movie_player:fullscreen video, #movie_player:-webkit-full-screen video { ' +
-                            'width: 100% !important; height: 100% !important; ' +
-                            'max-width: 100vw !important; max-height: 100vh !important; ' +
-                            'object-fit: contain !important; ' +
-                            'top: 0 !important; left: 0 !important; ' +
-                            '}';
                         (document.head || document.documentElement).appendChild(styleEl);
                     }
+                    styleEl.textContent =
+                        ':fullscreen, :-webkit-full-screen, ' +
+                        '.html5-video-player:fullscreen, .html5-video-player:-webkit-full-screen, ' +
+                        '#movie_player:fullscreen, #movie_player:-webkit-full-screen, ' +
+                        '#player-container-id:fullscreen, #player-container-id:-webkit-full-screen, ' +
+                        'ytm-player:fullscreen, ytm-player:-webkit-full-screen { ' +
+                        'position: fixed !important; inset: 0 !important; ' +
+                        'width: 100vw !important; height: 100dvh !important; min-height: 100vh !important; ' +
+                        'max-width: 100vw !important; max-height: 100dvh !important; ' +
+                        'margin: 0 !important; padding: 0 !important; ' +
+                        'top: 0 !important; left: 0 !important; right: 0 !important; bottom: 0 !important; ' +
+                        'background-color: #000 !important; overflow: hidden !important; ' +
+                        '} ' +
+                        ':fullscreen .html5-video-container, :-webkit-full-screen .html5-video-container, ' +
+                        '.html5-video-player:fullscreen .html5-video-container, ' +
+                        '.html5-video-player:-webkit-full-screen .html5-video-container, ' +
+                        '#movie_player:fullscreen .html5-video-container, ' +
+                        '#movie_player:-webkit-full-screen .html5-video-container { ' +
+                        'position: absolute !important; inset: 0 !important; ' +
+                        'width: 100% !important; height: 100% !important; ' +
+                        'display: flex !important; align-items: center !important; justify-content: center !important; ' +
+                        'margin: 0 !important; padding: 0 !important; top: 0 !important; left: 0 !important; ' +
+                        '} ' +
+                        ':fullscreen video, :-webkit-full-screen video, ' +
+                        'video:fullscreen, video:-webkit-full-screen, ' +
+                        '.html5-video-player:fullscreen video.html5-main-video, ' +
+                        '.html5-video-player:-webkit-full-screen video.html5-main-video, ' +
+                        '#movie_player:fullscreen video, #movie_player:-webkit-full-screen video { ' +
+                        'position: relative !important; ' +
+                        'width: 100% !important; height: 100% !important; ' +
+                        'max-width: 100vw !important; max-height: 100dvh !important; ' +
+                        'object-fit: contain !important; object-position: center center !important; ' +
+                        'top: 0 !important; left: 0 !important; right: 0 !important; bottom: 0 !important; ' +
+                        'margin: auto !important; ' +
+                        '} ' +
+                        ':fullscreen video[data-nyxora-aspect="fill"], ' +
+                        ':-webkit-full-screen video[data-nyxora-aspect="fill"] { ' +
+                        'object-fit: cover !important; ' +
+                        '} ' +
+                        ':fullscreen .ytp-chrome-bottom, :-webkit-full-screen .ytp-chrome-bottom, ' +
+                        ':fullscreen .player-controls-bottom, :-webkit-full-screen .player-controls-bottom, ' +
+                        ':fullscreen ytm-custom-control .player-controls-bottom, ' +
+                        ':-webkit-full-screen ytm-custom-control .player-controls-bottom, ' +
+                        ':fullscreen #player-control-overlay .player-controls-bottom, ' +
+                        ':-webkit-full-screen #player-control-overlay .player-controls-bottom { ' +
+                        'bottom: env(safe-area-inset-bottom, 0px) !important; ' +
+                        'margin-bottom: 0 !important; padding-bottom: 6px !important; ' +
+                        '} ' +
+                        ':fullscreen .ytp-ad-companion-slot, :-webkit-full-screen .ytp-ad-companion-slot, ' +
+                        ':fullscreen ytm-companion-slot, :-webkit-full-screen ytm-companion-slot, ' +
+                        ':fullscreen .fullscreen-engagement-panel-placeholder, ' +
+                        ':-webkit-full-screen .fullscreen-engagement-panel-placeholder { ' +
+                        'display: none !important; height: 0 !important; max-height: 0 !important; ' +
+                        'margin: 0 !important; padding: 0 !important; ' +
+                        '}';
+                    try {
+                        var ytPlayer = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+                        if (ytPlayer) {
+                            if (typeof ytPlayer.setPlaybackQualityRange === 'function') {
+                                ytPlayer.setPlaybackQualityRange('hd1080', 'highres');
+                            } else if (typeof ytPlayer.setPlaybackQuality === 'function') {
+                                ytPlayer.setPlaybackQuality('hd1080');
+                            }
+                        }
+                    } catch (qe) {}
                     window.dispatchEvent(new Event('resize'));
                     setTimeout(function() { window.dispatchEvent(new Event('resize')); }, 80);
                     setTimeout(function() { window.dispatchEvent(new Event('resize')); }, 240);
@@ -461,6 +546,17 @@ class WebViewControllerHandle {
                     var styleEl = document.getElementById('__nyxora_fs_style__');
                     if (styleEl && styleEl.parentNode) {
                         styleEl.parentNode.removeChild(styleEl);
+                    }
+                    var videos = document.querySelectorAll('video[data-nyxora-aspect], video[data-nyxora-zoomed]');
+                    for (var i = 0; i < videos.length; i++) {
+                        var v = videos[i];
+                        v.style.transform = v.getAttribute('data-nyxora-orig-transform') || '';
+                        v.style.transformOrigin = v.getAttribute('data-nyxora-orig-origin') || '';
+                        v.style.willChange = '';
+                        v.style.removeProperty('object-fit');
+                        v.style.removeProperty('object-position');
+                        v.removeAttribute('data-nyxora-zoomed');
+                        v.removeAttribute('data-nyxora-aspect');
                     }
                     if (document.fullscreenElement && document.exitFullscreen) {
                         document.exitFullscreen().catch(function(){});
@@ -705,6 +801,7 @@ fun NyxoraWebEngineView(
     var currentVideoZoom by remember { mutableFloatStateOf(1.0f) }
     var currentVideoPanX by remember { mutableFloatStateOf(0f) }
     var currentVideoPanY by remember { mutableFloatStateOf(0f) }
+    var html5DomZoomSupported by remember { mutableStateOf(false) }
     var fullscreenContainerSize by remember { mutableStateOf(IntSize.Zero) }
     var isVideoToolbarVisible by remember { mutableStateOf(true) }
     var videoToolbarInteractionTick by remember { mutableIntStateOf(0) }
@@ -717,6 +814,7 @@ fun NyxoraWebEngineView(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
+            setPadding(0, 0, 0, 0)
             setBackgroundColor(android.graphics.Color.BLACK)
         }
     }
@@ -733,7 +831,15 @@ fun NyxoraWebEngineView(
         currentVideoZoom = 1.0f
         currentVideoPanX = 0f
         currentVideoPanY = 0f
-        controllerHandle.applyHtml5VideoZoomTransform(1.0f, 0f, 0f)
+        val resetScale = if (currentVideoAspect == VideoAspectMode.FILL) 1.18f else 1.0f
+        controllerHandle.applyHtml5VideoZoomTransform(
+            scale = resetScale,
+            panX = 0f,
+            panY = 0f,
+            aspectMode = currentVideoAspect
+        ) { supported, _ ->
+            html5DomZoomSupported = supported
+        }
     }
 
     val exitFullscreenVideo: () -> Unit = {
@@ -748,10 +854,16 @@ fun NyxoraWebEngineView(
             currentVideoZoom = 1.0f
             currentVideoPanX = 0f
             currentVideoPanY = 0f
+            html5DomZoomSupported = false
             isVideoToolbarVisible = true
             controllerHandle.fullscreenCustomView = null
             controllerHandle.isFullscreen = false
-            controllerHandle.applyHtml5VideoZoomTransform(1.0f, 0f, 0f)
+            controllerHandle.applyHtml5VideoZoomTransform(
+                scale = 1.0f,
+                panX = 0f,
+                panY = 0f,
+                aspectMode = VideoAspectMode.FIT
+            )
             controllerHandle.syncHtml5FullscreenVideoLayout(enteringFullscreen = false)
             runCatching {
                 viewToDetach?.scaleX = 1.0f
@@ -786,15 +898,24 @@ fun NyxoraWebEngineView(
             savedWindowStateBeforeFullscreen = captureWindowStateBeforeFullscreen(activity)
         }
 
+        enterImmersiveFullscreen(
+            activity = activity,
+            keepScreenOn = currentSettings.keepScreenOnWhilePlaying,
+            orientationMode = currentSettings.fullscreenOrientationMode,
+            videoRequestedOrientation = videoRequestedOrientation
+        )
+
         // Synchronously attach and size the custom video view to the full window bounds so Chromium's
         // FullScreenView immediately reports full-screen viewport dimensions to the video player.
         runCatching {
             (view.parent as? ViewGroup)?.removeView(view)
             fullscreenHostContainer.removeAllViews()
+            fullscreenHostContainer.setPadding(0, 0, 0, 0)
             fullscreenHostContainer.onUserInteraction = {
                 isVideoToolbarVisible = true
                 videoToolbarInteractionTick++
             }
+            view.setPadding(0, 0, 0, 0)
             view.scaleX = 1.0f
             view.scaleY = 1.0f
             view.translationX = 0f
@@ -808,8 +929,8 @@ fun NyxoraWebEngineView(
             )
             val decor = activity?.window?.decorView
             val dm = context.resources.displayMetrics
-            val fullW = (decor?.width?.takeIf { it > 0 } ?: dm.widthPixels).coerceAtLeast(1)
-            val fullH = (decor?.height?.takeIf { it > 0 } ?: dm.heightPixels).coerceAtLeast(1)
+            val fullW = maxOf(decor?.width ?: 0, dm.widthPixels).coerceAtLeast(1)
+            val fullH = maxOf(decor?.height ?: 0, dm.heightPixels).coerceAtLeast(1)
             fullscreenHostContainer.measure(
                 View.MeasureSpec.makeMeasureSpec(fullW, View.MeasureSpec.EXACTLY),
                 View.MeasureSpec.makeMeasureSpec(fullH, View.MeasureSpec.EXACTLY)
@@ -822,16 +943,11 @@ fun NyxoraWebEngineView(
         currentVideoZoom = 1.0f
         currentVideoPanX = 0f
         currentVideoPanY = 0f
+        html5DomZoomSupported = false
         isVideoToolbarVisible = true
         videoToolbarInteractionTick++
         controllerHandle.fullscreenCustomView = view
         controllerHandle.isFullscreen = true
-        enterImmersiveFullscreen(
-            activity = activity,
-            keepScreenOn = currentSettings.keepScreenOnWhilePlaying,
-            orientationMode = currentSettings.fullscreenOrientationMode,
-            videoRequestedOrientation = videoRequestedOrientation
-        )
         controllerHandle.syncHtml5FullscreenVideoLayout(enteringFullscreen = true)
     }
 
@@ -1185,7 +1301,15 @@ fun NyxoraWebEngineView(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black)
-                    .onSizeChanged { fullscreenContainerSize = it }
+                    .onSizeChanged { newSize ->
+                        if (newSize != fullscreenContainerSize) {
+                            fullscreenContainerSize = newSize
+                            if (newSize.width > 0 && newSize.height > 0) {
+                                fullscreenHostContainer.forceExpandVideoHierarchy()
+                                controllerHandle.syncHtml5FullscreenVideoLayout(enteringFullscreen = true)
+                            }
+                        }
+                    }
                     .pointerInput(currentVideoAspect) {
                         awaitEachGesture {
                             awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
@@ -1226,8 +1350,11 @@ fun NyxoraWebEngineView(
                                         controllerHandle.applyHtml5VideoZoomTransform(
                                             scale = next.zoom * (if (currentVideoAspect == VideoAspectMode.FILL) 1.18f else 1.0f),
                                             panX = next.panX,
-                                            panY = next.panY
-                                        )
+                                            panY = next.panY,
+                                            aspectMode = currentVideoAspect
+                                        ) { supported, _ ->
+                                            html5DomZoomSupported = supported
+                                        }
                                         event.changes.forEach { change ->
                                             if (change.position != change.previousPosition) {
                                                 change.consume()
@@ -1254,6 +1381,14 @@ fun NyxoraWebEngineView(
                                         currentVideoPanX = next.panX
                                         currentVideoPanY = next.panY
                                         videoToolbarInteractionTick++
+                                        controllerHandle.applyHtml5VideoZoomTransform(
+                                            scale = next.zoom * (if (currentVideoAspect == VideoAspectMode.FILL) 1.18f else 1.0f),
+                                            panX = next.panX,
+                                            panY = next.panY,
+                                            aspectMode = currentVideoAspect
+                                        ) { supported, _ ->
+                                            html5DomZoomSupported = supported
+                                        }
                                     }
                                 }
                             } while (event.changes.any { it.pressed })
@@ -1272,6 +1407,7 @@ fun NyxoraWebEngineView(
                                 isVideoToolbarVisible = true
                                 videoToolbarInteractionTick++
                             }
+                            setPadding(0, 0, 0, 0)
                             setBackgroundColor(android.graphics.Color.BLACK)
                             if (customVideoView.parent !== this) {
                                 (customVideoView.parent as? ViewGroup)?.removeView(customVideoView)
@@ -1291,11 +1427,16 @@ fun NyxoraWebEngineView(
                             isVideoToolbarVisible = true
                             videoToolbarInteractionTick++
                         }
-                        // Preserve aspect ratio with identical X/Y scale and GPU-friendly translation
-                        customVideoView.scaleX = effectiveScale
-                        customVideoView.scaleY = effectiveScale
-                        customVideoView.translationX = currentVideoPanX
-                        customVideoView.translationY = currentVideoPanY
+                        // When HTML5 DOM `<video>` zoom is active in the WebView, keep customVideoView
+                        // unscaled (1.0f) so the video is never double-scaled and player controls/overlays
+                        // stay crisp and independent from zoom. Otherwise fall back to view-level scaling.
+                        val viewScale = if (html5DomZoomSupported) 1.0f else effectiveScale
+                        val viewPanX = if (html5DomZoomSupported) 0f else currentVideoPanX
+                        val viewPanY = if (html5DomZoomSupported) 0f else currentVideoPanY
+                        customVideoView.scaleX = viewScale
+                        customVideoView.scaleY = viewScale
+                        customVideoView.translationX = viewPanX
+                        customVideoView.translationY = viewPanY
                         if (container.childCount != 1 || container.getChildAt(0) !== customVideoView) {
                             (customVideoView.parent as? ViewGroup)?.removeView(customVideoView)
                             container.removeAllViews()
@@ -1351,8 +1492,11 @@ fun NyxoraWebEngineView(
                                         controllerHandle.applyHtml5VideoZoomTransform(
                                             scale = prevTransform.zoom * baseAspectScale,
                                             panX = prevTransform.panX,
-                                            panY = prevTransform.panY
-                                        )
+                                            panY = prevTransform.panY,
+                                            aspectMode = currentVideoAspect
+                                        ) { supported, _ ->
+                                            html5DomZoomSupported = supported
+                                        }
                                     }
                                     onToast("Video Zoom: ${(currentVideoZoom * 100f).roundToInt()}%")
                                 }
@@ -1438,12 +1582,22 @@ fun NyxoraWebEngineView(
                             onClick = {
                                 isVideoToolbarVisible = true
                                 videoToolbarInteractionTick++
-                                currentVideoAspect = if (isFillMode) {
+                                val nextAspect = if (isFillMode) {
                                     VideoAspectMode.FIT
                                 } else {
                                     VideoAspectMode.FILL
                                 }
-                                val modeLabel = if (currentVideoAspect == VideoAspectMode.FILL) {
+                                currentVideoAspect = nextAspect
+                                val nextBaseScale = if (nextAspect == VideoAspectMode.FILL) 1.18f else 1.0f
+                                controllerHandle.applyHtml5VideoZoomTransform(
+                                    scale = currentVideoZoom * nextBaseScale,
+                                    panX = currentVideoPanX,
+                                    panY = currentVideoPanY,
+                                    aspectMode = nextAspect
+                                ) { supported, _ ->
+                                    html5DomZoomSupported = supported
+                                }
+                                val modeLabel = if (nextAspect == VideoAspectMode.FILL) {
                                     "Fill Screen"
                                 } else {
                                     "Fit Screen"
@@ -1481,8 +1635,10 @@ fun NyxoraWebEngineView(
                                 controllerHandle.applyHtml5VideoZoomTransform(
                                     scale = nextTransform.zoom * baseAspectScale,
                                     panX = nextTransform.panX,
-                                    panY = nextTransform.panY
+                                    panY = nextTransform.panY,
+                                    aspectMode = currentVideoAspect
                                 ) { supported, reason ->
+                                    html5DomZoomSupported = supported
                                     if (!supported && reason != null && reason.contains("DRM")) {
                                         onToast(reason)
                                     }
@@ -1556,6 +1712,11 @@ private class FullscreenVideoHostLayout(
     var onUserInteraction: (() -> Unit)? = null
 ) : FrameLayout(context) {
 
+    override fun onApplyWindowInsets(insets: android.view.WindowInsets): android.view.WindowInsets {
+        setPadding(0, 0, 0, 0)
+        return insets
+    }
+
     override fun dispatchTouchEvent(ev: MotionEvent?): Boolean {
         val action = ev?.actionMasked
         if (action == MotionEvent.ACTION_DOWN ||
@@ -1568,6 +1729,7 @@ private class FullscreenVideoHostLayout(
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        setPadding(0, 0, 0, 0)
         val w = MeasureSpec.getSize(widthMeasureSpec)
         val h = MeasureSpec.getSize(heightMeasureSpec)
         if (w > 0 && h > 0) {
@@ -1575,6 +1737,7 @@ private class FullscreenVideoHostLayout(
             val exactH = MeasureSpec.makeMeasureSpec(h, MeasureSpec.EXACTLY)
             for (i in 0 until childCount) {
                 val child = getChildAt(i)
+                child.setPadding(0, 0, 0, 0)
                 child.layoutParams = LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT
@@ -1592,15 +1755,18 @@ private class FullscreenVideoHostLayout(
         val h = (bottom - top).coerceAtLeast(0)
         for (i in 0 until childCount) {
             val child = getChildAt(i)
+            child.setPadding(0, 0, 0, 0)
             child.layout(0, 0, w, h)
         }
     }
 
     fun forceExpandVideoHierarchy() {
+        setPadding(0, 0, 0, 0)
         val w = width
         val h = height
         for (i in 0 until childCount) {
             val child = getChildAt(i)
+            child.setPadding(0, 0, 0, 0)
             val lp = child.layoutParams
             if (lp == null || lp.width != ViewGroup.LayoutParams.MATCH_PARENT || lp.height != ViewGroup.LayoutParams.MATCH_PARENT) {
                 child.layoutParams = LayoutParams(

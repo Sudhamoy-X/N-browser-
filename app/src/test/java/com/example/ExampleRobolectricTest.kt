@@ -953,13 +953,25 @@ class ExampleRobolectricTest {
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("fullscreen_video_toolbar").assertIsDisplayed()
 
+        // Verify zero wasted bottom space (no bottom padding on fullscreen container or custom video view)
+        assertEquals("Fullscreen custom view must have zero bottom padding", 0, secondPortraitVideoView.paddingBottom)
+        assertEquals("Fullscreen host container must have zero bottom padding", 0, (secondPortraitVideoView.parent as View).paddingBottom)
+        assertEquals("Fullscreen video overlay must reach the bottom edge of the screen", rootBounds.bottom, overlayBounds.bottom, 2f)
+
+        // Zoom in once more, then exit fullscreen and verify zoom resets cleanly to 100% (1.0f)
+        composeTestRule.onNodeWithTag("fullscreen_zoom_button").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals(1.15f, secondPortraitVideoView.scaleX, 0.01f)
+
         // 6. Exit fullscreen using Android Back button
         composeTestRule.runOnUiThread {
             activity.onBackPressedDispatcher.onBackPressed()
         }
         composeTestRule.waitForIdle()
 
-        // Verify original browser toolbars, system UI, and previous orientation return cleanly
+        // Verify original browser toolbars, system UI, zoom reset, and previous orientation return cleanly
+        assertEquals("Zoom scaleX must reset to 1.0f when exiting fullscreen", 1.0f, secondPortraitVideoView.scaleX, 0.01f)
+        assertEquals("Zoom scaleY must reset to 1.0f when exiting fullscreen", 1.0f, secondPortraitVideoView.scaleY, 0.01f)
         assertEquals(1, replacementCallbackHiddenCount)
         assertNull("Fullscreen custom view must be detached on exit", secondPortraitVideoView.parent)
         assertEquals(

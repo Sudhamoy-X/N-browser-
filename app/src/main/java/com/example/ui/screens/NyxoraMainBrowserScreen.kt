@@ -829,7 +829,7 @@ fun NyxoraMainBrowserScreen(
                     onVerifyPin = { pin -> viewModel.unlockPrivateTabsWithPin(pin) },
                     onExitPrivate = { viewModel.switchBrowsingMode(false) }
                 )
-            } else if (activeTab.isHomePage) {
+            } else if (activeTab.isHomePage && !isFullscreenVideo) {
                 NyxoraHomePage(
                     settings = settings,
                     isPrivateMode = isPrivateMode,
