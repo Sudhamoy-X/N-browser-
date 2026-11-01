@@ -106,6 +106,7 @@ class ExampleRobolectricTest {
         )
         composeTestRule.onNodeWithTag("nyxora_central_browser_container").assertIsDisplayed()
         composeTestRule.onNodeWithTag("home_logo_header").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("home_official_icon_image", useUnmergedTree = true).assertIsDisplayed()
         composeTestRule.onNodeWithTag("home_search_bar_trigger").assertIsDisplayed()
         composeTestRule.onNodeWithTag("home_search_box_input").assertIsDisplayed()
         assertTrue(
@@ -113,7 +114,80 @@ class ExampleRobolectricTest {
                 .fetchSemanticsNodes().isNotEmpty()
         )
 
-        // 2. Verify NO quick buttons, NO tab strip, NO greeting/date, and NO optional homepage sections by default
+        // Verify Reference Image 1 Home Screen components: 2x4 Shortcuts grid, Bookmarks & News buttons, and Featured News Card
+        composeTestRule.onNodeWithTag("home_shortcuts_section").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("shortcut_tile_ref_google").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("shortcut_tile_ref_youtube").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("shortcut_tile_ref_x").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("shortcut_tile_ref_instagram").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("shortcut_tile_ref_wikipedia").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("shortcut_tile_ref_github").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("shortcut_tile_ref_reddit").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("add_shortcut_button", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("home_bookmarks_quick_access_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("home_news_quick_access_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("home_featured_news_card").assertIsDisplayed()
+
+        // Verify raw uploaded official NYXORA app icon source is preserved without modification
+        val rawIconBytes = context.resources.openRawResource(R.raw.nyxora_official_icon).use { it.readBytes() }
+        val sha256Hex = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(rawIconBytes)
+            .joinToString("") { "%02x".format(it) }
+        assertEquals(
+            "Official NYXORA icon asset must match the uploaded image byte-for-byte without modification",
+            "979d7ce0f625e92598b6bf1938fac9a61d1c7b9972a5d22878d5ea4836a24453",
+            sha256Hex
+        )
+
+        // Verify in-app NYXORA logo (R.drawable.nyxora_official_icon) is a clean RGBA transparent logo with no rectangular background
+        val inAppLogoImg = context.resources.openRawResource(R.drawable.nyxora_official_icon).use {
+            javax.imageio.ImageIO.read(it)
+        }
+        assertNotNull("In-app NYXORA logo PNG must decode cleanly", inAppLogoImg)
+        assertTrue("In-app NYXORA logo must have an alpha channel", inAppLogoImg.colorModel.hasAlpha())
+        assertEquals("In-app NYXORA logo top-left corner must be 100% transparent", 0, (inAppLogoImg.getRGB(0, 0) ushr 24) and 0xFF)
+        assertEquals("In-app NYXORA logo top-right corner must be 100% transparent", 0, (inAppLogoImg.getRGB(inAppLogoImg.width - 1, 0) ushr 24) and 0xFF)
+        assertEquals("In-app NYXORA logo bottom-left corner must be 100% transparent", 0, (inAppLogoImg.getRGB(0, inAppLogoImg.height - 1) ushr 24) and 0xFF)
+        assertEquals("In-app NYXORA logo bottom-right corner must be 100% transparent", 0, (inAppLogoImg.getRGB(inAppLogoImg.width - 1, inAppLogoImg.height - 1) ushr 24) and 0xFF)
+        assertEquals(
+            "In-app NYXORA logo center 'N' ribbon stroke must be opaque",
+            255,
+            (inAppLogoImg.getRGB(inAppLogoImg.width / 2, inAppLogoImg.height / 2) ushr 24) and 0xFF
+        )
+
+        // Verify Android adaptive launcher icon (R.mipmap.ic_launcher & R.mipmap.ic_launcher_round) is properly configured
+        val launcherDrawable = context.resources.getDrawable(R.mipmap.ic_launcher, context.theme)
+        assertNotNull("Launcher icon drawable must resolve cleanly", launcherDrawable)
+        assertTrue(
+            "Launcher icon on API 26+ must be an AdaptiveIconDrawable with separated background and foreground layers",
+            launcherDrawable is android.graphics.drawable.AdaptiveIconDrawable
+        )
+        val adaptiveIcon = launcherDrawable as android.graphics.drawable.AdaptiveIconDrawable
+        assertNotNull("Adaptive launcher icon background layer must be present", adaptiveIcon.background)
+        assertNotNull("Adaptive launcher icon foreground layer must be present", adaptiveIcon.foreground)
+
+        // Verify Home Screen logo subtle breathing glow is active by default and respects the animation-off setting
+        composeTestRule.onNodeWithTag("home_logo_glow_active", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("nyxora_logo_silhouette_glow", useUnmergedTree = true).assertIsDisplayed()
+        val vm = composeTestRule.activity.activeBrowserViewModel!!
+        vm.updateSettings { it.copy(homeLogoAnimationEnabled = false) }
+        val glowOffDeadline = System.currentTimeMillis() + 2000L
+        while (vm.settings.value.homeLogoAnimationEnabled && System.currentTimeMillis() < glowOffDeadline) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            composeTestRule.mainClock.advanceTimeBy(50L)
+            composeTestRule.waitForIdle()
+        }
+        composeTestRule.waitForIdle()
+        assertEquals(
+            "Home Screen logo glow must turn off when disabled in Appearance settings",
+            0,
+            composeTestRule.onAllNodesWithTag("home_logo_glow_active", useUnmergedTree = true).fetchSemanticsNodes().size
+        )
+        composeTestRule.onNodeWithTag("home_official_icon_image", useUnmergedTree = true).assertIsDisplayed()
+        vm.updateSettings { it.copy(homeLogoAnimationEnabled = true) }
+        composeTestRule.waitForIdle()
+
+        // 2. Verify NO tab strip, NO greeting/date, and NO Frequently Visited / Recent Activity clutter
         assertEquals(
             0,
             composeTestRule.onAllNodesWithTag("bottom_tab_strip").fetchSemanticsNodes().size
@@ -121,10 +195,6 @@ class ExampleRobolectricTest {
         assertEquals(
             0,
             composeTestRule.onAllNodesWithTag("home_greeting_date_text").fetchSemanticsNodes().size
-        )
-        assertEquals(
-            0,
-            composeTestRule.onAllNodesWithTag("home_shortcuts_section").fetchSemanticsNodes().size
         )
         assertEquals(
             0,
@@ -351,6 +421,8 @@ class ExampleRobolectricTest {
         composeTestRule.mainClock.autoAdvance = false
         composeTestRule.mainClock.advanceTimeBy(80L)
 
+        composeTestRule.onNodeWithTag("splash_official_icon", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("nyxora_logo_silhouette_glow", useUnmergedTree = true).assertIsDisplayed()
         assertTrue(
             composeTestRule.onAllNodesWithText("Browse Beyond Ordinary.", substring = false)
                 .fetchSemanticsNodes().isNotEmpty()
@@ -361,11 +433,11 @@ class ExampleRobolectricTest {
         )
 
         composeTestRule.mainClock.autoAdvance = true
-        composeTestRule.mainClock.advanceTimeBy(350L)
+        composeTestRule.mainClock.advanceTimeBy(450L)
         composeTestRule.waitForIdle()
 
         composeTestRule.onNodeWithTag("nyxora_main_browser_screen").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("home_creator_credit").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("home_creator_credit").performScrollTo().assertIsDisplayed()
     }
 
     @Test

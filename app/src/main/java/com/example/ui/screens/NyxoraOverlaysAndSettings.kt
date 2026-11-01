@@ -1406,6 +1406,16 @@ fun NyxoraSettingsScreen(
                     )
 
                     SettingToggleItem(
+                        title = "Home Screen Logo Animation",
+                        subtitle = "Subtle breathing blue-violet glow around the NYXORA Home Screen logo",
+                        checked = settings.homeLogoAnimationEnabled,
+                        onCheckedChange = { v ->
+                            onUpdateSettings { it.copy(homeLogoAnimationEnabled = v) }
+                        },
+                        testTag = "setting_home_logo_animation_toggle"
+                    )
+
+                    SettingToggleItem(
                         title = "Homepage Shortcuts",
                         subtitle = "Display rounded website shortcuts with cached favicons on the homepage",
                         checked = settings.homepageShortcutsEnabled,

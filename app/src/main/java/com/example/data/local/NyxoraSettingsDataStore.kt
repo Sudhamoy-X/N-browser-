@@ -77,6 +77,7 @@ data class NyxoraSettingsState(
     val showHomeNewsFeed: Boolean = true,
     val showHomePromotionalCards: Boolean = false,
     val launchAnimationEnabled: Boolean = true,
+    val homeLogoAnimationEnabled: Boolean = true,
     val globalTextZoom: Int = 100,
     val compactBottomToolbar: Boolean = false,
     val reducedMotion: Boolean = false,
@@ -150,6 +151,7 @@ class NyxoraSettingsDataStore(private val context: Context) {
         val SHOW_HOME_NEWS_FEED = booleanPreferencesKey("show_home_news_feed")
         val SHOW_HOME_PROMO_CARDS = booleanPreferencesKey("show_home_promo_cards")
         val LAUNCH_ANIMATION_ENABLED = booleanPreferencesKey("launch_animation_enabled")
+        val HOME_LOGO_ANIMATION_ENABLED = booleanPreferencesKey("home_logo_animation_enabled")
         val GLOBAL_TEXT_ZOOM = intPreferencesKey("global_text_zoom")
         val COMPACT_TOOLBAR = booleanPreferencesKey("compact_toolbar")
         val REDUCED_MOTION = booleanPreferencesKey("reduced_motion")
@@ -234,6 +236,7 @@ class NyxoraSettingsDataStore(private val context: Context) {
             showHomeNewsFeed = prefs[Keys.SHOW_HOME_NEWS_FEED] ?: true,
             showHomePromotionalCards = prefs[Keys.SHOW_HOME_PROMO_CARDS] ?: false,
             launchAnimationEnabled = prefs[Keys.LAUNCH_ANIMATION_ENABLED] ?: true,
+            homeLogoAnimationEnabled = prefs[Keys.HOME_LOGO_ANIMATION_ENABLED] ?: true,
             globalTextZoom = (prefs[Keys.GLOBAL_TEXT_ZOOM] ?: 100).coerceIn(50, 250),
             compactBottomToolbar = prefs[Keys.COMPACT_TOOLBAR] ?: false,
             reducedMotion = prefs[Keys.REDUCED_MOTION] ?: false,
@@ -303,6 +306,7 @@ class NyxoraSettingsDataStore(private val context: Context) {
             prefs[Keys.SHOW_HOME_NEWS_FEED] = updated.showHomeNewsFeed
             prefs[Keys.SHOW_HOME_PROMO_CARDS] = updated.showHomePromotionalCards
             prefs[Keys.LAUNCH_ANIMATION_ENABLED] = updated.launchAnimationEnabled
+            prefs[Keys.HOME_LOGO_ANIMATION_ENABLED] = updated.homeLogoAnimationEnabled
             prefs[Keys.GLOBAL_TEXT_ZOOM] = updated.globalTextZoom.coerceIn(50, 250)
             prefs[Keys.COMPACT_TOOLBAR] = updated.compactBottomToolbar
             prefs[Keys.REDUCED_MOTION] = updated.reducedMotion

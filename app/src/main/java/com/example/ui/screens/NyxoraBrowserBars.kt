@@ -484,9 +484,17 @@ fun NyxoraBottomTabManagementBar(
     val canGoForward = activeTab.canGoForward || activeTab.forwardStack.isNotEmpty()
     val tabsDescription = stringResource(R.string.nav_tabs)
 
-    // Soft grey icon palette for both Dark Mode and Light Mode (no colorful/neon states or glow)
-    val enabledIconTint = MaterialTheme.colorScheme.onSurfaceVariant
-    val disabledIconTint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.32f)
+    val isDarkBar = MaterialTheme.colorScheme.background.red < 0.2f
+    val enabledIconTint = if (activeTab.isHomePage && isDarkBar) {
+        Color(0xFFE2E8F0)
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val disabledIconTint = if (activeTab.isHomePage && isDarkBar) {
+        Color(0xFFE2E8F0).copy(alpha = 0.42f)
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.32f)
+    }
 
     val chevronLeftIcon = remember { buildNyxoraChevronLeftIcon() }
     val chevronRightIcon = remember { buildNyxoraChevronRightIcon() }
@@ -497,7 +505,11 @@ fun NyxoraBottomTabManagementBar(
         modifier = Modifier
             .fillMaxWidth()
             .testTag("nyxora_bottom_tab_bar"),
-        color = MaterialTheme.colorScheme.background,
+        color = if (activeTab.isHomePage && isDarkBar) {
+            Color(0xFF071222)
+        } else {
+            MaterialTheme.colorScheme.background
+        },
         tonalElevation = 0.dp,
         shadowElevation = 0.dp
     ) {
@@ -509,8 +521,12 @@ fun NyxoraBottomTabManagementBar(
                 .displayCutoutPadding()
         ) {
             HorizontalDivider(
-                thickness = 0.5.dp,
-                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)
+                thickness = 0.75.dp,
+                color = if (activeTab.isHomePage && isDarkBar) {
+                    Color(0xFF60A5FA).copy(alpha = 0.28f)
+                } else {
+                    MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)
+                }
             )
 
             Row(
