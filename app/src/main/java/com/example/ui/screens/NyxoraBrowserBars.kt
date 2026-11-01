@@ -484,13 +484,12 @@ fun NyxoraBottomTabManagementBar(
     val canGoForward = activeTab.canGoForward || activeTab.forwardStack.isNotEmpty()
     val tabsDescription = stringResource(R.string.nav_tabs)
 
-    val isDarkBar = MaterialTheme.colorScheme.background.red < 0.2f
-    val enabledIconTint = if (activeTab.isHomePage && isDarkBar) {
+    val enabledIconTint = if (activeTab.isHomePage) {
         Color(0xFFE2E8F0)
     } else {
         MaterialTheme.colorScheme.onSurfaceVariant
     }
-    val disabledIconTint = if (activeTab.isHomePage && isDarkBar) {
+    val disabledIconTint = if (activeTab.isHomePage) {
         Color(0xFFE2E8F0).copy(alpha = 0.42f)
     } else {
         MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.32f)
@@ -505,7 +504,7 @@ fun NyxoraBottomTabManagementBar(
         modifier = Modifier
             .fillMaxWidth()
             .testTag("nyxora_bottom_tab_bar"),
-        color = if (activeTab.isHomePage && isDarkBar) {
+        color = if (activeTab.isHomePage) {
             Color(0xFF071222)
         } else {
             MaterialTheme.colorScheme.background
@@ -522,7 +521,7 @@ fun NyxoraBottomTabManagementBar(
         ) {
             HorizontalDivider(
                 thickness = 0.75.dp,
-                color = if (activeTab.isHomePage && isDarkBar) {
+                color = if (activeTab.isHomePage) {
                     Color(0xFF60A5FA).copy(alpha = 0.28f)
                 } else {
                     MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)

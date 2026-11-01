@@ -1084,6 +1084,7 @@ fun NyxoraSettingsScreen(
     settings: NyxoraSettingsState,
     customFilterRules: List<CustomFilterRule>,
     apkUpdateState: ApkUpdateUiState = ApkUpdateUiState.Idle,
+    lastUpdateCheckMillis: Long = 0L,
     onCheckForUpdates: (Boolean) -> Unit = {},
     onDownloadUpdateNow: () -> Unit = {},
     onCancelUpdateDownload: () -> Unit = {},
@@ -2022,6 +2023,7 @@ fun NyxoraSettingsScreen(
                     // Automatic APK Update System Section
                     NyxoraApkUpdateSection(
                         updateState = apkUpdateState,
+                        lastCheckedMillis = lastUpdateCheckMillis,
                         onCheckForUpdates = { onCheckForUpdates(true) },
                         onDownloadUpdateNow = onDownloadUpdateNow,
                         onCancelDownload = onCancelUpdateDownload,
@@ -2424,22 +2426,145 @@ fun NyxoraSettingsScreen(
 @Composable
 private fun NyxoraApkUpdateSection(
     updateState: ApkUpdateUiState,
+    lastCheckedMillis: Long = 0L,
     onCheckForUpdates: () -> Unit,
     onDownloadUpdateNow: () -> Unit,
     onCancelDownload: () -> Unit,
     onInstallUpdateNow: () -> Unit
 ) {
+    val installedLabel = "v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})"
+    val activeRelease = updateState.activeReleaseInfo
+    val latestAvailableLabel = when {
+        activeRelease != null -> activeRelease.displayVersionLabel
+        updateState is ApkUpdateUiState.UpToDate -> installedLabel
+        updateState is ApkUpdateUiState.Checking -> "Checking…"
+        else -> installedLabel
+    }
+    val resolvedLastCheckedMillis = when {
+        updateState is ApkUpdateUiState.UpToDate && updateState.lastCheckedMillis > 0L -> updateState.lastCheckedMillis
+        lastCheckedMillis > 0L -> lastCheckedMillis
+        else -> 0L
+    }
+    val lastCheckedLabel = remember(resolvedLastCheckedMillis) {
+        if (resolvedLastCheckedMillis <= 0L) {
+            "Not checked yet"
+        } else {
+            java.text.SimpleDateFormat("MMM d, yyyy • HH:mm", java.util.Locale.getDefault())
+                .format(java.util.Date(resolvedLastCheckedMillis))
+        }
+    }
+    val statusHeadline = when (updateState) {
+        is ApkUpdateUiState.Idle -> "Ready to check"
+        is ApkUpdateUiState.Checking -> "Checking GitHub Releases…"
+        is ApkUpdateUiState.UpToDate -> "Up to date"
+        is ApkUpdateUiState.UpdateAvailable -> "Update available (${updateState.release.displayVersionLabel})"
+        is ApkUpdateUiState.Downloading -> "Downloading update (${updateState.progressPercent}%)"
+        is ApkUpdateUiState.Verifying -> "Verifying APK signature & checksum…"
+        is ApkUpdateUiState.ReadyToInstall -> "Verified & ready to install"
+        is ApkUpdateUiState.PermissionRequired -> "Permission required to install"
+        is ApkUpdateUiState.Error -> "Update check / download error"
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .testTag("about_apk_update_section"),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         Text(
             text = "Software Update",
             style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.onSurface
         )
+
+        Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.65f), RoundedCornerShape(12.dp))
+                .testTag("about_update_summary_card")
+        ) {
+            Column(
+                modifier = Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Current Version",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = installedLabel,
+                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.testTag("about_current_version_value")
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Latest Available Version",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = latestAvailableLabel,
+                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
+                        color = if (updateState.hasUpdateIndicator) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.testTag("about_latest_version_value")
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Update Status",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = statusHeadline,
+                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
+                        color = when (updateState) {
+                            is ApkUpdateUiState.Error -> MaterialTheme.colorScheme.error
+                            is ApkUpdateUiState.UpdateAvailable,
+                            is ApkUpdateUiState.ReadyToInstall,
+                            is ApkUpdateUiState.Downloading -> MaterialTheme.colorScheme.primary
+                            else -> MaterialTheme.colorScheme.onSurface
+                        },
+                        modifier = Modifier.testTag("about_update_status_badge")
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Last Checked",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = lastCheckedLabel,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag("about_last_checked_text")
+                    )
+                }
+            }
+        }
 
         when (updateState) {
             is ApkUpdateUiState.Idle -> {
@@ -2494,7 +2619,7 @@ private fun NyxoraApkUpdateSection(
                 val rel = updateState.release
                 val sizeLabel = if (rel.assetSizeBytes > 0L) " (${formatBytes(rel.assetSizeBytes)})" else ""
                 Text(
-                    text = "New stable release v${rel.cleanVersion} is available$sizeLabel. Installed: v${updateState.installedVersion}.",
+                    text = "New stable release ${rel.displayVersionLabel} is available$sizeLabel. Installed: v${updateState.installedVersion}.",
                     style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.testTag("about_update_status_text")
@@ -2504,7 +2629,7 @@ private fun NyxoraApkUpdateSection(
                         text = rel.releaseNotes,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 4,
+                        maxLines = 5,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.testTag("about_update_release_notes")
                     )
@@ -2524,7 +2649,7 @@ private fun NyxoraApkUpdateSection(
                     ) {
                         Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("Refresh")
+                        Text("Check for Updates")
                     }
                 }
             }
@@ -2538,7 +2663,7 @@ private fun NyxoraApkUpdateSection(
                     formatBytes(updateState.bytesDownloaded)
                 }
                 Text(
-                    text = "Downloading NYXORA Browser v${rel.cleanVersion}… ${updateState.progressPercent}% ($sizeInfo)",
+                    text = "Downloading NYXORA Browser ${rel.displayVersionLabel}… ${updateState.progressPercent}% ($sizeInfo)",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.testTag("about_update_progress_text")
@@ -2569,7 +2694,7 @@ private fun NyxoraApkUpdateSection(
 
             is ApkUpdateUiState.Verifying -> {
                 Text(
-                    text = "Verifying v${updateState.release.cleanVersion} APK package integrity and signature…",
+                    text = "Verifying ${updateState.release.displayVersionLabel} APK package integrity and signature…",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.testTag("about_update_status_text")
@@ -2584,23 +2709,43 @@ private fun NyxoraApkUpdateSection(
             is ApkUpdateUiState.ReadyToInstall -> {
                 val rel = updateState.release
                 Text(
-                    text = "NYXORA Browser v${rel.cleanVersion} downloaded and verified. Your bookmarks, history, tabs, and settings will be preserved.",
+                    text = "NYXORA Browser ${rel.displayVersionLabel} downloaded and verified. Your bookmarks, history, tabs, and settings will be preserved.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.testTag("about_update_status_text")
                 )
-                Button(
-                    onClick = onInstallUpdateNow,
-                    modifier = Modifier.testTag("about_install_update_button")
-                ) {
-                    Text("Install Update")
+                if (rel.releaseNotes.isNotBlank()) {
+                    Text(
+                        text = rel.releaseNotes,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 4,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.testTag("about_update_release_notes")
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = onInstallUpdateNow,
+                        modifier = Modifier.testTag("about_install_update_button")
+                    ) {
+                        Text("Install Update")
+                    }
+                    OutlinedButton(
+                        onClick = onCheckForUpdates,
+                        modifier = Modifier.testTag("about_check_updates_button")
+                    ) {
+                        Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Check for Updates")
+                    }
                 }
             }
 
             is ApkUpdateUiState.PermissionRequired -> {
                 val rel = updateState.release
                 Text(
-                    text = "Android requires permission to install updates from NYXORA Browser (v${rel.cleanVersion}). Tap Install Update to allow 'Install unknown apps' and open the official package installer.",
+                    text = "Android requires permission to install updates from NYXORA Browser (${rel.displayVersionLabel}). Tap Install Update to allow 'Install unknown apps' and open the official package installer.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.testTag("about_update_status_text")

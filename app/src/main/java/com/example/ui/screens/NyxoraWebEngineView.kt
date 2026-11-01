@@ -373,11 +373,21 @@ class WebViewControllerHandle {
                     if (v.mediaKeys || v.webkitKeys) {
                         return JSON.stringify({supported: false, reason: 'DRM-protected video restricts custom zoom'});
                     }
-                    v.style.transformOrigin = 'center center';
-                    v.style.willChange = 'transform';
                     if (${clampedScale} <= 1.001 && Math.abs(${panX}) < 0.5 && Math.abs(${panY}) < 0.5) {
-                        v.style.transform = '';
+                        if (v.getAttribute('data-nyxora-zoomed') === 'true') {
+                            v.style.transform = v.getAttribute('data-nyxora-orig-transform') || '';
+                            v.style.transformOrigin = v.getAttribute('data-nyxora-orig-origin') || '';
+                            v.style.willChange = '';
+                            v.removeAttribute('data-nyxora-zoomed');
+                        }
                     } else {
+                        if (v.getAttribute('data-nyxora-zoomed') !== 'true') {
+                            v.setAttribute('data-nyxora-orig-transform', v.style.transform || '');
+                            v.setAttribute('data-nyxora-orig-origin', v.style.transformOrigin || '');
+                            v.setAttribute('data-nyxora-zoomed', 'true');
+                        }
+                        v.style.transformOrigin = 'center center';
+                        v.style.willChange = 'transform';
                         v.style.transform = 'translate3d(${panX}px, ${panY}px, 0px) scale(${clampedScale})';
                     }
                     return JSON.stringify({supported: true, reason: null});
@@ -399,6 +409,69 @@ class WebViewControllerHandle {
                 onResult(isSupported, reason)
             }
         }
+    }
+
+    /**
+     * Synchronizes HTML5 / YouTube fullscreen video layout inside the active WebView so the
+     * fullscreen `<video>` and player container expand to 100% of the available screen dimensions
+     * instead of remaining constrained to their inline WebView dimensions, and restores cleanly on exit.
+     */
+    internal fun syncHtml5FullscreenVideoLayout(enteringFullscreen: Boolean) {
+        val wv = webView ?: return
+        val js = if (enteringFullscreen) {
+            """
+            (function() {
+                try {
+                    var styleEl = document.getElementById('__nyxora_fs_style__');
+                    if (!styleEl) {
+                        styleEl = document.createElement('style');
+                        styleEl.id = '__nyxora_fs_style__';
+                        styleEl.textContent =
+                            ':fullscreen, :-webkit-full-screen { ' +
+                            'width: 100vw !important; height: 100vh !important; ' +
+                            'max-width: 100vw !important; max-height: 100vh !important; ' +
+                            'margin: 0 !important; padding: 0 !important; ' +
+                            'top: 0 !important; left: 0 !important; right: 0 !important; bottom: 0 !important; ' +
+                            'background-color: #000 !important; ' +
+                            '} ' +
+                            ':fullscreen video, :-webkit-full-screen video, ' +
+                            'video:fullscreen, video:-webkit-full-screen, ' +
+                            '.html5-video-player:fullscreen video.html5-main-video, ' +
+                            '.html5-video-player:-webkit-full-screen video.html5-main-video, ' +
+                            '#movie_player:fullscreen video, #movie_player:-webkit-full-screen video { ' +
+                            'width: 100% !important; height: 100% !important; ' +
+                            'max-width: 100vw !important; max-height: 100vh !important; ' +
+                            'object-fit: contain !important; ' +
+                            'top: 0 !important; left: 0 !important; ' +
+                            '}';
+                        (document.head || document.documentElement).appendChild(styleEl);
+                    }
+                    window.dispatchEvent(new Event('resize'));
+                    setTimeout(function() { window.dispatchEvent(new Event('resize')); }, 80);
+                    setTimeout(function() { window.dispatchEvent(new Event('resize')); }, 240);
+                } catch (e) {}
+            })();
+            """.trimIndent()
+        } else {
+            """
+            (function() {
+                try {
+                    var styleEl = document.getElementById('__nyxora_fs_style__');
+                    if (styleEl && styleEl.parentNode) {
+                        styleEl.parentNode.removeChild(styleEl);
+                    }
+                    if (document.fullscreenElement && document.exitFullscreen) {
+                        document.exitFullscreen().catch(function(){});
+                    } else if (document.webkitFullscreenElement && document.webkitExitFullscreen) {
+                        document.webkitExitFullscreen();
+                    }
+                    window.dispatchEvent(new Event('resize'));
+                    setTimeout(function() { window.dispatchEvent(new Event('resize')); }, 80);
+                } catch (e) {}
+            })();
+            """.trimIndent()
+        }
+        runCatching { wv.evaluateJavascript(js, null) }
     }
 
     fun extractReaderArticle(onResult: (ReaderArticle?) -> Unit) {
@@ -632,6 +705,18 @@ fun NyxoraWebEngineView(
     var isVideoToolbarVisible by remember { mutableStateOf(true) }
     var videoToolbarInteractionTick by remember { mutableIntStateOf(0) }
 
+    // Pre-created FullscreenVideoHostLayout so WebChromeClient.onShowCustomView can attach and measure
+    // the custom video view synchronously to full screen dimensions before returning to Chromium.
+    val fullscreenHostContainer = remember(context) {
+        FullscreenVideoHostLayout(context).apply {
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            setBackgroundColor(android.graphics.Color.BLACK)
+        }
+    }
+
     // Auto-hide fullscreen video toolbar after 2.5 seconds without user interaction
     LaunchedEffect(fullscreenCustomView, isVideoToolbarVisible, videoToolbarInteractionTick) {
         if (fullscreenCustomView != null && isVideoToolbarVisible) {
@@ -663,21 +748,26 @@ fun NyxoraWebEngineView(
             controllerHandle.fullscreenCustomView = null
             controllerHandle.isFullscreen = false
             controllerHandle.applyHtml5VideoZoomTransform(1.0f, 0f, 0f)
+            controllerHandle.syncHtml5FullscreenVideoLayout(enteringFullscreen = false)
             runCatching {
                 viewToDetach?.scaleX = 1.0f
                 viewToDetach?.scaleY = 1.0f
                 viewToDetach?.translationX = 0f
                 viewToDetach?.translationY = 0f
                 (viewToDetach?.parent as? ViewGroup)?.removeView(viewToDetach)
+                fullscreenHostContainer.removeAllViews()
             }
             runCatching {
                 callbackToNotify?.onCustomViewHidden()
             }
             restoreActivityAfterFullscreen(activity, stateToRestore)
+            runCatching {
+                controllerHandle.webView?.requestLayout()
+            }
         }
     }
 
-    val enterFullscreenVideo: (View, WebChromeClient.CustomViewCallback?) -> Unit = { view, callback ->
+    val enterFullscreenVideo: (View, Int, WebChromeClient.CustomViewCallback?) -> Unit = { view, videoRequestedOrientation, callback ->
         val existingView = fullscreenCustomView
         if (existingView != null && existingView !== view) {
             val prevCallback = fullscreenCallback
@@ -691,6 +781,38 @@ fun NyxoraWebEngineView(
         if (savedWindowStateBeforeFullscreen == null) {
             savedWindowStateBeforeFullscreen = captureWindowStateBeforeFullscreen(activity)
         }
+
+        // Synchronously attach and size the custom video view to the full window bounds so Chromium's
+        // FullScreenView immediately reports full-screen viewport dimensions to the video player.
+        runCatching {
+            (view.parent as? ViewGroup)?.removeView(view)
+            fullscreenHostContainer.removeAllViews()
+            fullscreenHostContainer.onUserInteraction = {
+                isVideoToolbarVisible = true
+                videoToolbarInteractionTick++
+            }
+            view.scaleX = 1.0f
+            view.scaleY = 1.0f
+            view.translationX = 0f
+            view.translationY = 0f
+            fullscreenHostContainer.addView(
+                view,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            )
+            val decor = activity?.window?.decorView
+            val dm = context.resources.displayMetrics
+            val fullW = (decor?.width?.takeIf { it > 0 } ?: dm.widthPixels).coerceAtLeast(1)
+            val fullH = (decor?.height?.takeIf { it > 0 } ?: dm.heightPixels).coerceAtLeast(1)
+            fullscreenHostContainer.measure(
+                View.MeasureSpec.makeMeasureSpec(fullW, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(fullH, View.MeasureSpec.EXACTLY)
+            )
+            fullscreenHostContainer.layout(0, 0, fullW, fullH)
+        }
+
         fullscreenCustomView = view
         fullscreenCallback = callback
         currentVideoZoom = 1.0f
@@ -703,8 +825,10 @@ fun NyxoraWebEngineView(
         enterImmersiveFullscreen(
             activity = activity,
             keepScreenOn = currentSettings.keepScreenOnWhilePlaying,
-            orientationMode = currentSettings.fullscreenOrientationMode
+            orientationMode = currentSettings.fullscreenOrientationMode,
+            videoRequestedOrientation = videoRequestedOrientation
         )
+        controllerHandle.syncHtml5FullscreenVideoLayout(enteringFullscreen = true)
     }
 
     val currentOnEnterFullscreen by rememberUpdatedState(enterFullscreenVideo)
@@ -894,8 +1018,8 @@ fun NyxoraWebEngineView(
                                     pendingOsPermissionAction = resultCallback
                                     osPermissionLauncher.launch(perms)
                                 },
-                                onEnterFullscreenVideo = { view, callback ->
-                                    currentOnEnterFullscreen(view, callback)
+                                onEnterFullscreenVideo = { view, requestedOrientation, callback ->
+                                    currentOnEnterFullscreen(view, requestedOrientation, callback)
                                 },
                                 onExitFullscreenVideo = {
                                     currentOnExitFullscreen()
@@ -1133,27 +1257,25 @@ fun NyxoraWebEngineView(
                     modifier = Modifier
                         .fillMaxSize()
                         .testTag("fullscreen_custom_view_container"),
-                    factory = { ctx ->
-                        FullscreenVideoHostLayout(
-                            context = ctx,
+                    factory = {
+                        (fullscreenHostContainer.parent as? ViewGroup)?.removeView(fullscreenHostContainer)
+                        fullscreenHostContainer.apply {
                             onUserInteraction = {
                                 isVideoToolbarVisible = true
                                 videoToolbarInteractionTick++
                             }
-                        ).apply {
-                            layoutParams = ViewGroup.LayoutParams(
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                ViewGroup.LayoutParams.MATCH_PARENT
-                            )
                             setBackgroundColor(android.graphics.Color.BLACK)
-                            (customVideoView.parent as? ViewGroup)?.removeView(customVideoView)
-                            addView(
-                                customVideoView,
-                                FrameLayout.LayoutParams(
-                                    ViewGroup.LayoutParams.MATCH_PARENT,
-                                    ViewGroup.LayoutParams.MATCH_PARENT
+                            if (customVideoView.parent !== this) {
+                                (customVideoView.parent as? ViewGroup)?.removeView(customVideoView)
+                                removeAllViews()
+                                addView(
+                                    customVideoView,
+                                    FrameLayout.LayoutParams(
+                                        ViewGroup.LayoutParams.MATCH_PARENT,
+                                        ViewGroup.LayoutParams.MATCH_PARENT
+                                    )
                                 )
-                            )
+                            }
                         }
                     },
                     update = { container ->
@@ -1177,6 +1299,7 @@ fun NyxoraWebEngineView(
                                 )
                             )
                         }
+                        container.forceExpandVideoHierarchy()
                     }
                 )
 
@@ -1424,6 +1547,7 @@ private class FullscreenVideoHostLayout(
     context: Context,
     var onUserInteraction: (() -> Unit)? = null
 ) : FrameLayout(context) {
+
     override fun dispatchTouchEvent(ev: MotionEvent?): Boolean {
         val action = ev?.actionMasked
         if (action == MotionEvent.ACTION_DOWN ||
@@ -1433,6 +1557,57 @@ private class FullscreenVideoHostLayout(
             onUserInteraction?.invoke()
         }
         return super.dispatchTouchEvent(ev)
+    }
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val w = MeasureSpec.getSize(widthMeasureSpec)
+        val h = MeasureSpec.getSize(heightMeasureSpec)
+        if (w > 0 && h > 0) {
+            val exactW = MeasureSpec.makeMeasureSpec(w, MeasureSpec.EXACTLY)
+            val exactH = MeasureSpec.makeMeasureSpec(h, MeasureSpec.EXACTLY)
+            for (i in 0 until childCount) {
+                val child = getChildAt(i)
+                child.layoutParams = LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+                child.measure(exactW, exactH)
+            }
+            setMeasuredDimension(w, h)
+        } else {
+            super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+        }
+    }
+
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        val w = (right - left).coerceAtLeast(0)
+        val h = (bottom - top).coerceAtLeast(0)
+        for (i in 0 until childCount) {
+            val child = getChildAt(i)
+            child.layout(0, 0, w, h)
+        }
+    }
+
+    fun forceExpandVideoHierarchy() {
+        val w = width
+        val h = height
+        for (i in 0 until childCount) {
+            val child = getChildAt(i)
+            val lp = child.layoutParams
+            if (lp == null || lp.width != ViewGroup.LayoutParams.MATCH_PARENT || lp.height != ViewGroup.LayoutParams.MATCH_PARENT) {
+                child.layoutParams = LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            }
+            if (w > 0 && h > 0 && (child.width != w || child.height != h)) {
+                child.measure(
+                    MeasureSpec.makeMeasureSpec(w, MeasureSpec.EXACTLY),
+                    MeasureSpec.makeMeasureSpec(h, MeasureSpec.EXACTLY)
+                )
+                child.layout(0, 0, w, h)
+            }
+        }
     }
 }
 
@@ -1465,7 +1640,7 @@ private fun createConfiguredTabWebView(
     onToast: (String) -> Unit,
     onShowFileChooser: (ValueCallback<Array<Uri>>, String) -> Unit,
     onRequestOsPermissions: (Array<String>, (Boolean) -> Unit) -> Unit,
-    onEnterFullscreenVideo: (View, WebChromeClient.CustomViewCallback?) -> Unit,
+    onEnterFullscreenVideo: (View, Int, WebChromeClient.CustomViewCallback?) -> Unit,
     onExitFullscreenVideo: () -> Unit,
     onRendererGone: (tabId: String, view: WebView?, didCrash: Boolean) -> Unit,
     controllerHandle: WebViewControllerHandle
@@ -1914,9 +2089,23 @@ private fun createConfiguredTabWebView(
                 return true
             }
 
+            override fun getDefaultVideoPoster(): Bitmap {
+                return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+            }
+
             override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
                 if (view == null) return
-                onEnterFullscreenVideo(view, callback)
+                onEnterFullscreenVideo(view, ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED, callback)
+            }
+
+            @Suppress("DEPRECATION")
+            override fun onShowCustomView(
+                view: View?,
+                requestedOrientation: Int,
+                callback: CustomViewCallback?
+            ) {
+                if (view == null) return
+                onEnterFullscreenVideo(view, requestedOrientation, callback)
             }
 
             override fun onHideCustomView() {
@@ -2330,21 +2519,26 @@ private fun captureWindowStateBeforeFullscreen(activity: Activity?): SavedFullsc
 private fun enterImmersiveFullscreen(
     activity: Activity?,
     keepScreenOn: Boolean,
-    orientationMode: FullscreenOrientationMode
+    orientationMode: FullscreenOrientationMode,
+    videoRequestedOrientation: Int = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
 ) {
     val act = activity ?: return
     val window = act.window
 
-    // 1. Preserve current orientation (Portrait stays Portrait, Landscape stays Landscape) without forcing landscape
-    when (orientationMode) {
-        FullscreenOrientationMode.ALWAYS_LANDSCAPE -> {
+    // 1. Respect the video's requested orientation if explicitly provided, or follow user's orientation mode
+    // while preserving current Portrait/Landscape orientation without forcing unnecessary rotation.
+    when {
+        isExplicitLandscapeOrientation(videoRequestedOrientation) ||
+            isExplicitPortraitOrientation(videoRequestedOrientation) -> {
+            act.requestedOrientation = videoRequestedOrientation
+        }
+        orientationMode == FullscreenOrientationMode.ALWAYS_LANDSCAPE -> {
             act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         }
-        FullscreenOrientationMode.PORTRAIT -> {
+        orientationMode == FullscreenOrientationMode.PORTRAIT -> {
             act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         }
-        FullscreenOrientationMode.KEEP_CURRENT,
-        FullscreenOrientationMode.AUTO -> {
+        else -> {
             if (isActivityCurrentlyLandscape(act)) {
                 if (!isExplicitLandscapeOrientation(act.requestedOrientation)) {
                     act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
@@ -2416,9 +2610,24 @@ private fun restoreActivityAfterFullscreen(
             window.attributes = params
         }
 
+        val darkWindowBg = android.graphics.Color.parseColor("#060E1B")
+        val darkNavBarBg = android.graphics.Color.parseColor("#071222")
+        window.decorView.setBackgroundColor(darkWindowBg)
+        @Suppress("DEPRECATION")
+        window.statusBarColor = android.graphics.Color.TRANSPARENT
+        @Suppress("DEPRECATION")
+        window.navigationBarColor = darkNavBarBg
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+            @Suppress("DEPRECATION")
+            window.isStatusBarContrastEnforced = false
+        }
+
         val decorView = window.decorView
         val insetsController = WindowCompat.getInsetsController(window, decorView)
         insetsController.show(WindowInsetsCompat.Type.systemBars())
+        insetsController.isAppearanceLightStatusBars = false
+        insetsController.isAppearanceLightNavigationBars = false
         if (savedState != null) {
             insetsController.systemBarsBehavior = savedState.systemBarsBehavior
             @Suppress("DEPRECATION")

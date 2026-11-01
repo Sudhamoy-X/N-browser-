@@ -173,7 +173,11 @@ fun NyxoraGeometricLogo(
             modifier = Modifier
                 .fillMaxSize()
                 .graphicsLayer {
-                    compositingStrategy = CompositingStrategy.Offscreen
+                    compositingStrategy = if (clampedSweep in 0.01f..0.99f) {
+                        CompositingStrategy.Offscreen
+                    } else {
+                        CompositingStrategy.Auto
+                    }
                 }
                 .drawWithContent {
                     drawContent()

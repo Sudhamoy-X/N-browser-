@@ -587,6 +587,11 @@ class NyxoraApkUpdateTest {
         assertTrue(releaseWorkflowContent.contains(":app:testDebugUnitTest"))
         assertTrue(releaseWorkflowContent.contains("-Drobolectric.enabledSdks=34"))
         assertTrue(releaseWorkflowContent.contains(":app:assembleDebug"))
+        assertTrue(releaseWorkflowContent.contains(":app:assembleRelease"))
+        assertTrue(releaseWorkflowContent.contains("verify --verbose --print-certs"))
+        assertTrue(releaseWorkflowContent.contains("dump badging"))
+        assertTrue(releaseWorkflowContent.contains("release-metadata.json"))
+        assertTrue(releaseWorkflowContent.contains("should_publish_release"))
         assertTrue(releaseWorkflowContent.contains("app/build/outputs/apk/debug/app-debug.apk"))
         assertTrue(releaseWorkflowContent.contains("actions/upload-artifact@v4"))
         assertTrue(releaseWorkflowContent.contains("softprops/action-gh-release@v2"))
@@ -619,6 +624,163 @@ class NyxoraApkUpdateTest {
         assertNotNull("Expected robolectric.properties on test classpath", roboPropsStream)
         val roboPropsText = roboPropsStream!!.bufferedReader().use { it.readText() }
         assertTrue(roboPropsText.contains("sdk=34,36"))
+    }
+
+    @Test
+    fun `release parser extracts versionCode and minSupportedVersionCode and blocks versionCode downgrades`() {
+        val releaseWithHigherCodeJson = """
+            {
+              "tag_name": "v2.6.4",
+              "name": "NYXORA Browser v2.6.4",
+              "body": "### Release Metadata\n- **Version Name:** `2.6.4`\n- **Version Code:** `4`\n- **Min Supported Version Code:** `1`\n- **SHA-256 Checksum:** `${"a".repeat(64)}`",
+              "draft": false,
+              "prerelease": false,
+              "assets": [
+                {
+                  "name": "nyxora-browser-v2.6.4-b4.apk",
+                  "browser_download_url": "https://github.com/sudhamoy-nyxora/nyxora-browser/releases/download/v2.6.4/nyxora-browser-v2.6.4-b4.apk",
+                  "size": 12485760,
+                  "state": "uploaded"
+                }
+              ]
+            }
+        """.trimIndent()
+
+        // 1. Installed version is 2.5 (versionCode = 3) -> UpdateAvailable with versionCode = 4
+        val resultAvailable = NyxoraApkUpdateManager.parseLatestReleaseResponse(
+            json = releaseWithHigherCodeJson,
+            installedVersionName = "2.5",
+            installedVersionCode = 3
+        )
+        assertTrue("Expected UpdateAvailable, got $resultAvailable", resultAvailable is ReleaseCheckResult.UpdateAvailable)
+        val release = (resultAvailable as ReleaseCheckResult.UpdateAvailable).release
+        assertEquals("2.6.4", release.cleanVersion)
+        assertEquals(4, release.versionCode)
+        assertEquals(1, release.minSupportedVersionCode)
+        assertEquals("a".repeat(64), release.expectedSha256Hex)
+
+        // 2. Installed versionCode is already 4 or 5 -> Never offer a release with lower or equal versionCode
+        val resultBlockedByCode = NyxoraApkUpdateManager.parseLatestReleaseResponse(
+            json = releaseWithHigherCodeJson,
+            installedVersionName = "2.5",
+            installedVersionCode = 4
+        )
+        assertTrue(
+            "Expected UpToDate when release versionCode <= installedVersionCode, got $resultBlockedByCode",
+            resultBlockedByCode is ReleaseCheckResult.UpToDate
+        )
+    }
+
+    @Test
+    fun `startup update prompt snooze and one-tap autoTriggerInstall launch package installer automatically`() {
+        val fakeApkBytes = buildValidZipApkBytes("NYXORA-ONE-TAP-AUTO-INSTALL-V2.6.4".repeat(256))
+        val expectedSha256 = sha256Hex(fakeApkBytes)
+        val releaseApiUrl = "https://api.github.com/repos/sudhamoy-nyxora/nyxora-browser/releases/latest"
+        val apkDownloadUrl = "https://github.com/sudhamoy-nyxora/nyxora-browser/releases/download/v2.6.4/nyxora-browser-v2.6.4-b4.apk"
+
+        val releaseJson = """
+            {
+              "tag_name": "v2.6.4",
+              "name": "NYXORA Browser v2.6.4",
+              "body": "Version Code: 4\nSHA-256: $expectedSha256",
+              "draft": false,
+              "prerelease": false,
+              "published_at": "2026-11-01T00:00:00Z",
+              "assets": [
+                {
+                  "name": "nyxora-browser-v2.6.4-b4.apk",
+                  "browser_download_url": "$apkDownloadUrl",
+                  "size": ${fakeApkBytes.size},
+                  "state": "uploaded",
+                  "digest": "sha256:$expectedSha256"
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val fakeInspector = object : ApkArchiveInspector {
+            override fun inspectApkArchive(context: Context, apkFile: File): ParsedApkArchiveMetadata {
+                return ParsedApkArchiveMetadata(
+                    packageName = context.packageName,
+                    versionName = "2.6.4",
+                    versionCode = 4L,
+                    signingCertSha256Fingerprints = setOf("nyxora_signing_cert_sha256_fingerprint")
+                )
+            }
+
+            override fun getInstalledSigningCertSha256Fingerprints(context: Context): Set<String> {
+                return setOf("nyxora_signing_cert_sha256_fingerprint")
+            }
+
+            override fun canRequestPackageInstalls(context: Context): Boolean = true
+        }
+
+        val client = OkHttpClient.Builder()
+            .addInterceptor(Interceptor { chain ->
+                when (chain.request().url.toString()) {
+                    releaseApiUrl -> Response.Builder()
+                        .request(chain.request())
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body(releaseJson.toResponseBody("application/json".toMediaType()))
+                        .build()
+
+                    apkDownloadUrl -> Response.Builder()
+                        .request(chain.request())
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body(fakeApkBytes.toResponseBody("application/vnd.android.package-archive".toMediaType()))
+                        .build()
+
+                    else -> Response.Builder()
+                        .request(chain.request())
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(404)
+                        .message("Not Found")
+                        .body("".toResponseBody(null))
+                        .build()
+                }
+            })
+            .build()
+
+        val manager = NyxoraApkUpdateManager(
+            context = context,
+            scope = testScope,
+            ioDispatcher = Dispatchers.Unconfined,
+            httpClient = client,
+            archiveInspector = fakeInspector,
+            releaseApiUrlProvider = { releaseApiUrl },
+            installedVersionNameProvider = { "2.5" },
+            installedVersionCodeProvider = { 3 }
+        )
+
+        manager.checkForUpdates(force = true)
+        val state = manager.uiState.value
+        assertTrue(state is ApkUpdateUiState.UpdateAvailable)
+        assertTrue(manager.lastCheckedAtMillis.value > 0L)
+        assertTrue(manager.shouldShowStartupUpdatePrompt(state, manager.dismissedReleaseTag.value))
+
+        // Tapping "Later" dismisses the startup prompt for v2.6.4 without hiding Settings update state
+        val release = (state as ApkUpdateUiState.UpdateAvailable).release
+        manager.dismissUpdatePromptForLater(release)
+        assertFalse(manager.shouldShowStartupUpdatePrompt(state, manager.dismissedReleaseTag.value))
+
+        // Manual checkForUpdates(force = true) clears snooze
+        manager.checkForUpdates(force = true)
+        assertTrue(manager.shouldShowStartupUpdatePrompt(manager.uiState.value, manager.dismissedReleaseTag.value))
+
+        // Tapping "Update Now" with autoTriggerInstall = true downloads, verifies, and launches Package Installer
+        val shadowApp = shadowOf(context as android.app.Application)
+        shadowApp.clearNextStartedActivities()
+        manager.downloadUpdateNow(autoTriggerInstall = true)
+
+        assertTrue(manager.uiState.value is ApkUpdateUiState.ReadyToInstall)
+        val startedInstallerIntent = shadowApp.nextStartedActivity
+        assertNotNull("Expected Package Installer intent to be started automatically after download", startedInstallerIntent)
+        assertEquals(Intent.ACTION_VIEW, startedInstallerIntent.action)
+        assertEquals(NyxoraApkUpdateManager.APK_MIME_TYPE, startedInstallerIntent.type)
     }
 
     private fun buildValidZipApkBytes(payloadText: String): ByteArray {

@@ -11,30 +11,32 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Release version tag (e.g., v2.5). Leave empty to use app/build.gradle.kts version.'
+        description: 'Release version tag (e.g., v2.6.4). Leave empty for automatic version increment.'
         required: false
         default: ''
       publish_release:
-        description: 'Publish APK to GitHub Releases after tests and build pass'
+        description: 'Publish signed APK to GitHub Releases after tests and build pass'
         required: false
         type: boolean
-        default: false
+        default: true
       release_notes:
         description: 'Release highlights (used when publishing a GitHub Release)'
         required: false
-        default: 'Stable NYXORA Browser Android release with in-app update support.'
+        default: 'Stable NYXORA Browser Android release with automatic in-app update support.'
 
 permissions:
   contents: write
 
 jobs:
   build-and-release-apk:
-    name: Test, Build APK & Publish Artifact / Release
+    name: Test, Build Signed Release APK & Publish GitHub Release
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout NYXORA Browser Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -76,6 +78,7 @@ jobs:
           if [ -n "${GITHUB_PATH:-}" ]; then
             echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
             echo "${SDK_ROOT}/platform-tools" >> "$GITHUB_PATH"
+            echo "${SDK_ROOT}/build-tools/36.0.0" >> "$GITHUB_PATH"
           fi
 
           yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses > /dev/null || true
@@ -98,15 +101,54 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Resolve Version Metadata & Release Mode
+      - name: Resolve Automatic Semantic Version & Monotonic VersionCode
         id: version_meta
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_SLUG: ${{ github.repository }}
         run: |
           set -euo pipefail
           GRADLE_VERSION_NAME=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)
           GRADLE_VERSION_CODE=$(sed -n 's/.*versionCode = \([0-9][0-9]*\).*/\1/p' app/build.gradle.kts | head -n 1)
+          GRADLE_VERSION_NAME="${GRADLE_VERSION_NAME:-2.5}"
+          GRADLE_VERSION_CODE="${GRADLE_VERSION_CODE:-3}"
 
-          SHOULD_PUBLISH="false"
+          # Query latest published GitHub Release (if any) to ensure versionCode and versionName strictly increase
+          LATEST_JSON=$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/${REPO_SLUG}/releases/latest" 2>/dev/null || echo "{}")
+
+          PUBLISHED_TAG=$(python3 -c '
+          import json, sys
+          try:
+              data = json.loads(sys.stdin.read() or "{}")
+              print(data.get("tag_name", "").strip())
+          except Exception:
+              print("")
+          ' <<< "$LATEST_JSON")
+
+          PUBLISHED_CODE=$(python3 -c '
+          import json, re, sys
+          try:
+              data = json.loads(sys.stdin.read() or "{}")
+              body = data.get("body", "") or ""
+              m = re.search(r"(?i)version[\s_-]*code\**\s*[:=]?\s*`?(\d+)`?", body)
+              if m:
+                  print(int(m.group(1)))
+              else:
+                  print(0)
+          except Exception:
+              print(0)
+          ' <<< "$LATEST_JSON")
+
+          MAX_EXISTING_CODE="$GRADLE_VERSION_CODE"
+          if [ "${PUBLISHED_CODE:-0}" -gt "$MAX_EXISTING_CODE" ]; then
+            MAX_EXISTING_CODE="$PUBLISHED_CODE"
+          fi
+
+          SHOULD_PUBLISH="true"
           RAW_TAG=""
 
           if [[ "${{ github.ref }}" == refs/tags/v* ]] || [[ "${{ github.ref }}" == refs/tags/V* ]]; then
@@ -116,10 +158,9 @@ jobs:
             INPUT_TAG="${{ github.event.inputs.tag_name }}"
             if [ -n "$INPUT_TAG" ]; then
               RAW_TAG="$INPUT_TAG"
-              SHOULD_PUBLISH="true"
-            elif [ "${{ github.event.inputs.publish_release }}" = "true" ]; then
-              RAW_TAG="v${GRADLE_VERSION_NAME}"
-              SHOULD_PUBLISH="true"
+            fi
+            if [ "${{ github.event.inputs.publish_release }}" = "false" ]; then
+              SHOULD_PUBLISH="false"
             fi
           fi
 
@@ -127,42 +168,64 @@ jobs:
             CLEAN_VERSION="${RAW_TAG#v}"
             CLEAN_VERSION="${CLEAN_VERSION#V}"
             if [[ ! "$CLEAN_VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
-              echo "Error: Tag '$RAW_TAG' must be a stable semantic version (e.g., v2.5)"
+              echo "Error: Tag '$RAW_TAG' must be a stable semantic version (e.g., v2.6.4)"
               exit 1
             fi
             VERSION_NAME="$CLEAN_VERSION"
-            TAG_NAME="v${CLEAN_VERSION}"
-            if [ "$VERSION_NAME" = "$GRADLE_VERSION_NAME" ]; then
-              VERSION_CODE="$GRADLE_VERSION_CODE"
-            else
-              IFS='.' read -r MAJOR MINOR PATCH _ <<< "${CLEAN_VERSION}.0.0"
-              COMPUTED_CODE=$(( MAJOR * 10000 + MINOR * 100 + PATCH ))
-              if [ "$COMPUTED_CODE" -le "$GRADLE_VERSION_CODE" ]; then
-                VERSION_CODE=$(( GRADLE_VERSION_CODE + 1 ))
-              else
-                VERSION_CODE="$COMPUTED_CODE"
-              fi
-            fi
+            VERSION_CODE=$(( MAX_EXISTING_CODE + 1 ))
+            TAG_NAME="v${VERSION_NAME}"
           else
-            VERSION_NAME="$GRADLE_VERSION_NAME"
-            VERSION_CODE="$GRADLE_VERSION_CODE"
-            TAG_NAME="v${GRADLE_VERSION_NAME}"
+            # Automatic version increment on push to main/master or workflow_dispatch without tag
+            VERSION_CODE=$(( MAX_EXISTING_CODE + 1 ))
+            VERSION_NAME=$(python3 -c '
+          import re, sys
+          gradle_ver = sys.argv[1].lstrip("vV").strip()
+          pub_tag = sys.argv[2].lstrip("vV").strip()
+          next_code = int(sys.argv[3])
+
+          def parse_parts(v):
+              nums = [int(x) for x in re.findall(r"\d+", v)]
+              while len(nums) < 2:
+                  nums.append(0)
+              return nums[:3]
+
+          g_parts = parse_parts(gradle_ver)
+          p_parts = parse_parts(pub_tag) if pub_tag else [0, 0, 0]
+          base = g_parts if g_parts >= p_parts else p_parts
+
+          # If gradle_ver is already strictly newer than published tag, keep gradle major.minor and append/bump patch;
+          # otherwise increment patch (or minor) so every release has a strictly higher semantic versionName.
+          if not pub_tag and g_parts > [2, 5]:
+              candidate = ".".join(str(x) for x in g_parts)
+          else:
+              major, minor = base[0], base[1]
+              patch = (base[2] + 1) if len(base) > 2 else next_code
+              if [major, minor, patch] <= base:
+                  patch = base[-1] + 1
+              candidate = f"{major}.{minor}.{patch}"
+          print(candidate)
+          ' "$GRADLE_VERSION_NAME" "$PUBLISHED_TAG" "$VERSION_CODE")
+            TAG_NAME="v${VERSION_NAME}"
           fi
 
+          echo "Resolved Automatic Release Version: versionName=${VERSION_NAME}, versionCode=${VERSION_CODE}, tag=${TAG_NAME}"
           echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
           echo "version_name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
           echo "version_code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
+          echo "min_supported_version_code=1" >> "$GITHUB_OUTPUT"
           echo "should_publish_release=${SHOULD_PUBLISH}" >> "$GITHUB_OUTPUT"
 
-      - name: Prepare Debug & Release Signing Keystores
+      - name: Prepare Persistent Release & Debug Signing Keystores
         id: signing_setup
         shell: bash
         env:
           RELEASE_KEYSTORE_BASE64: ${{ secrets.NYXORA_KEYSTORE_BASE64 }}
           RELEASE_STORE_PASSWORD: ${{ secrets.NYXORA_STORE_PASSWORD }}
           RELEASE_KEY_PASSWORD: ${{ secrets.NYXORA_KEY_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.NYXORA_KEY_ALIAS }}
         run: |
           set -euo pipefail
+          # 1. Ensure deterministic debug.keystore is decoded from repository's debug.keystore.base64
           if [ ! -f "${GITHUB_WORKSPACE}/debug.keystore" ] && [ -f "${GITHUB_WORKSPACE}/debug.keystore.base64" ]; then
             base64 --decode "${GITHUB_WORKSPACE}/debug.keystore.base64" > "${GITHUB_WORKSPACE}/debug.keystore"
           elif [ ! -f "${GITHUB_WORKSPACE}/debug.keystore" ]; then
@@ -177,14 +240,43 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
+          # 2. Prepare persistent release keystore at ${GITHUB_WORKSPACE}/my-upload-key.jks with alias 'upload'
+          #    matching app/build.gradle.kts signingConfigs.release so :app:assembleRelease always produces
+          #    a signed APK with a consistent certificate across all updates.
+          TARGET_RELEASE_KS="${GITHUB_WORKSPACE}/my-upload-key.jks"
+          rm -f "$TARGET_RELEASE_KS"
+
           if [ -n "$RELEASE_KEYSTORE_BASE64" ] && [ -n "$RELEASE_STORE_PASSWORD" ] && [ -n "$RELEASE_KEY_PASSWORD" ]; then
-            echo "$RELEASE_KEYSTORE_BASE64" | base64 --decode > "${GITHUB_WORKSPACE}/my-upload-key.jks"
-            echo "keystore_path=${GITHUB_WORKSPACE}/my-upload-key.jks" >> "$GITHUB_OUTPUT"
-            echo "has_release_signing=true" >> "$GITHUB_OUTPUT"
+            echo "$RELEASE_KEYSTORE_BASE64" | base64 --decode > "$TARGET_RELEASE_KS"
+            SRC_ALIAS="${RELEASE_KEY_ALIAS:-upload}"
+            if [ "$SRC_ALIAS" != "upload" ]; then
+              keytool -changealias \
+                -keystore "$TARGET_RELEASE_KS" \
+                -storepass "$RELEASE_STORE_PASSWORD" \
+                -keypass "$RELEASE_KEY_PASSWORD" \
+                -alias "$SRC_ALIAS" \
+                -destalias "upload" || true
+            fi
+            echo "keystore_path=${TARGET_RELEASE_KS}" >> "$GITHUB_OUTPUT"
+            echo "store_password=${RELEASE_STORE_PASSWORD}" >> "$GITHUB_OUTPUT"
+            echo "key_password=${RELEASE_KEY_PASSWORD}" >> "$GITHUB_OUTPUT"
           else
-            echo "Notice: NYXORA_KEYSTORE_BASE64 secret not set; using debug-signed APK."
-            echo "keystore_path=${GITHUB_WORKSPACE}/debug.keystore" >> "$GITHUB_OUTPUT"
-            echo "has_release_signing=false" >> "$GITHUB_OUTPUT"
+            # Import the persistent repository key from debug.keystore into my-upload-key.jks under alias 'upload'
+            # so in-place upgrades over AI Studio builds never fail with signature mismatch.
+            keytool -importkeystore \
+              -srckeystore "${GITHUB_WORKSPACE}/debug.keystore" \
+              -srcstorepass android \
+              -srckeypass android \
+              -srcalias androiddebugkey \
+              -destkeystore "$TARGET_RELEASE_KS" \
+              -deststoretype PKCS12 \
+              -deststorepass android \
+              -destkeypass android \
+              -destalias upload \
+              -noprompt
+            echo "keystore_path=${TARGET_RELEASE_KS}" >> "$GITHUB_OUTPUT"
+            echo "store_password=android" >> "$GITHUB_OUTPUT"
+            echo "key_password=android" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Synchronize Version Metadata in app/build.gradle.kts
@@ -198,6 +290,10 @@ jobs:
 
       - name: Run Unit & Robolectric Verification Tests
         shell: bash
+        env:
+          KEYSTORE_PATH: ${{ steps.signing_setup.outputs.keystore_path }}
+          STORE_PASSWORD: ${{ steps.signing_setup.outputs.store_password }}
+          KEY_PASSWORD: ${{ steps.signing_setup.outputs.key_password }}
         run: |
           set -euo pipefail
           if [ -x "./gradlew" ]; then
@@ -206,21 +302,25 @@ jobs:
             gradle :app:testDebugUnitTest -Drobolectric.enabledSdks=34 --stacktrace
           fi
 
-      - name: Build Debug APK & Verify Output
+      - name: Build Signed Release & Debug APKs and Validate Package & Signature
         id: build_apk
         shell: bash
         env:
           KEYSTORE_PATH: ${{ steps.signing_setup.outputs.keystore_path }}
-          STORE_PASSWORD: ${{ secrets.NYXORA_STORE_PASSWORD }}
-          KEY_PASSWORD: ${{ secrets.NYXORA_KEY_PASSWORD }}
+          STORE_PASSWORD: ${{ steps.signing_setup.outputs.store_password }}
+          KEY_PASSWORD: ${{ steps.signing_setup.outputs.key_password }}
+          REPO_SLUG: ${{ github.repository }}
         run: |
           set -euo pipefail
           VERSION_NAME="${{ steps.version_meta.outputs.version_name }}"
+          VERSION_CODE="${{ steps.version_meta.outputs.version_code }}"
+          TAG_NAME="${{ steps.version_meta.outputs.tag_name }}"
+          MIN_SUPPORTED_CODE="${{ steps.version_meta.outputs.min_supported_version_code }}"
 
           if [ -x "./gradlew" ]; then
-            ./gradlew :app:assembleDebug --stacktrace
+            ./gradlew :app:assembleDebug :app:assembleRelease --stacktrace
           else
-            gradle :app:assembleDebug --stacktrace
+            gradle :app:assembleDebug :app:assembleRelease --stacktrace
           fi
 
           DEBUG_APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
@@ -229,43 +329,78 @@ jobs:
             exit 1
           fi
 
-          SELECTED_APK="$DEBUG_APK_PATH"
-
-          if [ "${{ steps.signing_setup.outputs.has_release_signing }}" = "true" ]; then
-            if [ -x "./gradlew" ]; then
-              ./gradlew :app:assembleRelease --stacktrace
-            else
-              gradle :app:assembleRelease --stacktrace
-            fi
-            RELEASE_APK_PATH=$(ls app/build/outputs/apk/release/*.apk | grep -v "unsigned" | head -n 1)
-            if [ -n "$RELEASE_APK_PATH" ] && [ -s "$RELEASE_APK_PATH" ]; then
-              SELECTED_APK="$RELEASE_APK_PATH"
-            fi
+          RELEASE_APK_PATH=$(ls app/build/outputs/apk/release/*.apk 2>/dev/null | grep -v "unsigned" | head -n 1 || true)
+          if [ -z "$RELEASE_APK_PATH" ] || [ ! -s "$RELEASE_APK_PATH" ]; then
+            echo "Error: Expected signed release APK was not produced under app/build/outputs/apk/release/"
+            exit 1
           fi
 
-          RELEASE_APK_NAME="NYXORA-Browser-v${VERSION_NAME}-universal.apk"
-          cp "$SELECTED_APK" "$RELEASE_APK_NAME"
+          RELEASE_APK_NAME="nyxora-browser-v${VERSION_NAME}-b${VERSION_CODE}.apk"
+          cp "$RELEASE_APK_PATH" "$RELEASE_APK_NAME"
+
+          # Verify APK package name, versionCode, versionName, and cryptographic signature
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          AAPT2_BIN=$(find "$SDK_ROOT/build-tools" -name aapt2 -type f 2>/dev/null | sort -V | tail -n 1 || command -v aapt2 || true)
+          APKSIGNER_BIN=$(find "$SDK_ROOT/build-tools" -name apksigner -type f 2>/dev/null | sort -V | tail -n 1 || command -v apksigner || true)
+
+          if [ -n "$AAPT2_BIN" ] && [ -x "$AAPT2_BIN" ]; then
+            BADGING=$("$AAPT2_BIN" dump badging "$RELEASE_APK_NAME")
+            echo "$BADGING" | head -n 5
+            echo "$BADGING" | grep -q "name='com.aistudio.nyxorabrowser.vqxkpl'"
+            echo "$BADGING" | grep -q "versionCode='${VERSION_CODE}'"
+            echo "$BADGING" | grep -q "versionName='${VERSION_NAME}'"
+          fi
+
+          if [ -n "$APKSIGNER_BIN" ] && [ -x "$APKSIGNER_BIN" ]; then
+            "$APKSIGNER_BIN" verify --verbose --print-certs "$RELEASE_APK_NAME"
+          fi
+
           SHA256_SUM=$(sha256sum "$RELEASE_APK_NAME" | awk '{print $1}')
           echo "${SHA256_SUM}  ${RELEASE_APK_NAME}" > "${RELEASE_APK_NAME}.sha256"
+
+          PUBLISHED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          DOWNLOAD_URL="https://github.com/${REPO_SLUG}/releases/download/${TAG_NAME}/${RELEASE_APK_NAME}"
+          RELEASE_NOTES_TEXT="${{ github.event.inputs.release_notes || 'Automatic NYXORA Browser signed Android release.' }}"
+
+          python3 -c '
+          import json, sys
+          metadata = {
+              "package_name": "com.aistudio.nyxorabrowser.vqxkpl",
+              "tag_name": sys.argv[1],
+              "version_name": sys.argv[2],
+              "version_code": int(sys.argv[3]),
+              "min_supported_version_code": int(sys.argv[4]),
+              "release_notes": sys.argv[5],
+              "apk_asset_name": sys.argv[6],
+              "apk_download_url": sys.argv[7],
+              "sha256": sys.argv[8],
+              "published_at": sys.argv[9]
+          }
+          with open("release-metadata.json", "w", encoding="utf-8") as f:
+              json.dump(metadata, f, indent=2)
+          ' "$TAG_NAME" "$VERSION_NAME" "$VERSION_CODE" "$MIN_SUPPORTED_CODE" "$RELEASE_NOTES_TEXT" "$RELEASE_APK_NAME" "$DOWNLOAD_URL" "$SHA256_SUM" "$PUBLISHED_AT"
 
           echo "debug_apk_path=${DEBUG_APK_PATH}" >> "$GITHUB_OUTPUT"
           echo "apk_file=${RELEASE_APK_NAME}" >> "$GITHUB_OUTPUT"
           echo "sha256_file=${RELEASE_APK_NAME}.sha256" >> "$GITHUB_OUTPUT"
+          echo "metadata_file=release-metadata.json" >> "$GITHUB_OUTPUT"
           echo "sha256_sum=${SHA256_SUM}" >> "$GITHUB_OUTPUT"
+          echo "published_at=${PUBLISHED_AT}" >> "$GITHUB_OUTPUT"
 
       - name: Upload NYXORA Browser APK Build Artifact
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: NYXORA-Browser-v${{ steps.version_meta.outputs.version_name }}-APK
+          name: NYXORA-Browser-v${{ steps.version_meta.outputs.version_name }}-b${{ steps.version_meta.outputs.version_code }}-APK
           if-no-files-found: error
           retention-days: 30
           path: |
             app/build/outputs/apk/debug/app-debug.apk
             ${{ steps.build_apk.outputs.apk_file }}
             ${{ steps.build_apk.outputs.sha256_file }}
+            ${{ steps.build_apk.outputs.metadata_file }}
 
-      - name: Publish Versioned GitHub Release with Verified APK Asset
+      - name: Publish Versioned GitHub Release with Signed APK Asset
         if: success() && steps.version_meta.outputs.should_publish_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
@@ -275,13 +410,17 @@ jobs:
           prerelease: false
           generate_release_notes: true
           body: |
-            ${{ github.event.inputs.release_notes || 'Stable NYXORA Browser Android release with in-app update support.' }}
+            ${{ github.event.inputs.release_notes || 'Stable NYXORA Browser Android release with automatic in-app update support.' }}
 
-            ### Package Verification
-            - **Package ID**: `com.aistudio.nyxorabrowser.vqxkpl`
-            - **Version**: `${{ steps.version_meta.outputs.version_name }}` (`versionCode ${{ steps.version_meta.outputs.version_code }}`)
-            - **APK Asset**: `${{ steps.build_apk.outputs.apk_file }}`
-            - **SHA-256**: `${{ steps.build_apk.outputs.sha256_sum }}`
+            ### Release Metadata
+            - **Package ID:** `com.aistudio.nyxorabrowser.vqxkpl`
+            - **Version Name:** `${{ steps.version_meta.outputs.version_name }}`
+            - **Version Code:** `${{ steps.version_meta.outputs.version_code }}`
+            - **Min Supported Version Code:** `${{ steps.version_meta.outputs.min_supported_version_code }}`
+            - **APK Asset:** `${{ steps.build_apk.outputs.apk_file }}`
+            - **SHA-256 Checksum:** `${{ steps.build_apk.outputs.sha256_sum }}`
+            - **Published At:** `${{ steps.build_apk.outputs.published_at }}`
           files: |
             ${{ steps.build_apk.outputs.apk_file }}
             ${{ steps.build_apk.outputs.sha256_file }}
+            ${{ steps.build_apk.outputs.metadata_file }}

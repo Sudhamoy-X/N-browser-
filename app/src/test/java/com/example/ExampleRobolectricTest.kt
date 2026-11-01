@@ -141,7 +141,30 @@ class ExampleRobolectricTest {
         val topGapFromContainer = headerBounds.top - containerBounds.top
         assertTrue(
             "Home Screen NYXORA header must have clear top breathing space below the status bar/top edge (actual=$topGapFromContainer)",
-            topGapFromContainer >= 12f
+            topGapFromContainer >= 26f
+        )
+        // Verify dark navy system bar colors and icon contrast on the Home Screen
+        val activityWindow = composeTestRule.activity.window
+        @Suppress("DEPRECATION")
+        assertEquals(
+            "Status bar must be transparent over the edge-to-edge dark navy Home Screen",
+            android.graphics.Color.TRANSPARENT,
+            activityWindow.statusBarColor
+        )
+        @Suppress("DEPRECATION")
+        assertEquals(
+            "Navigation bar must match the dark navy/blue theme (#071222) and never be white",
+            android.graphics.Color.parseColor("#071222"),
+            activityWindow.navigationBarColor
+        )
+        val insetsController = androidx.core.view.WindowCompat.getInsetsController(activityWindow, activityWindow.decorView)
+        assertFalse(
+            "Status bar icons must remain light-on-dark (isAppearanceLightStatusBars = false)",
+            insetsController.isAppearanceLightStatusBars
+        )
+        assertFalse(
+            "Navigation bar icons must remain light-on-dark with proper contrast (isAppearanceLightNavigationBars = false)",
+            insetsController.isAppearanceLightNavigationBars
         )
         assertTrue(
             "NYXORA logo and NYXORA heading must be vertically aligned on the same row",
@@ -783,15 +806,29 @@ class ExampleRobolectricTest {
         val initialOrientation = activity.requestedOrientation
         assertEquals(Configuration.ORIENTATION_PORTRAIT, activity.resources.configuration.orientation)
 
-        // 1. Enter fullscreen in PORTRAIT mode
+        // 1. Enter fullscreen in PORTRAIT mode and verify synchronous attachment & full-screen dimensions
         var portraitCallbackHiddenCount = 0
         val portraitVideoView = FrameLayout(activity)
+        var immediateParentAfterShow: android.view.ViewParent? = null
+        var immediateWidthAfterShow = 0
+        var immediateHeightAfterShow = 0
         composeTestRule.runOnUiThread {
             chromeClient!!.onShowCustomView(
                 portraitVideoView,
                 WebChromeClient.CustomViewCallback { portraitCallbackHiddenCount++ }
             )
+            immediateParentAfterShow = portraitVideoView.parent
+            immediateWidthAfterShow = portraitVideoView.width
+            immediateHeightAfterShow = portraitVideoView.height
         }
+        assertNotNull(
+            "onShowCustomView must synchronously attach the video view before returning so Chromium sees a live parent",
+            immediateParentAfterShow
+        )
+        assertTrue(
+            "onShowCustomView must synchronously size the video view to full screen dimensions (w=$immediateWidthAfterShow, h=$immediateHeightAfterShow)",
+            immediateWidthAfterShow > 0 && immediateHeightAfterShow > 0
+        )
         composeTestRule.waitForIdle()
 
         // 2. Verify portrait mode remains portrait (does NOT force landscape!)
@@ -801,7 +838,7 @@ class ExampleRobolectricTest {
             activity.requestedOrientation
         )
 
-        // 3. Verify both browser toolbars completely disappear and fullscreen overlay fills screen
+        // 3. Verify both browser toolbars completely disappear and fullscreen overlay fills screen edge-to-edge
         assertEquals(
             0,
             composeTestRule.onAllNodesWithTag("nyxora_top_address_bar").fetchSemanticsNodes().size
@@ -813,6 +850,15 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("fullscreen_video_overlay").assertIsDisplayed()
         composeTestRule.onNodeWithTag("fullscreen_custom_view_container").assertIsDisplayed()
         assertNotNull("Fullscreen custom view must be attached to container", portraitVideoView.parent)
+        val rootBounds = composeTestRule.onNodeWithTag("nyxora_main_browser_screen").fetchSemanticsNode().boundsInRoot
+        val overlayBounds = composeTestRule.onNodeWithTag("fullscreen_video_overlay").fetchSemanticsNode().boundsInRoot
+        assertEquals("Fullscreen video overlay must fill full screen width", rootBounds.width, overlayBounds.width, 2f)
+        assertEquals("Fullscreen video overlay must fill full screen height", rootBounds.height, overlayBounds.height, 2f)
+        assertTrue(
+            "Fullscreen custom video view must expand to fill available screen dimensions (${portraitVideoView.width}x${portraitVideoView.height})",
+            portraitVideoView.width >= (rootBounds.width.toInt() - 2) &&
+                portraitVideoView.height >= (rootBounds.height.toInt() - 2)
+        )
 
         // 4. Verify Android system bars are hidden in immersive fullscreen mode
         @Suppress("DEPRECATION")
@@ -987,6 +1033,37 @@ class ExampleRobolectricTest {
             activity.requestedOrientation
         )
         assertSame(initialWebView, findFirstWebView(activity.window.decorView))
+
+        // 8. Verify 3-argument onShowCustomView(view, requestedOrientation, callback) respects video's requested orientation
+        // and that exiting fullscreen restores dark navy system bars without white flashes
+        var explicitOrientHiddenCount = 0
+        val explicitOrientVideoView = FrameLayout(activity)
+        composeTestRule.runOnUiThread {
+            activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            @Suppress("DEPRECATION")
+            chromeClient!!.onShowCustomView(
+                explicitOrientVideoView,
+                ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE,
+                WebChromeClient.CustomViewCallback { explicitOrientHiddenCount++ }
+            )
+        }
+        composeTestRule.waitForIdle()
+        assertEquals(
+            "3-arg onShowCustomView must respect the video's requested orientation",
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE,
+            activity.requestedOrientation
+        )
+        composeTestRule.onNodeWithTag("fullscreen_exit_button").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals(1, explicitOrientHiddenCount)
+        assertNull(explicitOrientVideoView.parent)
+        @Suppress("DEPRECATION")
+        assertEquals(
+            "Navigation bar must remain dark navy (#071222) after exiting fullscreen",
+            android.graphics.Color.parseColor("#071222"),
+            activity.window.navigationBarColor
+        )
+
         composeTestRule.runOnUiThread {
             activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         }
@@ -2398,7 +2475,7 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("about_apk_update_section").performScrollTo()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("about_apk_update_section").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("about_update_available_indicator").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("about_update_available_indicator").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("about_update_now_button").performScrollTo()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("about_update_now_button").assertIsDisplayed()

@@ -43,8 +43,13 @@ data class GitHubReleaseApkInfo(
     val downloadUrl: String,
     val assetSizeBytes: Long,
     val expectedSha256Hex: String? = null,
-    val releaseHtmlUrl: String = ""
-)
+    val releaseHtmlUrl: String = "",
+    val versionCode: Int = 0,
+    val minSupportedVersionCode: Int = 1
+) {
+    val displayVersionLabel: String
+        get() = if (versionCode > 0) "v$cleanVersion (Build $versionCode)" else "v$cleanVersion"
+}
 
 /**
  * Structured outcome of querying and parsing the GitHub `/releases/latest` endpoint.
@@ -307,9 +312,22 @@ class NyxoraApkUpdateManager(
     private var allowHttpForLocalTesting: Boolean = false
 ) {
     private val appContext: Context = context.applicationContext
+    private val updatePrefs by lazy {
+        appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    }
 
     private val _uiState = MutableStateFlow<ApkUpdateUiState>(ApkUpdateUiState.Idle)
     val uiState: StateFlow<ApkUpdateUiState> = _uiState.asStateFlow()
+
+    private val _lastCheckedAtMillis = MutableStateFlow(
+        runCatching { updatePrefs.getLong(KEY_LAST_CHECKED_AT, 0L) }.getOrDefault(0L)
+    )
+    val lastCheckedAtMillis: StateFlow<Long> = _lastCheckedAtMillis.asStateFlow()
+
+    private val _dismissedReleaseTag = MutableStateFlow(
+        runCatching { updatePrefs.getString(KEY_DISMISSED_RELEASE_TAG, "") ?: "" }.getOrDefault("")
+    )
+    val dismissedReleaseTag: StateFlow<String> = _dismissedReleaseTag.asStateFlow()
 
     @Volatile
     private var lastCheckTimestampMillis: Long = 0L
@@ -325,6 +343,39 @@ class NyxoraApkUpdateManager(
 
     val installedVersionCode: Int
         get() = installedVersionCodeProvider().coerceAtLeast(1)
+
+    fun dismissUpdatePromptForLater(release: GitHubReleaseApkInfo? = _uiState.value.activeReleaseInfo) {
+        val tag = release?.tagName?.trim()?.ifBlank { release.cleanVersion }.orEmpty()
+        if (tag.isNotBlank()) {
+            _dismissedReleaseTag.value = tag
+            runCatching {
+                updatePrefs.edit().putString(KEY_DISMISSED_RELEASE_TAG, tag).apply()
+            }
+        }
+    }
+
+    fun clearDismissedUpdatePrompt() {
+        _dismissedReleaseTag.value = ""
+        runCatching {
+            updatePrefs.edit().remove(KEY_DISMISSED_RELEASE_TAG).apply()
+        }
+    }
+
+    fun shouldShowStartupUpdatePrompt(
+        state: ApkUpdateUiState = _uiState.value,
+        dismissedTag: String = _dismissedReleaseTag.value
+    ): Boolean {
+        val release = state.activeReleaseInfo ?: return false
+        val tagKey = release.tagName.trim().ifBlank { release.cleanVersion }
+        return when (state) {
+            is ApkUpdateUiState.UpdateAvailable,
+            is ApkUpdateUiState.Downloading,
+            is ApkUpdateUiState.Verifying,
+            is ApkUpdateUiState.ReadyToInstall,
+            is ApkUpdateUiState.PermissionRequired -> tagKey.isNotBlank() && !tagKey.equals(dismissedTag.trim(), ignoreCase = true)
+            else -> false
+        }
+    }
 
     internal fun configureForTesting(
         httpClient: OkHttpClient = this.httpClient,
@@ -346,6 +397,9 @@ class NyxoraApkUpdateManager(
         this.installedVersionCodeProvider = installedVersionCodeProvider
         this.allowHttpForLocalTesting = allowHttpForLocalTesting
         this.lastCheckTimestampMillis = 0L
+        this._lastCheckedAtMillis.value = 0L
+        this._dismissedReleaseTag.value = ""
+        runCatching { updatePrefs.edit().clear().apply() }
         this._uiState.value = ApkUpdateUiState.Idle
     }
 
@@ -372,6 +426,9 @@ class NyxoraApkUpdateManager(
             return
         }
 
+        if (force) {
+            clearDismissedUpdatePrompt()
+        }
         val myGeneration = configGeneration
         activeCheckJob?.cancel()
         activeCheckJob = scope.launch(ioDispatcher) {
@@ -403,6 +460,8 @@ class NyxoraApkUpdateManager(
                     if (!isActive || myGeneration != configGeneration) return@use
                     val checkedAt = System.currentTimeMillis()
                     lastCheckTimestampMillis = checkedAt
+                    _lastCheckedAtMillis.value = checkedAt
+                    runCatching { updatePrefs.edit().putLong(KEY_LAST_CHECKED_AT, checkedAt).apply() }
 
                     if (response.code == 404) {
                         // Repository has no published stable releases yet — never claim an update is available
@@ -415,13 +474,34 @@ class NyxoraApkUpdateManager(
                     }
 
                     if (!response.isSuccessful) {
+                        val cachedJson = runCatching { updatePrefs.getString(KEY_CACHED_RELEASE_JSON, null) }.getOrNull()
+                        if ((response.code == 403 || response.code == 429) && !cachedJson.isNullOrBlank()) {
+                            val cachedParsed = parseLatestReleaseResponse(
+                                json = cachedJson,
+                                installedVersionName = installedVersionName,
+                                installedVersionCode = installedVersionCode,
+                                supportedAbis = Build.SUPPORTED_ABIS.toList(),
+                                allowHttpForLocalTesting = allowHttpForLocalTesting
+                            )
+                            if (cachedParsed is ReleaseCheckResult.UpdateAvailable) {
+                                _uiState.value = ApkUpdateUiState.UpdateAvailable(
+                                    release = cachedParsed.release,
+                                    installedVersion = cachedParsed.installedVersion
+                                )
+                                return@use
+                            }
+                        }
                         _uiState.value = ApkUpdateUiState.Error(
-                            message = "Unable to check for updates (HTTP ${response.code}). Please try again later."
+                            message = "Unable to check for updates (HTTP ${response.code}). Please try again later.",
+                            recoverableRelease = currentState.activeReleaseInfo
                         )
                         return@use
                     }
 
                     val bodyText = response.body?.string().orEmpty()
+                    if (bodyText.isNotBlank()) {
+                        runCatching { updatePrefs.edit().putString(KEY_CACHED_RELEASE_JSON, bodyText).apply() }
+                    }
                     val parsed = parseLatestReleaseResponse(
                         json = bodyText,
                         installedVersionName = installedVersionName,
@@ -499,9 +579,18 @@ class NyxoraApkUpdateManager(
      * Downloads the latest compatible `.apk` directly inside the app without opening any browser page,
      * tracks progress in real time, and verifies the APK archive before enabling installation.
      */
-    fun downloadUpdateNow(explicitRelease: GitHubReleaseApkInfo? = null) {
+    fun downloadUpdateNow(
+        explicitRelease: GitHubReleaseApkInfo? = null,
+        autoTriggerInstall: Boolean = false
+    ) {
         val currentState = _uiState.value
         if (currentState is ApkUpdateUiState.Downloading || currentState is ApkUpdateUiState.Verifying) {
+            return
+        }
+        if (currentState is ApkUpdateUiState.ReadyToInstall && explicitRelease == null) {
+            if (autoTriggerInstall) {
+                initiateInstallOrRequestPermission(appContext)
+            }
             return
         }
         val targetRelease = explicitRelease ?: currentState.activeReleaseInfo ?: return
@@ -630,6 +719,11 @@ class NyxoraApkUpdateManager(
                                 apkFile = verification.apkFile,
                                 sha256Hex = verification.sha256Hex
                             )
+                            if (autoTriggerInstall && isActive) {
+                                withContext(Dispatchers.Main.immediate) {
+                                    initiateInstallOrRequestPermission(appContext)
+                                }
+                            }
                         }
                         is ApkVerificationResult.Invalid -> {
                             finalApkFile.delete()
@@ -794,6 +888,10 @@ class NyxoraApkUpdateManager(
         const val DEFAULT_GITHUB_RELEASES_LATEST_URL =
             "https://api.github.com/repos/$DEFAULT_GITHUB_REPO/releases/latest"
         const val APK_MIME_TYPE = "application/vnd.android.package-archive"
+        private const val PREFS_NAME = "nyxora_apk_update_prefs"
+        private const val KEY_LAST_CHECKED_AT = "last_checked_at_ms"
+        private const val KEY_DISMISSED_RELEASE_TAG = "dismissed_release_tag"
+        private const val KEY_CACHED_RELEASE_JSON = "cached_latest_release_json"
         private const val MIN_AUTO_CHECK_INTERVAL_MS = 60_000L
         private const val DEFAULT_DOWNLOAD_BUFFER_SIZE = 16 * 1024
         private const val MIN_VALID_APK_BYTES = 64L
@@ -802,6 +900,16 @@ class NyxoraApkUpdateManager(
             "alpha", "beta", "rc", "dev", "snapshot", "nightly", "canary", "preview"
         )
         private val SHA256_HEX_REGEX = Regex("\\b([a-fA-F0-9]{64})\\b")
+        private val VERSION_CODE_PATTERNS = listOf(
+            Regex("""(?i)["']?version[_-]?code["']?\s*[:=]\s*`?(\d+)`?"""),
+            Regex("""(?i)version\s+code\**\s*[:=]?\s*`?(\d+)`?"""),
+            Regex("""(?i)\bversionCode\s+(\d+)\b"""),
+            Regex("""(?i)-b(\d+)\.apk\b""")
+        )
+        private val MIN_SUPPORTED_CODE_PATTERNS = listOf(
+            Regex("""(?i)["']?min[_-]?supported[_-]?version[_-]?code["']?\s*[:=]\s*`?(\d+)`?"""),
+            Regex("""(?i)min(?:imum)?\s+supported\s+version\s+code\**\s*[:=]?\s*`?(\d+)`?""")
+        )
 
         fun configuredGitHubRepoSlug(): String {
             val raw = runCatching { BuildConfig.NYXORA_GITHUB_REPO }.getOrDefault("").trim()
@@ -969,8 +1077,63 @@ class NyxoraApkUpdateManager(
         }
 
         /**
+         * Determines whether a published release is strictly newer than the installed application
+         * by comparing both [releaseVersionCode] (when published) and semantic [latestTagOrVersion].
+         * Never allows a release with `releaseVersionCode > 0 && releaseVersionCode <= installedVersionCode`.
+         */
+        fun isReleaseUpdateAvailable(
+            installedVersionName: String,
+            installedVersionCode: Int,
+            latestTagOrVersion: String,
+            releaseVersionCode: Int = 0
+        ): Boolean {
+            val normalizedLatest = normalizeVersionString(latestTagOrVersion)
+            if (normalizedLatest.isBlank()) return false
+            if (isPreReleaseVersionString(normalizedLatest)) return false
+            val latestParts = parseNumericVersionParts(normalizedLatest)
+            if (latestParts.isEmpty()) return false
+
+            if (releaseVersionCode > 0 && releaseVersionCode <= installedVersionCode) {
+                return false
+            }
+
+            val semverComparison = compareVersions(installedVersionName, normalizedLatest)
+            if (semverComparison < 0) {
+                return true
+            }
+            if (semverComparison == 0 && releaseVersionCode > installedVersionCode) {
+                return true
+            }
+            return false
+        }
+
+        internal fun extractVersionCodeFromReleaseNotes(releaseBody: String, assetName: String = ""): Int {
+            val combined = "$releaseBody\n$assetName"
+            for (pattern in VERSION_CODE_PATTERNS) {
+                val match = pattern.find(combined)
+                val code = match?.groupValues?.getOrNull(1)?.toIntOrNull()
+                if (code != null && code > 0) {
+                    return code
+                }
+            }
+            return 0
+        }
+
+        internal fun extractMinSupportedVersionCodeFromReleaseNotes(releaseBody: String): Int {
+            if (releaseBody.isBlank()) return 1
+            for (pattern in MIN_SUPPORTED_CODE_PATTERNS) {
+                val match = pattern.find(releaseBody)
+                val code = match?.groupValues?.getOrNull(1)?.toIntOrNull()
+                if (code != null && code > 0) {
+                    return code
+                }
+            }
+            return 1
+        }
+
+        /**
          * Parses a GitHub `/releases/latest` JSON payload, enforces stable release & real `.apk` asset rules,
-         * and compares the release version against [installedVersionName].
+         * and compares both the release versionName and versionCode against the installed app.
          */
         fun parseLatestReleaseResponse(
             json: String,
@@ -1020,7 +1183,18 @@ class NyxoraApkUpdateManager(
                     reason = "Release $rawTag does not contain a published APK asset."
                 )
 
-                if (!isNewerStableVersion(installedVersionName, cleanVersion)) {
+                val explicitVersionCode = root.optInt("version_code", 0).takeIf { it > 0 }
+                    ?: extractVersionCodeFromReleaseNotes(releaseBody, selectedAsset.name)
+                val minSupportedCode = root.optInt("min_supported_version_code", 0).takeIf { it > 0 }
+                    ?: extractMinSupportedVersionCodeFromReleaseNotes(releaseBody)
+
+                if (!isReleaseUpdateAvailable(
+                        installedVersionName = installedVersionName,
+                        installedVersionCode = installedVersionCode,
+                        latestTagOrVersion = cleanVersion,
+                        releaseVersionCode = explicitVersionCode
+                    )
+                ) {
                     return ReleaseCheckResult.UpToDate(
                         installedVersion = installedVersionName,
                         latestVersion = cleanVersion
@@ -1038,7 +1212,9 @@ class NyxoraApkUpdateManager(
                         downloadUrl = selectedAsset.downloadUrl,
                         assetSizeBytes = selectedAsset.sizeBytes,
                         expectedSha256Hex = selectedAsset.sha256Hex,
-                        releaseHtmlUrl = htmlUrl
+                        releaseHtmlUrl = htmlUrl,
+                        versionCode = explicitVersionCode,
+                        minSupportedVersionCode = minSupportedCode
                     ),
                     installedVersion = installedVersionName
                 )

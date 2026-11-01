@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -290,14 +291,14 @@ fun NyxoraHomePage(
     ) {
         val isCompactViewport = maxHeight < 520.dp
         val topHeaderInsetPadding = if (isCompactViewport) {
-            14.dp
+            26.dp
         } else {
-            (maxHeight * 0.048f).coerceIn(24.dp, 38.dp)
+            (maxHeight * 0.068f).coerceIn(34.dp, 48.dp)
         }
         val headerBottomSpacing = if (isCompactViewport) {
-            4.dp
+            6.dp
         } else {
-            (maxHeight * 0.012f).coerceIn(6.dp, 12.dp)
+            (maxHeight * 0.014f).coerceIn(8.dp, 14.dp)
         }
         val sectionVerticalSpacing = if (isCompactViewport) {
             10.dp
@@ -353,6 +354,7 @@ fun NyxoraHomePage(
             flingBehavior = homeMomentumFlingBehavior,
             modifier = Modifier
                 .fillMaxSize()
+                .statusBarsPadding()
                 .widthIn(max = 560.dp)
                 .align(Alignment.TopCenter),
             contentPadding = PaddingValues(

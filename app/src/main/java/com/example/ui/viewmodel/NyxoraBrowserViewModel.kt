@@ -439,8 +439,18 @@ class NyxoraBrowserViewModel(
         apkUpdateManager?.checkForUpdates(force = force)
     }
 
-    fun downloadApkUpdateNow(explicitRelease: GitHubReleaseApkInfo? = null) {
-        apkUpdateManager?.downloadUpdateNow(explicitRelease = explicitRelease)
+    fun downloadApkUpdateNow(
+        explicitRelease: GitHubReleaseApkInfo? = null,
+        autoTriggerInstall: Boolean = true
+    ) {
+        apkUpdateManager?.downloadUpdateNow(
+            explicitRelease = explicitRelease,
+            autoTriggerInstall = autoTriggerInstall
+        )
+    }
+
+    fun dismissApkUpdateForLater(release: GitHubReleaseApkInfo? = null) {
+        apkUpdateManager?.dismissUpdatePromptForLater(release)
     }
 
     fun cancelApkUpdateDownload() {

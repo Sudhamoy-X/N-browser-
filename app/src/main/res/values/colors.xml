@@ -7,4 +7,6 @@
     <color name="teal_700">#FF018786</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+    <color name="nyxora_window_bg">#FF060E1B</color>
+    <color name="nyxora_nav_bar_bg">#FF071222</color>
 </resources>

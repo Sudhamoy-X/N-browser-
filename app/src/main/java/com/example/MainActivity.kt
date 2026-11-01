@@ -3,12 +3,15 @@ package com.example
 import android.app.PictureInPictureParams
 import android.content.ComponentCallbacks2
 import android.content.Intent
+import android.graphics.Color as AndroidColor
+import android.graphics.drawable.ColorDrawable
 import android.os.Build
 import android.os.Bundle
 import android.util.Rational
 import android.view.WindowManager
 import android.webkit.CookieManager
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.LaunchedEffect
@@ -17,6 +20,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.domain.browser.BrowserNetworkClient
@@ -31,8 +35,28 @@ class MainActivity : ComponentActivity() {
     private var pendingIntentUrl by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        window.setFlags(
+            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
+        )
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        val darkWindowBg = AndroidColor.parseColor("#060E1B")
+        val darkNavBarBg = AndroidColor.parseColor("#071222")
+        window.setBackgroundDrawable(ColorDrawable(darkWindowBg))
+        window.decorView.setBackgroundColor(darkWindowBg)
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(darkNavBarBg)
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+            @Suppress("DEPRECATION")
+            window.isStatusBarContrastEnforced = false
+        }
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
+        }
 
         val initialIntentUrl = intent?.dataString?.trim()
         if (savedInstanceState == null && !initialIntentUrl.isNullOrBlank()) {
@@ -99,6 +123,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         activeBrowserViewModel?.refreshApkInstallPermission(this)
+        activeBrowserViewModel?.checkForApkUpdates(force = false)
     }
 
     override fun onNewIntent(intent: Intent) {

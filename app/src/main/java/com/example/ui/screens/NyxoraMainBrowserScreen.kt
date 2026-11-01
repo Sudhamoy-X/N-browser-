@@ -52,11 +52,14 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowForward
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Shield
+import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarData
@@ -180,6 +183,16 @@ fun NyxoraMainBrowserScreen(
         updateMgr.uiState.collectAsStateWithLifecycle()
     } else {
         remember { mutableStateOf<ApkUpdateUiState>(ApkUpdateUiState.Idle) }
+    }
+    val lastUpdateCheckMillis by if (updateMgr != null) {
+        updateMgr.lastCheckedAtMillis.collectAsStateWithLifecycle()
+    } else {
+        remember { mutableLongStateOf(0L) }
+    }
+    val dismissedUpdateReleaseTag by if (updateMgr != null) {
+        updateMgr.dismissedReleaseTag.collectAsStateWithLifecycle()
+    } else {
+        remember { mutableStateOf("") }
     }
 
     var addressInput by rememberSaveable { mutableStateOf("") }
@@ -542,11 +555,21 @@ fun NyxoraMainBrowserScreen(
         )
     }
 
+    val showTopAddressBar = !activeTab.isHomePage || findInPageVisible
+    val activeRoom = connectRoomState
+    val showConnectBanner = activeRoom != null && connectStatus != SyncConnectionStatus.DISCONNECTED
+    val isHomeEdgeToEdgeTop = activeTab.isHomePage && !showTopAddressBar && !showConnectBanner
+
     Scaffold(
         modifier = Modifier
             .fillMaxSize()
             .then(if (isFullscreenVideo) Modifier else Modifier.imePadding())
             .testTag("nyxora_main_browser_screen"),
+        containerColor = when {
+            isFullscreenVideo -> Color.Black
+            activeTab.isHomePage -> Color(0xFF060E1B)
+            else -> MaterialTheme.colorScheme.background
+        },
         contentWindowInsets = if (isFullscreenVideo) WindowInsets(0, 0, 0, 0) else WindowInsets.systemBars,
         snackbarHost = {
             if (!isFullscreenVideo) {
@@ -569,9 +592,6 @@ fun NyxoraMainBrowserScreen(
         },
         topBar = {
             if (!isFullscreenVideo) {
-                val showTopAddressBar = !activeTab.isHomePage || findInPageVisible
-                val activeRoom = connectRoomState
-                val showConnectBanner = activeRoom != null && connectStatus != SyncConnectionStatus.DISCONNECTED
                 if (showTopAddressBar || showConnectBanner) {
                     Column(modifier = Modifier.fillMaxWidth()) {
                         // 1. Minimalist Top Bar: Shown only while browsing websites or searching in page.
@@ -697,13 +717,21 @@ fun NyxoraMainBrowserScreen(
                 verticalMomentumOverscrollPx = offsetPx
             }
         )
+        val centralContentPadding = when {
+            isFullscreenVideo -> PaddingValues(0.dp)
+            isHomeEdgeToEdgeTop -> PaddingValues(
+                top = 0.dp,
+                bottom = innerPadding.calculateBottomPadding()
+            )
+            else -> innerPadding
+        }
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(if (isFullscreenVideo) PaddingValues(0.dp) else innerPadding)
+                .padding(centralContentPadding)
                 .nestedScroll(browserMomentumConnection)
                 .graphicsLayer {
-                    translationY = if (abs(verticalMomentumOverscrollPx) > 0.5f) {
+                    translationY = if (!isFullscreenVideo && abs(verticalMomentumOverscrollPx) > 0.5f) {
                         verticalMomentumOverscrollPx
                     } else {
                         0f
@@ -1143,6 +1171,34 @@ fun NyxoraMainBrowserScreen(
                 }
             }
 
+            // Non-intrusive In-App Update Notification Card (Update Now / Later)
+            val showStartupUpdatePrompt = !isFullscreenVideo &&
+                activeOverlay == OverlaySheet.NONE &&
+                (updateMgr?.shouldShowStartupUpdatePrompt(apkUpdateState, dismissedUpdateReleaseTag) ?: false)
+            if (showStartupUpdatePrompt) {
+                NyxoraStartupUpdatePromptCard(
+                    updateState = apkUpdateState,
+                    onUpdateNow = {
+                        when (apkUpdateState) {
+                            is ApkUpdateUiState.ReadyToInstall,
+                            is ApkUpdateUiState.PermissionRequired -> {
+                                viewModel.installDownloadedApkUpdate(context)
+                            }
+                            else -> {
+                                viewModel.downloadApkUpdateNow(autoTriggerInstall = true)
+                            }
+                        }
+                    },
+                    onCancelDownload = { viewModel.cancelApkUpdateDownload() },
+                    onDismissLater = {
+                        viewModel.dismissApkUpdateForLater(apkUpdateState.activeReleaseInfo)
+                    },
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                )
+            }
+
             // Floating Room Chat Overlay (edge-docked, movable, dismissible, auto-collapses on fullscreen video)
             NyxoraFloatingChatOverlay(
                 roomState = connectRoomState,
@@ -1323,8 +1379,9 @@ fun NyxoraMainBrowserScreen(
                 settings = settings,
                 customFilterRules = customFilterRules,
                 apkUpdateState = apkUpdateState,
+                lastUpdateCheckMillis = lastUpdateCheckMillis,
                 onCheckForUpdates = { force -> viewModel.checkForApkUpdates(force = force) },
-                onDownloadUpdateNow = { viewModel.downloadApkUpdateNow() },
+                onDownloadUpdateNow = { viewModel.downloadApkUpdateNow(autoTriggerInstall = true) },
                 onCancelUpdateDownload = { viewModel.cancelApkUpdateDownload() },
                 onInstallUpdateNow = { ctx -> viewModel.installDownloadedApkUpdate(ctx) },
                 onUpdateSettings = viewModel::updateSettings,
@@ -1712,6 +1769,205 @@ internal fun NyxoraNotificationBanner(
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.size(16.dp)
                         )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NyxoraStartupUpdatePromptCard(
+    updateState: ApkUpdateUiState,
+    onUpdateNow: () -> Unit,
+    onCancelDownload: () -> Unit,
+    onDismissLater: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val release = updateState.activeReleaseInfo ?: return
+    val installedVersionLabel = "v${com.example.BuildConfig.VERSION_NAME} (Build ${com.example.BuildConfig.VERSION_CODE})"
+    val availableVersionLabel = release.displayVersionLabel
+
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .widthIn(max = 520.dp)
+            .border(
+                width = 1.dp,
+                color = NyxoraElectricBlue.copy(alpha = 0.55f),
+                shape = RoundedCornerShape(18.dp)
+            )
+            .testTag("nyxora_startup_update_dialog"),
+        shape = RoundedCornerShape(18.dp),
+        color = Color(0xFF0A1424).copy(alpha = 0.97f),
+        tonalElevation = 10.dp,
+        shadowElevation = 14.dp
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Surface(
+                        shape = CircleShape,
+                        color = NyxoraElectricBlue.copy(alpha = 0.18f),
+                        modifier = Modifier.size(34.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Outlined.Download,
+                                contentDescription = null,
+                                tint = NyxoraElectricBlue,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                    Column {
+                        Text(
+                            text = "NYXORA Browser Update Available",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                            color = Color.White,
+                            modifier = Modifier.testTag("startup_update_title")
+                        )
+                        Text(
+                            text = "Current: $installedVersionLabel  •  New: $availableVersionLabel",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF9AC2F4),
+                            modifier = Modifier.testTag("startup_update_versions_text")
+                        )
+                    }
+                }
+                IconButton(
+                    onClick = onDismissLater,
+                    modifier = Modifier
+                        .size(32.dp)
+                        .testTag("startup_update_close_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Close,
+                        contentDescription = "Remind me later",
+                        tint = Color.White.copy(alpha = 0.72f),
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+
+            if (release.releaseNotes.isNotBlank()) {
+                Text(
+                    text = release.releaseNotes,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.White.copy(alpha = 0.84f),
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.testTag("startup_update_release_notes")
+                )
+            }
+
+            when (updateState) {
+                is ApkUpdateUiState.Downloading -> {
+                    val progressFraction = (updateState.progressPercent.coerceIn(0, 100) / 100f)
+                    Text(
+                        text = "Downloading ${release.displayVersionLabel}… ${updateState.progressPercent}%",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.White,
+                        modifier = Modifier.testTag("startup_update_progress_text")
+                    )
+                    LinearProgressIndicator(
+                        progress = { progressFraction },
+                        color = NyxoraElectricBlue,
+                        trackColor = Color.White.copy(alpha = 0.16f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("startup_update_progress_bar")
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        TextButton(
+                            onClick = onCancelDownload,
+                            modifier = Modifier.testTag("startup_update_cancel_button")
+                        ) {
+                            Text("Cancel", color = Color.White.copy(alpha = 0.85f))
+                        }
+                    }
+                }
+
+                is ApkUpdateUiState.Verifying -> {
+                    Text(
+                        text = "Verifying APK signature & package integrity…",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.White,
+                        modifier = Modifier.testTag("startup_update_progress_text")
+                    )
+                    LinearProgressIndicator(
+                        color = NyxoraElectricBlue,
+                        trackColor = Color.White.copy(alpha = 0.16f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("startup_update_progress_bar")
+                    )
+                }
+
+                is ApkUpdateUiState.ReadyToInstall,
+                is ApkUpdateUiState.PermissionRequired -> {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TextButton(
+                            onClick = onDismissLater,
+                            modifier = Modifier.testTag("startup_update_later_button")
+                        ) {
+                            Text("Later", color = Color.White.copy(alpha = 0.8f))
+                        }
+                        Button(
+                            onClick = onUpdateNow,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = NyxoraElectricBlue,
+                                contentColor = Color.White
+                            ),
+                            modifier = Modifier.testTag("startup_update_now_button")
+                        ) {
+                            Text("Install Update")
+                        }
+                    }
+                }
+
+                else -> {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TextButton(
+                            onClick = onDismissLater,
+                            modifier = Modifier.testTag("startup_update_later_button")
+                        ) {
+                            Text("Later", color = Color.White.copy(alpha = 0.8f))
+                        }
+                        Button(
+                            onClick = onUpdateNow,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = NyxoraElectricBlue,
+                                contentColor = Color.White
+                            ),
+                            modifier = Modifier.testTag("startup_update_now_button")
+                        ) {
+                            Text("Update Now")
+                        }
                     }
                 }
             }
