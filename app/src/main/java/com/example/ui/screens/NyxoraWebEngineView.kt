@@ -124,6 +124,7 @@ import com.example.domain.connect.MediaControlActionResult
 import com.example.domain.connect.VideoCompatibilityState
 import com.example.domain.connect.WatchTogetherMediaBridge
 import com.example.domain.connect.WatchTogetherPlaybackState
+import com.example.ui.components.NyxoraMomentumScrollPhysics
 import com.example.ui.viewmodel.BrowserTab
 import com.example.ui.viewmodel.PendingSitePermissionPrompt
 import kotlin.math.abs
@@ -1477,12 +1478,22 @@ private fun createConfiguredTabWebView(
                 controllerHandle.notifyPageScrollChanged(t, deltaY)
             }
         }
+
+        override fun flingScroll(vx: Int, vy: Int) {
+            val reducedMotion = currentSettingsProvider().reducedMotion
+            val gentleVx = NyxoraMomentumScrollPhysics.computeGentleWebViewFlingVelocity(vx, reducedMotion)
+            val gentleVy = NyxoraMomentumScrollPhysics.computeGentleWebViewFlingVelocity(vy, reducedMotion)
+            super.flingScroll(gentleVx, gentleVy)
+        }
     }.apply {
         layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         )
         setBackgroundColor(android.graphics.Color.parseColor("#101216"))
+        isVerticalScrollBarEnabled = true
+        scrollBarStyle = View.SCROLLBARS_INSIDE_OVERLAY
+        overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
         if (forceSoftwareLayer) {
             setLayerType(View.LAYER_TYPE_SOFTWARE, null)
         }

@@ -128,6 +128,46 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("home_news_quick_access_button").assertIsDisplayed()
         composeTestRule.onNodeWithTag("home_featured_news_card").assertIsDisplayed()
 
+        // Verify Home Screen header vertical positioning, logo/text alignment, and non-overlapping vertical hierarchy
+        val containerBounds = composeTestRule.onNodeWithTag("nyxora_central_browser_container").fetchSemanticsNode().boundsInRoot
+        val headerBounds = composeTestRule.onNodeWithTag("home_logo_header").fetchSemanticsNode().boundsInRoot
+        val logoBounds = composeTestRule.onNodeWithTag("home_official_icon_image", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+        val titleBounds = composeTestRule.onNodeWithTag("home_brand_title_text", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+        val searchBarBounds = composeTestRule.onNodeWithTag("home_search_bar_trigger").fetchSemanticsNode().boundsInRoot
+        val shortcutsBounds = composeTestRule.onNodeWithTag("home_shortcuts_section").fetchSemanticsNode().boundsInRoot
+        val bookmarksRowBounds = composeTestRule.onNodeWithTag("home_bookmarks_section").fetchSemanticsNode().boundsInRoot
+        val newsCardBounds = composeTestRule.onNodeWithTag("home_featured_news_card").fetchSemanticsNode().boundsInRoot
+
+        val topGapFromContainer = headerBounds.top - containerBounds.top
+        assertTrue(
+            "Home Screen NYXORA header must have clear top breathing space below the status bar/top edge (actual=$topGapFromContainer)",
+            topGapFromContainer >= 12f
+        )
+        assertTrue(
+            "NYXORA logo and NYXORA heading must be vertically aligned on the same row",
+            kotlin.math.abs(logoBounds.center.y - titleBounds.center.y) <= 4f
+        )
+        assertTrue(
+            "NYXORA logo must sit immediately to the left of the NYXORA heading",
+            logoBounds.right < titleBounds.left
+        )
+        assertTrue(
+            "Search bar must sit below the NYXORA header with balanced negative space",
+            searchBarBounds.top >= headerBounds.bottom + 8f
+        )
+        assertTrue(
+            "Shortcuts grid must sit below the search bar without overlap",
+            shortcutsBounds.top >= searchBarBounds.bottom + 8f
+        )
+        assertTrue(
+            "Bookmarks & News row must sit below the shortcuts grid without overlap",
+            bookmarksRowBounds.top >= shortcutsBounds.bottom + 8f
+        )
+        assertTrue(
+            "Featured News card must sit below the Bookmarks & News row without overlap",
+            newsCardBounds.top >= bookmarksRowBounds.bottom + 8f
+        )
+
         // Verify raw uploaded official NYXORA app icon source is preserved without modification
         val rawIconBytes = context.resources.openRawResource(R.raw.nyxora_official_icon).use { it.readBytes() }
         val sha256Hex = java.security.MessageDigest.getInstance("SHA-256")

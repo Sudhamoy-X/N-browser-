@@ -11,6 +11,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -88,6 +89,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -98,6 +101,7 @@ import com.example.data.model.HistoryItem
 import com.example.domain.browser.FaviconCacheManager
 import com.example.ui.components.NyxoraCreatorSignature
 import com.example.ui.components.NyxoraHomeBrandLogo
+import com.example.ui.components.rememberNyxoraGentleMomentumFlingBehavior
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
@@ -278,12 +282,40 @@ fun NyxoraHomePage(
         }
     }
 
-    Box(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(backgroundBrush)
             .testTag("nyxora_home_page")
     ) {
+        val isCompactViewport = maxHeight < 520.dp
+        val topHeaderInsetPadding = if (isCompactViewport) {
+            14.dp
+        } else {
+            (maxHeight * 0.048f).coerceIn(24.dp, 38.dp)
+        }
+        val headerBottomSpacing = if (isCompactViewport) {
+            4.dp
+        } else {
+            (maxHeight * 0.012f).coerceIn(6.dp, 12.dp)
+        }
+        val sectionVerticalSpacing = if (isCompactViewport) {
+            10.dp
+        } else {
+            (maxHeight * 0.020f).coerceIn(13.dp, 17.dp)
+        }
+        val brandLogoSize = if (isCompactViewport) 30.dp else 32.dp
+        val brandTitleFontSize = if (isCompactViewport) 21.sp else 22.sp
+        val searchBarHeight = if (isCompactViewport) 44.dp else 48.dp
+        val shortcutIconSize = if (isCompactViewport) 44.dp else 48.dp
+        val shortcutRowSpacing = if (isCompactViewport) 10.dp else 14.dp
+        val actionPillHeight = if (isCompactViewport) 38.dp else 42.dp
+        val featuredNewsCardHeight = if (isCompactViewport) {
+            150.dp
+        } else {
+            (maxHeight * 0.235f).coerceIn(160.dp, 184.dp)
+        }
+
         Canvas(modifier = Modifier.fillMaxSize()) {
             drawCircle(
                 brush = Brush.radialGradient(
@@ -312,8 +344,13 @@ fun NyxoraHomePage(
             )
         }
 
+        val homeMomentumFlingBehavior = rememberNyxoraGentleMomentumFlingBehavior(
+            reducedMotion = settings.reducedMotion
+        )
+
         LazyColumn(
             state = listState,
+            flingBehavior = homeMomentumFlingBehavior,
             modifier = Modifier
                 .fillMaxSize()
                 .widthIn(max = 560.dp)
@@ -321,10 +358,10 @@ fun NyxoraHomePage(
             contentPadding = PaddingValues(
                 start = 20.dp,
                 end = 20.dp,
-                top = 8.dp,
+                top = topHeaderInsetPadding,
                 bottom = 16.dp
             ),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(sectionVerticalSpacing),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             // 1. Official NYXORA Logo & Branding Header
@@ -332,7 +369,10 @@ fun NyxoraHomePage(
                 ReferenceHomeBrandHeader(
                     isPrivateMode = isPrivateMode,
                     animateLogoGlow = settings.homeLogoAnimationEnabled,
-                    reducedMotion = settings.reducedMotion
+                    reducedMotion = settings.reducedMotion,
+                    logoSize = brandLogoSize,
+                    titleFontSize = brandTitleFontSize,
+                    bottomSpacing = headerBottomSpacing
                 )
             }
 
@@ -344,6 +384,7 @@ fun NyxoraHomePage(
                     searchFocused = searchFocused,
                     onFocusChange = { searchFocused = it },
                     searchEngineLabel = settings.searchEngine.label,
+                    barHeight = searchBarHeight,
                     onSubmit = {
                         val target = searchQuery.trim()
                         if (target.isNotEmpty()) {
@@ -360,6 +401,8 @@ fun NyxoraHomePage(
                 item {
                     ReferenceHomeShortcutsGrid(
                         shortcuts = effectiveShortcuts,
+                        iconCircleSize = shortcutIconSize,
+                        rowSpacing = shortcutRowSpacing,
                         onOpenShortcut = { onNavigateToUrl(it.url) },
                         onLongPressShortcut = { shortcutBeingEdited = it },
                         onAddClick = { showAddShortcutDialog = true }
@@ -370,6 +413,7 @@ fun NyxoraHomePage(
             // 4. Side-by-side "Bookmarks" & "News" Pill Buttons
             item {
                 ReferenceBookmarksAndNewsActionRow(
+                    pillHeight = actionPillHeight,
                     onOpenBookmarks = onOpenBookmarks,
                     onClickNews = {
                         showExpandedNewsList = !showExpandedNewsList
@@ -392,6 +436,7 @@ fun NyxoraHomePage(
                     ) {
                         ReferenceFeaturedNewsSection(
                             items = curatedHomeNewsItems,
+                            cardHeight = featuredNewsCardHeight,
                             showExpandedNewsList = showExpandedNewsList,
                             onOpenArticle = onNavigateToUrl
                         )
@@ -532,12 +577,15 @@ fun NyxoraHomePage(
 private fun ReferenceHomeBrandHeader(
     isPrivateMode: Boolean,
     animateLogoGlow: Boolean,
-    reducedMotion: Boolean
+    reducedMotion: Boolean,
+    logoSize: Dp = 32.dp,
+    titleFontSize: TextUnit = 22.sp,
+    bottomSpacing: Dp = 6.dp
 ) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = 2.dp, bottom = 2.dp)
+            .padding(top = 2.dp, bottom = bottomSpacing)
             .testTag("home_logo_header"),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -548,7 +596,7 @@ private fun ReferenceHomeBrandHeader(
             NyxoraHomeBrandLogo(
                 animateGlow = animateLogoGlow,
                 reducedMotion = reducedMotion,
-                size = 30.dp,
+                size = logoSize,
                 imageTestTag = "home_official_icon_image"
             )
             Spacer(modifier = Modifier.width(10.dp))
@@ -557,9 +605,10 @@ private fun ReferenceHomeBrandHeader(
                 style = MaterialTheme.typography.headlineSmall.copy(
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 2.6.sp,
-                    fontSize = 21.sp
+                    fontSize = titleFontSize
                 ),
-                color = Color(0xFFF8FAFC)
+                color = Color(0xFFF8FAFC),
+                modifier = Modifier.testTag("home_brand_title_text")
             )
         }
         if (isPrivateMode) {
@@ -587,6 +636,7 @@ private fun ReferenceHomeSearchBar(
     searchFocused: Boolean,
     onFocusChange: (Boolean) -> Unit,
     searchEngineLabel: String,
+    barHeight: Dp = 48.dp,
     onSubmit: () -> Unit
 ) {
     val searchBarBrush = Brush.horizontalGradient(
@@ -605,7 +655,7 @@ private fun ReferenceHomeSearchBar(
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .height(44.dp)
+            .height(barHeight)
             .clip(RoundedCornerShape(26.dp))
             .background(searchBarBrush, RoundedCornerShape(26.dp))
             .border(
@@ -703,6 +753,8 @@ private fun ReferenceHomeSearchBar(
 @Composable
 private fun ReferenceHomeShortcutsGrid(
     shortcuts: List<BookmarkItem>,
+    iconCircleSize: Dp = 48.dp,
+    rowSpacing: Dp = 12.dp,
     onOpenShortcut: (BookmarkItem) -> Unit,
     onLongPressShortcut: (BookmarkItem) -> Unit,
     onAddClick: () -> Unit
@@ -715,7 +767,7 @@ private fun ReferenceHomeShortcutsGrid(
         modifier = Modifier
             .fillMaxWidth()
             .testTag("home_shortcuts_section"),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+        verticalArrangement = Arrangement.spacedBy(rowSpacing)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -730,13 +782,17 @@ private fun ReferenceHomeShortcutsGrid(
                     if (shortcut != null) {
                         ReferenceShortcutTile(
                             shortcut = shortcut,
+                            iconCircleSize = iconCircleSize,
                             onClick = { onOpenShortcut(shortcut) },
                             onLongClick = { onLongPressShortcut(shortcut) }
                         )
                     } else if (slotIndex == firstRowItems.size && secondRowShortcuts.isEmpty()) {
-                        ReferenceAddShortcutTile(onClick = onAddClick)
+                        ReferenceAddShortcutTile(
+                            iconCircleSize = iconCircleSize,
+                            onClick = onAddClick
+                        )
                     } else {
-                        Spacer(modifier = Modifier.size(44.dp))
+                        Spacer(modifier = Modifier.size(iconCircleSize))
                     }
                 }
             }
@@ -756,13 +812,17 @@ private fun ReferenceHomeShortcutsGrid(
                         if (shortcut != null) {
                             ReferenceShortcutTile(
                                 shortcut = shortcut,
+                                iconCircleSize = iconCircleSize,
                                 onClick = { onOpenShortcut(shortcut) },
                                 onLongClick = { onLongPressShortcut(shortcut) }
                             )
                         } else if (slotIndex == secondRowShortcuts.size) {
-                            ReferenceAddShortcutTile(onClick = onAddClick)
+                            ReferenceAddShortcutTile(
+                                iconCircleSize = iconCircleSize,
+                                onClick = onAddClick
+                            )
                         } else {
-                            Spacer(modifier = Modifier.size(44.dp))
+                            Spacer(modifier = Modifier.size(iconCircleSize))
                         }
                     }
                 }
@@ -775,6 +835,7 @@ private fun ReferenceHomeShortcutsGrid(
 @Composable
 private fun ReferenceShortcutTile(
     shortcut: BookmarkItem,
+    iconCircleSize: Dp = 48.dp,
     onClick: () -> Unit,
     onLongClick: () -> Unit
 ) {
@@ -807,7 +868,7 @@ private fun ReferenceShortcutTile(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Box(
-            modifier = Modifier.size(44.dp),
+            modifier = Modifier.size(iconCircleSize),
             contentAlignment = Alignment.Center
         ) {
             val bitmap = cachedBitmap
@@ -824,7 +885,7 @@ private fun ReferenceShortcutTile(
                             contentDescription = "${shortcut.title} favicon",
                             contentScale = ContentScale.Fit,
                             modifier = Modifier
-                                .size(26.dp)
+                                .size(iconCircleSize * 0.58f)
                                 .clip(CircleShape)
                                 .testTag("shortcut_favicon_image_${shortcut.id}")
                         )
@@ -876,6 +937,7 @@ private fun ReferenceShortcutTile(
 
 @Composable
 private fun ReferenceAddShortcutTile(
+    iconCircleSize: Dp = 48.dp,
     onClick: () -> Unit
 ) {
     Column(
@@ -887,7 +949,7 @@ private fun ReferenceAddShortcutTile(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Surface(
-            modifier = Modifier.size(44.dp),
+            modifier = Modifier.size(iconCircleSize),
             shape = CircleShape,
             color = Color(0xFF1E3A5F).copy(alpha = 0.72f),
             border = BorderStroke(1.2.dp, Color(0xFF7DD3FC).copy(alpha = 0.45f))
@@ -1241,6 +1303,7 @@ private fun ReferenceBrandCircleIcon(
 
 @Composable
 private fun ReferenceBookmarksAndNewsActionRow(
+    pillHeight: Dp = 42.dp,
     onOpenBookmarks: () -> Unit,
     onClickNews: () -> Unit
 ) {
@@ -1270,7 +1333,7 @@ private fun ReferenceBookmarksAndNewsActionRow(
         Surface(
             modifier = Modifier
                 .weight(1f)
-                .height(38.dp)
+                .height(pillHeight)
                 .clip(RoundedCornerShape(22.dp))
                 .background(pillBrush, RoundedCornerShape(22.dp))
                 .clickable(onClick = onOpenBookmarks)
@@ -1308,7 +1371,7 @@ private fun ReferenceBookmarksAndNewsActionRow(
         Surface(
             modifier = Modifier
                 .weight(1f)
-                .height(38.dp)
+                .height(pillHeight)
                 .clip(RoundedCornerShape(22.dp))
                 .background(pillBrush, RoundedCornerShape(22.dp))
                 .clickable(onClick = onClickNews)
@@ -1348,6 +1411,7 @@ private fun ReferenceBookmarksAndNewsActionRow(
 @Composable
 private fun ReferenceFeaturedNewsSection(
     items: List<HomeNewsFeedItem>,
+    cardHeight: Dp = 172.dp,
     showExpandedNewsList: Boolean,
     onOpenArticle: (String) -> Unit
 ) {
@@ -1362,7 +1426,7 @@ private fun ReferenceFeaturedNewsSection(
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(156.dp)
+                .height(cardHeight)
                 .clip(RoundedCornerShape(20.dp))
                 .clickable { onOpenArticle(featured.url) }
                 .testTag("home_featured_news_card"),

@@ -86,7 +86,9 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -107,6 +109,7 @@ import com.example.domain.connect.RoomSyncMode
 import com.example.domain.connect.SyncConnectionStatus
 import com.example.domain.connect.WatchTogetherMediaBridge
 import com.example.domain.update.ApkUpdateUiState
+import com.example.ui.components.rememberNyxoraBrowserMomentumConnection
 import com.example.ui.theme.NyxoraElectricBlue
 import com.example.ui.theme.NyxoraIncognitoPurple
 import com.example.ui.viewmodel.NyxoraBrowserViewModel
@@ -567,97 +570,100 @@ fun NyxoraMainBrowserScreen(
         topBar = {
             if (!isFullscreenVideo) {
                 val showTopAddressBar = !activeTab.isHomePage || findInPageVisible
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    // 1. Minimalist Top Bar: Shown only while browsing websites or searching in page.
-                    // On the homepage, only the primary search bar below the NYXORA logo is displayed.
-                    if (showTopAddressBar) {
-                        NyxoraTopAddressBar(
-                            activeTab = activeTab,
-                            settings = settings,
-                            isPrivateMode = isPrivateMode,
-                            addressInput = addressInput,
-                            isEditingAddress = isEditingAddress,
-                            findInPageVisible = findInPageVisible,
-                            findInPageQuery = findInPageQuery,
-                            findInPageMatches = findInPageMatches,
-                            currentModeTabs = currentModeTabs,
-                            addressFocusRequester = addressFocusRequester,
-                            onAddressInputChange = {
-                                if (!isEditingAddress) isEditingAddress = true
-                                addressInput = it
-                            },
-                            onEditingChanged = { focused ->
-                                if (focused && !isEditingAddress) {
-                                    addressInput = if (activeTab.isHomePage) "" else activeTab.url
-                                    isEditingAddress = true
-                                } else if (!focused && isEditingAddress) {
+                val activeRoom = connectRoomState
+                val showConnectBanner = activeRoom != null && connectStatus != SyncConnectionStatus.DISCONNECTED
+                if (showTopAddressBar || showConnectBanner) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        // 1. Minimalist Top Bar: Shown only while browsing websites or searching in page.
+                        // On the homepage, only the primary search bar below the NYXORA logo is displayed.
+                        if (showTopAddressBar) {
+                            NyxoraTopAddressBar(
+                                activeTab = activeTab,
+                                settings = settings,
+                                isPrivateMode = isPrivateMode,
+                                addressInput = addressInput,
+                                isEditingAddress = isEditingAddress,
+                                findInPageVisible = findInPageVisible,
+                                findInPageQuery = findInPageQuery,
+                                findInPageMatches = findInPageMatches,
+                                currentModeTabs = currentModeTabs,
+                                addressFocusRequester = addressFocusRequester,
+                                onAddressInputChange = {
+                                    if (!isEditingAddress) isEditingAddress = true
+                                    addressInput = it
+                                },
+                                onEditingChanged = { focused ->
+                                    if (focused && !isEditingAddress) {
+                                        addressInput = if (activeTab.isHomePage) "" else activeTab.url
+                                        isEditingAddress = true
+                                    } else if (!focused && isEditingAddress) {
+                                        isEditingAddress = false
+                                    }
+                                },
+                                onSubmitAddress = {
+                                    val submitted = addressInput.trim()
                                     isEditingAddress = false
+                                    focusManager.clearFocus()
+                                    if (submitted.isNotEmpty()) {
+                                        viewModel.navigateInActiveTab(submitted)
+                                    }
+                                },
+                                onClearAddress = { addressInput = "" },
+                                onReloadOrStop = {
+                                    if (activeTab.isLoading) {
+                                        primaryController.stopLoading()
+                                    } else {
+                                        primaryController.reload()
+                                    }
+                                },
+                                onSelectTab = { tabId ->
+                                    viewModel.selectTab(tabId, isPrivateMode)
+                                },
+                                onFindQueryChange = { q ->
+                                    viewModel.updateFindInPageQuery(q)
+                                    primaryController.findInPage(q)
+                                },
+                                onFindNext = { forward -> primaryController.findNext(forward) },
+                                onCloseFindInPage = {
+                                    primaryController.clearFindMatches()
+                                    viewModel.setFindInPageVisible(false)
                                 }
-                            },
-                            onSubmitAddress = {
-                                val submitted = addressInput.trim()
-                                isEditingAddress = false
-                                focusManager.clearFocus()
-                                if (submitted.isNotEmpty()) {
-                                    viewModel.navigateInActiveTab(submitted)
-                                }
-                            },
-                            onClearAddress = { addressInput = "" },
-                            onReloadOrStop = {
-                                if (activeTab.isLoading) {
-                                    primaryController.stopLoading()
-                                } else {
-                                    primaryController.reload()
-                                }
-                            },
-                            onSelectTab = { tabId ->
-                                viewModel.selectTab(tabId, isPrivateMode)
-                            },
-                            onFindQueryChange = { q ->
-                                viewModel.updateFindInPageQuery(q)
-                                primaryController.findInPage(q)
-                            },
-                            onFindNext = { forward -> primaryController.findNext(forward) },
-                            onCloseFindInPage = {
-                                primaryController.clearFindMatches()
-                                viewModel.setFindInPageVisible(false)
-                            }
-                        )
-                    }
+                            )
+                        }
 
-                    val activeRoom = connectRoomState
-                    if (activeRoom != null && connectStatus != SyncConnectionStatus.DISCONNECTED) {
-                        NyxoraConnectStatusBanner(
-                            roomState = activeRoom,
-                            localDeviceId = viewModel.connectManager.localDeviceId,
-                            connectionStatus = connectStatus,
-                            isFollowingPaused = isFollowingPaused,
-                            isPrivateMode = isPrivateMode,
-                            isExpanded = isConnectBannerExpanded,
-                            onExpandedChange = { isConnectBannerExpanded = it },
-                            unreadChatCount = unreadChatCount,
-                            applyTopStatusBarInsets = !showTopAddressBar,
-                            onOpenChatOverlay = {
-                                viewModel.connectManager.reopenChatOverlay()
-                            },
-                            onOpenConnectSheet = {
-                                viewModel.setOverlaySheet(OverlaySheet.NYXORA_CONNECT)
-                            },
-                            onManualResync = {
-                                viewModel.connectManager.requestManualResync()
-                                viewModel.emitToast("Resynchronizing with host…")
-                            },
-                            onTogglePauseOrSync = {
-                                viewModel.connectManager.updateRoomConfiguration(
-                                    isSyncActive = !activeRoom.isSyncActive
-                                )
-                            },
-                            onStopOrLeaveImmediate = {
-                                isConnectBannerExpanded = false
-                                viewModel.connectManager.leaveOrCloseRoom(notifyServer = true)
-                                viewModel.emitToast("Disconnected from NYXORA Connect room")
-                            }
-                        )
+                        if (activeRoom != null && connectStatus != SyncConnectionStatus.DISCONNECTED) {
+                            NyxoraConnectStatusBanner(
+                                roomState = activeRoom,
+                                localDeviceId = viewModel.connectManager.localDeviceId,
+                                connectionStatus = connectStatus,
+                                isFollowingPaused = isFollowingPaused,
+                                isPrivateMode = isPrivateMode,
+                                isExpanded = isConnectBannerExpanded,
+                                onExpandedChange = { isConnectBannerExpanded = it },
+                                unreadChatCount = unreadChatCount,
+                                applyTopStatusBarInsets = !showTopAddressBar,
+                                onOpenChatOverlay = {
+                                    viewModel.connectManager.reopenChatOverlay()
+                                },
+                                onOpenConnectSheet = {
+                                    viewModel.setOverlaySheet(OverlaySheet.NYXORA_CONNECT)
+                                },
+                                onManualResync = {
+                                    viewModel.connectManager.requestManualResync()
+                                    viewModel.emitToast("Resynchronizing with host…")
+                                },
+                                onTogglePauseOrSync = {
+                                    viewModel.connectManager.updateRoomConfiguration(
+                                        isSyncActive = !activeRoom.isSyncActive
+                                    )
+                                },
+                                onStopOrLeaveImmediate = {
+                                    isConnectBannerExpanded = false
+                                    viewModel.connectManager.leaveOrCloseRoom(notifyServer = true)
+                                    viewModel.emitToast("Disconnected from NYXORA Connect room")
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -683,11 +689,26 @@ fun NyxoraMainBrowserScreen(
             }
         }
     ) { innerPadding ->
-        // 2. Central Container for the Browser View (with Horizontal Edge-Swipe Back/Forward Navigation)
+        // 2. Central Container for the Browser View (with Gentle Momentum Scrolling Physics & Horizontal Edge-Swipe Navigation)
+        var verticalMomentumOverscrollPx by remember { mutableFloatStateOf(0f) }
+        val browserMomentumConnection = rememberNyxoraBrowserMomentumConnection(
+            reducedMotion = settings.reducedMotion,
+            onOverscrollOffsetChanged = { offsetPx ->
+                verticalMomentumOverscrollPx = offsetPx
+            }
+        )
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(if (isFullscreenVideo) PaddingValues(0.dp) else innerPadding)
+                .nestedScroll(browserMomentumConnection)
+                .graphicsLayer {
+                    translationY = if (abs(verticalMomentumOverscrollPx) > 0.5f) {
+                        verticalMomentumOverscrollPx
+                    } else {
+                        0f
+                    }
+                }
                 .pointerInput(edgeActivationWidthPx, edgeCommitThresholdPx) {
                     val slopPx = viewConfiguration.touchSlop.coerceAtMost(14f)
                     awaitEachGesture {

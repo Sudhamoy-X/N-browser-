@@ -105,6 +105,7 @@ import com.example.domain.browser.DownloadEngine
 import com.example.domain.browser.EngineCapabilityMatrix
 import com.example.domain.browser.ReaderArticle
 import com.example.domain.update.ApkUpdateUiState
+import com.example.ui.components.rememberNyxoraGentleMomentumFlingBehavior
 import kotlin.math.roundToInt
 
 // --- BOOKMARKS SHEET ---
@@ -989,7 +990,9 @@ fun NyxoraReaderModeSheet(
                 }
             }
             HorizontalDivider()
+            val readerMomentumFling = rememberNyxoraGentleMomentumFlingBehavior()
             LazyColumn(
+                flingBehavior = readerMomentumFling,
                 modifier = Modifier
                     .fillMaxSize()
                     .widthIn(max = 680.dp)
