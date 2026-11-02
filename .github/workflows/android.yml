@@ -1,30 +1,41 @@
-name: Android CI & Debug APK Build
+name: NYXORA Browser Debug APK CI/CD & Auto-Update Release
 
 on:
   push:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      release_notes:
+        description: 'Optional release notes for the nyxora-debug-latest update channel'
+        required: false
+        default: 'Automated NYXORA Browser Debug APK build published from main.'
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: nyxora-debug-apk-pipeline-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build:
-    name: Run Unit Tests & Build Debug APK
+  build-and-publish-debug-apk:
+    name: Test, Sign, Verify & Publish NYXORA Debug APK
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout NYXORA Browser Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Set up Java 17
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Set up Android SDK & Install Required Components
+      - name: Set up Android SDK & Install Build-Tools 36.0.0
         shell: bash
         run: |
           set -euo pipefail
@@ -58,6 +69,7 @@ jobs:
           if [ -n "${GITHUB_PATH:-}" ]; then
             echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
             echo "${SDK_ROOT}/platform-tools" >> "$GITHUB_PATH"
+            echo "${SDK_ROOT}/build-tools/36.0.0" >> "$GITHUB_PATH"
           fi
 
           yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses > /dev/null || true
@@ -80,53 +92,332 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Prepare Debug Keystore
+      - name: Validate & Bootstrap Gradle Wrapper
         shell: bash
         run: |
           set -euo pipefail
-          if [ ! -f "${GITHUB_WORKSPACE}/debug.keystore" ] && [ -f "${GITHUB_WORKSPACE}/debug.keystore.base64" ]; then
-            base64 --decode "${GITHUB_WORKSPACE}/debug.keystore.base64" > "${GITHUB_WORKSPACE}/debug.keystore"
-          elif [ ! -f "${GITHUB_WORKSPACE}/debug.keystore" ]; then
-            keytool -genkeypair -v \
-              -keystore "${GITHUB_WORKSPACE}/debug.keystore" \
-              -storepass android \
-              -alias androiddebugkey \
-              -keypass android \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
+          if [ ! -f "./gradlew" ] || [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
+            echo "Bootstrapping Gradle 9.3.1 wrapper scripts for ./gradlew execution..."
+            gradle wrapper --gradle-version 9.3.1
+          fi
+          chmod +x ./gradlew
+          ./gradlew --version
+
+      - name: Resolve Automatic Monotonic VersionCode & VersionName
+        id: version_meta
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_SLUG: ${{ github.repository }}
+          RUN_NUMBER: ${{ github.run_number }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          GRADLE_VERSION_NAME=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)
+          GRADLE_VERSION_CODE=$(sed -n 's/.*versionCode = \([0-9][0-9]*\).*/\1/p' app/build.gradle.kts | head -n 1)
+          GRADLE_VERSION_NAME="${GRADLE_VERSION_NAME:-2.5}"
+          GRADLE_VERSION_CODE="${GRADLE_VERSION_CODE:-3}"
+
+          DEBUG_CHANNEL_JSON=$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/${REPO_SLUG}/releases/tags/nyxora-debug-latest" 2>/dev/null || echo "{}")
+
+          LATEST_CHANNEL_JSON=$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/${REPO_SLUG}/releases/latest" 2>/dev/null || echo "{}")
+
+          MAX_PUBLISHED_CODE=$(python3 -c '
+          import json, re, sys
+          codes = [0]
+          for raw in sys.argv[1:]:
+              try:
+                  data = json.loads(raw or "{}")
+                  body = (data.get("body") or "") + "\n" + (data.get("name") or "")
+                  for m in re.finditer(r"(?i)version[\s_-]*code[\s*:=-]+`?(\d+)`?", body):
+                      codes.append(int(m.group(1)))
+                  for asset in (data.get("assets") or []):
+                      aname = asset.get("name") or ""
+                      m2 = re.search(r"(?i)-b(\d+)\.apk\b", aname)
+                      if m2:
+                          codes.append(int(m2.group(1)))
+              except Exception:
+                  pass
+          print(max(codes))
+          ' "$DEBUG_CHANNEL_JSON" "$LATEST_CHANNEL_JSON")
+
+          RUN_BASED_CODE=$(( 100 + ${RUN_NUMBER:-1} ))
+          NEXT_FROM_GRADLE=$(( GRADLE_VERSION_CODE + 1 ))
+          NEXT_FROM_PUBLISHED=$(( ${MAX_PUBLISHED_CODE:-0} + 1 ))
+
+          VERSION_CODE="$RUN_BASED_CODE"
+          if [ "$NEXT_FROM_GRADLE" -gt "$VERSION_CODE" ]; then
+            VERSION_CODE="$NEXT_FROM_GRADLE"
+          fi
+          if [ "$NEXT_FROM_PUBLISHED" -gt "$VERSION_CODE" ]; then
+            VERSION_CODE="$NEXT_FROM_PUBLISHED"
           fi
 
-      - name: Run Unit Tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -x "./gradlew" ]; then
-            ./gradlew :app:testDebugUnitTest -Drobolectric.enabledSdks=34 --stacktrace
-          else
-            gradle :app:testDebugUnitTest -Drobolectric.enabledSdks=34 --stacktrace
-          fi
+          BASE_MAJOR_MINOR=$(python3 -c '
+          import re, sys
+          nums = re.findall(r"\d+", sys.argv[1])
+          major = nums[0] if len(nums) > 0 else "2"
+          minor = nums[1] if len(nums) > 1 else "5"
+          print(f"{major}.{minor}")
+          ' "$GRADLE_VERSION_NAME")
 
-      - name: Build Debug APK
+          VERSION_NAME="${BASE_MAJOR_MINOR}.${VERSION_CODE}"
+          SHORT_SHA="${COMMIT_SHA:0:7}"
+
+          sed -i "s/versionCode = [0-9]\+/versionCode = ${VERSION_CODE}/" app/build.gradle.kts
+          sed -i "s/versionName = \"[^\"]\+\"/versionName = \"${VERSION_NAME}\"/" app/build.gradle.kts
+
+          echo "Resolved monotonic build version: versionName=${VERSION_NAME}, versionCode=${VERSION_CODE}, commit=${SHORT_SHA}"
+          echo "version_code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
+          echo "version_name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=nyxora-debug-latest" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare & Verify Persistent Debug Signing Keystore
+        id: signing_setup
         shell: bash
+        env:
+          SECRET_KEYSTORE_B64: ${{ secrets.NYXORA_DEBUG_KEYSTORE_BASE64 }}
+          SECRET_STORE_PASSWORD: ${{ secrets.NYXORA_DEBUG_STORE_PASSWORD }}
+          SECRET_KEY_ALIAS: ${{ secrets.NYXORA_DEBUG_KEY_ALIAS }}
+          SECRET_KEY_PASSWORD: ${{ secrets.NYXORA_DEBUG_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          if [ -x "./gradlew" ]; then
-            ./gradlew :app:assembleDebug --stacktrace
+          TARGET_DEBUG_KS="${GITHUB_WORKSPACE}/debug.keystore"
+          rm -f "$TARGET_DEBUG_KS"
+
+          # Validate secret completeness if any custom debug signing secret is provided
+          if [ -n "$SECRET_KEYSTORE_B64" ] || [ -n "$SECRET_STORE_PASSWORD" ] || [ -n "$SECRET_KEY_ALIAS" ] || [ -n "$SECRET_KEY_PASSWORD" ]; then
+            MISSING_SECRETS=""
+            [ -z "$SECRET_KEYSTORE_B64" ] && MISSING_SECRETS="${MISSING_SECRETS} NYXORA_DEBUG_KEYSTORE_BASE64"
+            [ -z "$SECRET_STORE_PASSWORD" ] && MISSING_SECRETS="${MISSING_SECRETS} NYXORA_DEBUG_STORE_PASSWORD"
+            [ -z "$SECRET_KEY_ALIAS" ] && MISSING_SECRETS="${MISSING_SECRETS} NYXORA_DEBUG_KEY_ALIAS"
+            [ -z "$SECRET_KEY_PASSWORD" ] && MISSING_SECRETS="${MISSING_SECRETS} NYXORA_DEBUG_KEY_PASSWORD"
+            if [ -n "$MISSING_SECRETS" ]; then
+              echo "Error: Incomplete NYXORA debug signing secrets configuration. Missing:${MISSING_SECRETS}"
+              exit 1
+            fi
+
+            TEMP_SECRET_KS="${RUNNER_TEMP:-/tmp}/nyxora-secret-debug.keystore"
+            rm -f "$TEMP_SECRET_KS"
+            echo "$SECRET_KEYSTORE_B64" | base64 --decode > "$TEMP_SECRET_KS"
+
+            # Import into ${GITHUB_WORKSPACE}/debug.keystore with standard debug credentials expected by app/build.gradle.kts
+            keytool -importkeystore \
+              -srckeystore "$TEMP_SECRET_KS" \
+              -srcstorepass "$SECRET_STORE_PASSWORD" \
+              -srckeypass "$SECRET_KEY_PASSWORD" \
+              -srcalias "$SECRET_KEY_ALIAS" \
+              -destkeystore "$TARGET_DEBUG_KS" \
+              -deststoretype PKCS12 \
+              -deststorepass android \
+              -destkeypass android \
+              -destalias androiddebugkey \
+              -noprompt
+            rm -f "$TEMP_SECRET_KS"
+            echo "Loaded persistent Debug signing certificate from GitHub Secrets."
+          elif [ -s "${GITHUB_WORKSPACE}/debug.keystore.base64" ]; then
+            base64 --decode "${GITHUB_WORKSPACE}/debug.keystore.base64" > "$TARGET_DEBUG_KS"
+            echo "Loaded persistent Debug signing certificate from repository debug.keystore.base64."
           else
-            gradle :app:assembleDebug --stacktrace
-          fi
-          if [ ! -s "app/build/outputs/apk/debug/app-debug.apk" ]; then
-            echo "Error: Expected debug APK not found at app/build/outputs/apk/debug/app-debug.apk"
+            echo "Error: Persistent signing key is missing. Configure NYXORA_DEBUG_KEYSTORE_BASE64 in GitHub Secrets or ensure debug.keystore.base64 exists."
             exit 1
           fi
 
-      - name: Upload Debug APK Artifact
+          if [ ! -s "$TARGET_DEBUG_KS" ]; then
+            echo "Error: Decoded debug.keystore is empty or missing."
+            exit 1
+          fi
+
+          CERT_FINGERPRINT=$(keytool -list -v -keystore "$TARGET_DEBUG_KS" -storepass android -alias androiddebugkey | grep -i "SHA256:" | head -n 1 | awk '{print $2}')
+          if [ -z "$CERT_FINGERPRINT" ]; then
+            echo "Error: Could not verify SHA-256 certificate fingerprint in debug.keystore"
+            exit 1
+          fi
+          echo "Verified persistent signing certificate SHA-256: ${CERT_FINGERPRINT}"
+          echo "cert_sha256=${CERT_FINGERPRINT}" >> "$GITHUB_OUTPUT"
+
+      - name: Run Unit Tests & Build Signed Debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Executes ./gradlew clean testDebugUnitTest assembleDebug with Robolectric Maven mirror
+          ./gradlew clean :app:testDebugUnitTest :app:assembleDebug \
+            -Drobolectric.enabledSdks=34 \
+            -Drobolectric.dependency.repo.url=https://maven-central.storage-download.googleapis.com/maven2 \
+            --stacktrace
+
+      - name: Verify Debug APK Package, Version & Signature
+        id: verify_apk
+        shell: bash
+        env:
+          REPO_SLUG: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          VERSION_NAME="${{ steps.version_meta.outputs.version_name }}"
+          VERSION_CODE="${{ steps.version_meta.outputs.version_code }}"
+          RELEASE_TAG="${{ steps.version_meta.outputs.release_tag }}"
+          CERT_SHA256="${{ steps.signing_setup.outputs.cert_sha256 }}"
+
+          DEBUG_APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
+          if [ ! -s "$DEBUG_APK_PATH" ]; then
+            echo "Error: Expected debug APK not found or empty at $DEBUG_APK_PATH"
+            exit 1
+          fi
+
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          AAPT2_BIN=$(find "$SDK_ROOT/build-tools" -name aapt2 -type f 2>/dev/null | sort -V | tail -n 1 || command -v aapt2 || true)
+          APKSIGNER_BIN=$(find "$SDK_ROOT/build-tools" -name apksigner -type f 2>/dev/null | sort -V | tail -n 1 || command -v apksigner || true)
+
+          if [ -z "$AAPT2_BIN" ] || [ ! -x "$AAPT2_BIN" ]; then
+            echo "Error: aapt2 binary not found for APK verification"
+            exit 1
+          fi
+          if [ -z "$APKSIGNER_BIN" ] || [ ! -x "$APKSIGNER_BIN" ]; then
+            echo "Error: apksigner binary not found for APK signature verification"
+            exit 1
+          fi
+
+          BADGING=$("$AAPT2_BIN" dump badging "$DEBUG_APK_PATH")
+          echo "$BADGING" | head -n 5
+          echo "$BADGING" | grep -q "name='com.aistudio.nyxorabrowser.vqxkpl'"
+          echo "$BADGING" | grep -q "versionCode='${VERSION_CODE}'"
+          echo "$BADGING" | grep -q "versionName='${VERSION_NAME}'"
+
+          "$APKSIGNER_BIN" verify --verbose --print-certs "$DEBUG_APK_PATH"
+
+          PREDICTABLE_APK_NAME="NYXORA-Browser-debug-latest.apk"
+          VERSIONED_APK_NAME="nyxora-browser-v${VERSION_NAME}-b${VERSION_CODE}.apk"
+          cp "$DEBUG_APK_PATH" "$PREDICTABLE_APK_NAME"
+          cp "$DEBUG_APK_PATH" "$VERSIONED_APK_NAME"
+
+          SHA256_SUM=$(sha256sum "$PREDICTABLE_APK_NAME" | awk '{print $1}')
+          echo "${SHA256_SUM}  ${PREDICTABLE_APK_NAME}" > "${PREDICTABLE_APK_NAME}.sha256"
+
+          PUBLISHED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          PREDICTABLE_DOWNLOAD_URL="https://github.com/${REPO_SLUG}/releases/download/${RELEASE_TAG}/${PREDICTABLE_APK_NAME}"
+          RELEASE_NOTES_TEXT="${{ github.event.inputs.release_notes || 'Automated NYXORA Browser Debug APK release.' }}"
+
+          python3 -c '
+          import json, sys
+          metadata = {
+              "package_name": "com.aistudio.nyxorabrowser.vqxkpl",
+              "tag_name": sys.argv[1],
+              "version_name": sys.argv[2],
+              "version_code": int(sys.argv[3]),
+              "min_supported_version_code": 1,
+              "commit_sha": sys.argv[4],
+              "build_number": int(sys.argv[5]),
+              "signing_cert_sha256": sys.argv[6],
+              "release_notes": sys.argv[7],
+              "apk_asset_name": sys.argv[8],
+              "apk_download_url": sys.argv[9],
+              "sha256": sys.argv[10],
+              "published_at": sys.argv[11]
+          }
+          with open("release-metadata.json", "w", encoding="utf-8") as f:
+              json.dump(metadata, f, indent=2)
+          ' "$RELEASE_TAG" "$VERSION_NAME" "$VERSION_CODE" "$COMMIT_SHA" "${RUN_NUMBER:-1}" "$CERT_SHA256" "$RELEASE_NOTES_TEXT" "$PREDICTABLE_APK_NAME" "$PREDICTABLE_DOWNLOAD_URL" "$SHA256_SUM" "$PUBLISHED_AT"
+
+          echo "predictable_apk=${PREDICTABLE_APK_NAME}" >> "$GITHUB_OUTPUT"
+          echo "versioned_apk=${VERSIONED_APK_NAME}" >> "$GITHUB_OUTPUT"
+          echo "sha256_file=${PREDICTABLE_APK_NAME}.sha256" >> "$GITHUB_OUTPUT"
+          echo "metadata_file=release-metadata.json" >> "$GITHUB_OUTPUT"
+          echo "sha256_sum=${SHA256_SUM}" >> "$GITHUB_OUTPUT"
+          echo "published_at=${PUBLISHED_AT}" >> "$GITHUB_OUTPUT"
+          echo "download_url=${PREDICTABLE_DOWNLOAD_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload NYXORA-Debug-APK Build Artifact
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug-apk
+          name: NYXORA-Debug-APK
           if-no-files-found: error
           retention-days: 30
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            ${{ steps.verify_apk.outputs.predictable_apk }}
+            ${{ steps.verify_apk.outputs.versioned_apk }}
+            ${{ steps.verify_apk.outputs.sha256_file }}
+            ${{ steps.verify_apk.outputs.metadata_file }}
+
+      - name: Clean Previous Assets on nyxora-debug-latest Release Tag
+        if: success()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_SLUG: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          RELEASE_TAG="${{ steps.version_meta.outputs.release_tag }}"
+          EXISTING_RELEASE=$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/${REPO_SLUG}/releases/tags/${RELEASE_TAG}" 2>/dev/null || echo "{}")
+
+          ASSET_IDS=$(python3 -c '
+          import json, sys
+          try:
+              data = json.loads(sys.stdin.read() or "{}")
+              for asset in (data.get("assets") or []):
+                  aid = asset.get("id")
+                  if aid:
+                      print(aid)
+          except Exception:
+              pass
+          ' <<< "$EXISTING_RELEASE")
+
+          for ASSET_ID in $ASSET_IDS; do
+            echo "Removing previous asset ID ${ASSET_ID} from ${RELEASE_TAG}..."
+            curl -fsSL -X DELETE \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/${REPO_SLUG}/releases/assets/${ASSET_ID}" || true
+          done
+
+      - name: Publish Signed Debug APK to GitHub Release (nyxora-debug-latest)
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version_meta.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
+          name: "NYXORA Browser v${{ steps.version_meta.outputs.version_name }} (Build ${{ steps.version_meta.outputs.version_code }})"
+          draft: false
+          prerelease: false
+          generate_release_notes: false
+          body: |
+            ${{ github.event.inputs.release_notes || 'Automated NYXORA Browser Debug APK build with persistent signing and in-app update support.' }}
+
+            ### Release Metadata
+            - **Package ID:** `com.aistudio.nyxorabrowser.vqxkpl`
+            - **Release Channel Tag:** `${{ steps.version_meta.outputs.release_tag }}`
+            - **Version Name:** `${{ steps.version_meta.outputs.version_name }}`
+            - **Version Code:** `${{ steps.version_meta.outputs.version_code }}`
+            - **Min Supported Version Code:** `1`
+            - **Commit SHA:** `${{ github.sha }}`
+            - **Build Number:** `${{ github.run_number }}`
+            - **APK Asset:** `${{ steps.verify_apk.outputs.predictable_apk }}`
+            - **Predictable Download URL:** `${{ steps.verify_apk.outputs.download_url }}`
+            - **SHA-256 Checksum:** `${{ steps.verify_apk.outputs.sha256_sum }}`
+            - **Signing Certificate SHA-256:** `${{ steps.signing_setup.outputs.cert_sha256 }}`
+            - **Published At:** `${{ steps.verify_apk.outputs.published_at }}`
+          files: |
+            ${{ steps.verify_apk.outputs.predictable_apk }}
+            app/build/outputs/apk/debug/app-debug.apk
+            ${{ steps.verify_apk.outputs.sha256_file }}
+            ${{ steps.verify_apk.outputs.metadata_file }}
+
+      - name: Remove Temporary Keystore Files After Build
+        if: always()
+        shell: bash
+        run: |
+          rm -f "${GITHUB_WORKSPACE}/debug.keystore"
+          rm -f "${RUNNER_TEMP:-/tmp}/nyxora-secret-debug.keystore"

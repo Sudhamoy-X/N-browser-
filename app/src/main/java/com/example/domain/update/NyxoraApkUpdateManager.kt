@@ -45,10 +45,17 @@ data class GitHubReleaseApkInfo(
     val expectedSha256Hex: String? = null,
     val releaseHtmlUrl: String = "",
     val versionCode: Int = 0,
-    val minSupportedVersionCode: Int = 1
+    val minSupportedVersionCode: Int = 1,
+    val commitSha: String = ""
 ) {
     val displayVersionLabel: String
         get() = if (versionCode > 0) "v$cleanVersion (Build $versionCode)" else "v$cleanVersion"
+
+    val snoozeKey: String
+        get() {
+            val baseTag = tagName.trim().ifBlank { cleanVersion }
+            return if (versionCode > 0) "$baseTag#$versionCode" else baseTag
+        }
 }
 
 /**
@@ -345,11 +352,11 @@ class NyxoraApkUpdateManager(
         get() = installedVersionCodeProvider().coerceAtLeast(1)
 
     fun dismissUpdatePromptForLater(release: GitHubReleaseApkInfo? = _uiState.value.activeReleaseInfo) {
-        val tag = release?.tagName?.trim()?.ifBlank { release.cleanVersion }.orEmpty()
-        if (tag.isNotBlank()) {
-            _dismissedReleaseTag.value = tag
+        val key = release?.snoozeKey?.trim().orEmpty()
+        if (key.isNotBlank()) {
+            _dismissedReleaseTag.value = key
             runCatching {
-                updatePrefs.edit().putString(KEY_DISMISSED_RELEASE_TAG, tag).apply()
+                updatePrefs.edit().putString(KEY_DISMISSED_RELEASE_TAG, key).apply()
             }
         }
     }
@@ -366,13 +373,19 @@ class NyxoraApkUpdateManager(
         dismissedTag: String = _dismissedReleaseTag.value
     ): Boolean {
         val release = state.activeReleaseInfo ?: return false
-        val tagKey = release.tagName.trim().ifBlank { release.cleanVersion }
+        val currentSnoozeKey = release.snoozeKey.trim()
+        val rawTagKey = release.tagName.trim().ifBlank { release.cleanVersion }
+        val cleanDismissed = dismissedTag.trim()
+        val isDismissed = cleanDismissed.isNotBlank() && (
+            currentSnoozeKey.equals(cleanDismissed, ignoreCase = true) ||
+                (release.versionCode <= 0 && rawTagKey.equals(cleanDismissed, ignoreCase = true))
+            )
         return when (state) {
             is ApkUpdateUiState.UpdateAvailable,
             is ApkUpdateUiState.Downloading,
             is ApkUpdateUiState.Verifying,
             is ApkUpdateUiState.ReadyToInstall,
-            is ApkUpdateUiState.PermissionRequired -> tagKey.isNotBlank() && !tagKey.equals(dismissedTag.trim(), ignoreCase = true)
+            is ApkUpdateUiState.PermissionRequired -> currentSnoozeKey.isNotBlank() && !isDismissed
             else -> false
         }
     }
@@ -404,7 +417,7 @@ class NyxoraApkUpdateManager(
     }
 
     /**
-     * Checks GitHub Releases for a newer stable APK version.
+     * Checks GitHub Releases for a newer stable/debug-channel APK version.
      * Safe to invoke on browser startup and when opening Settings > About NYXORA.
      */
     fun checkForUpdates(force: Boolean = false) {
@@ -448,118 +461,147 @@ class NyxoraApkUpdateManager(
             }
 
             try {
-                val request = Request.Builder()
-                    .url(endpoint)
-                    .header("Accept", "application/vnd.github+json")
-                    .header("X-GitHub-Api-Version", "2022-11-28")
-                    .header("User-Agent", "NYXORA-Browser-Android/$installedVersionName")
-                    .get()
-                    .build()
+                fun buildReleaseRequest(targetUrl: String): Request {
+                    return Request.Builder()
+                        .url(targetUrl)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .header("User-Agent", "NYXORA-Browser-Android/$installedVersionName")
+                        .get()
+                        .build()
+                }
 
-                httpClient.newCall(request).execute().use { response ->
-                    if (!isActive || myGeneration != configGeneration) return@use
-                    val checkedAt = System.currentTimeMillis()
-                    lastCheckTimestampMillis = checkedAt
-                    _lastCheckedAtMillis.value = checkedAt
-                    runCatching { updatePrefs.edit().putLong(KEY_LAST_CHECKED_AT, checkedAt).apply() }
+                var responseCode: Int
+                var responseSuccessful: Boolean
+                var bodyText: String
 
-                    if (response.code == 404) {
-                        // Repository has no published stable releases yet — never claim an update is available
-                        _uiState.value = ApkUpdateUiState.UpToDate(
-                            installedVersion = installedVersionName,
-                            lastCheckedMillis = checkedAt,
-                            statusNote = "NYXORA Browser v$installedVersionName is the latest available version"
-                        )
-                        return@use
+                httpClient.newCall(buildReleaseRequest(endpoint)).execute().use { primaryResponse ->
+                    responseCode = primaryResponse.code
+                    responseSuccessful = primaryResponse.isSuccessful
+                    bodyText = if (primaryResponse.isSuccessful) {
+                        primaryResponse.body?.string().orEmpty()
+                    } else {
+                        ""
                     }
+                }
 
-                    if (!response.isSuccessful) {
-                        val cachedJson = runCatching { updatePrefs.getString(KEY_CACHED_RELEASE_JSON, null) }.getOrNull()
-                        if ((response.code == 403 || response.code == 429) && !cachedJson.isNullOrBlank()) {
-                            val cachedParsed = parseLatestReleaseResponse(
-                                json = cachedJson,
-                                installedVersionName = installedVersionName,
-                                installedVersionCode = installedVersionCode,
-                                supportedAbis = Build.SUPPORTED_ABIS.toList(),
-                                allowHttpForLocalTesting = allowHttpForLocalTesting
-                            )
-                            if (cachedParsed is ReleaseCheckResult.UpdateAvailable) {
-                                _uiState.value = ApkUpdateUiState.UpdateAvailable(
-                                    release = cachedParsed.release,
-                                    installedVersion = cachedParsed.installedVersion
-                                )
-                                return@use
-                            }
-                        }
-                        _uiState.value = ApkUpdateUiState.Error(
-                            message = "Unable to check for updates (HTTP ${response.code}). Please try again later.",
-                            recoverableRelease = currentState.activeReleaseInfo
-                        )
-                        return@use
-                    }
-
-                    val bodyText = response.body?.string().orEmpty()
-                    if (bodyText.isNotBlank()) {
-                        runCatching { updatePrefs.edit().putString(KEY_CACHED_RELEASE_JSON, bodyText).apply() }
-                    }
-                    val parsed = parseLatestReleaseResponse(
-                        json = bodyText,
-                        installedVersionName = installedVersionName,
-                        installedVersionCode = installedVersionCode,
-                        supportedAbis = Build.SUPPORTED_ABIS.toList(),
-                        allowHttpForLocalTesting = allowHttpForLocalTesting
-                    )
-
-                    when (parsed) {
-                        is ReleaseCheckResult.UpdateAvailable -> {
-                            // Check if this release APK was already downloaded and verified in cache
-                            val cachedFile = getTargetApkFile(parsed.release)
-                            if (cachedFile.exists() && cachedFile.length() > 0L) {
-                                val verification = verifyDownloadedApk(
-                                    context = appContext,
-                                    apkFile = cachedFile,
-                                    expectedPackageName = appContext.packageName,
-                                    installedVersionCode = installedVersionCode,
-                                    installedVersionName = installedVersionName,
-                                    expectedSha256Hex = parsed.release.expectedSha256Hex,
-                                    archiveInspector = archiveInspector
-                                )
-                                if (verification is ApkVerificationResult.Valid) {
-                                    _uiState.value = ApkUpdateUiState.ReadyToInstall(
-                                        release = parsed.release,
-                                        apkFile = verification.apkFile,
-                                        sha256Hex = verification.sha256Hex
-                                    )
-                                    return@use
-                                } else {
-                                    cachedFile.delete()
+                // Automatic fallback between /releases/tags/nyxora-debug-latest and /releases/latest on 404
+                if (responseCode == 404) {
+                    val fallbackUrl = resolveFallbackReleaseEndpoint(endpoint)
+                    if (fallbackUrl != null && !fallbackUrl.equals(endpoint, ignoreCase = true)) {
+                        runCatching {
+                            httpClient.newCall(buildReleaseRequest(fallbackUrl)).execute().use { fallbackResponse ->
+                                if (fallbackResponse.isSuccessful) {
+                                    responseCode = fallbackResponse.code
+                                    responseSuccessful = true
+                                    bodyText = fallbackResponse.body?.string().orEmpty()
                                 }
                             }
+                        }
+                    }
+                }
+
+                if (!isActive || myGeneration != configGeneration) return@launch
+                val checkedAt = System.currentTimeMillis()
+                lastCheckTimestampMillis = checkedAt
+                _lastCheckedAtMillis.value = checkedAt
+                runCatching { updatePrefs.edit().putLong(KEY_LAST_CHECKED_AT, checkedAt).apply() }
+
+                if (responseCode == 404) {
+                    // Repository has no published releases yet — never claim an update is available
+                    _uiState.value = ApkUpdateUiState.UpToDate(
+                        installedVersion = installedVersionName,
+                        lastCheckedMillis = checkedAt,
+                        statusNote = "NYXORA Browser v$installedVersionName is the latest available version"
+                    )
+                    return@launch
+                }
+
+                if (!responseSuccessful) {
+                    val cachedJson = runCatching { updatePrefs.getString(KEY_CACHED_RELEASE_JSON, null) }.getOrNull()
+                    if ((responseCode == 403 || responseCode == 429) && !cachedJson.isNullOrBlank()) {
+                        val cachedParsed = parseLatestReleaseResponse(
+                            json = cachedJson,
+                            installedVersionName = installedVersionName,
+                            installedVersionCode = installedVersionCode,
+                            supportedAbis = Build.SUPPORTED_ABIS.toList(),
+                            allowHttpForLocalTesting = allowHttpForLocalTesting
+                        )
+                        if (cachedParsed is ReleaseCheckResult.UpdateAvailable) {
                             _uiState.value = ApkUpdateUiState.UpdateAvailable(
-                                release = parsed.release,
-                                installedVersion = parsed.installedVersion
+                                release = cachedParsed.release,
+                                installedVersion = cachedParsed.installedVersion
                             )
+                            return@launch
                         }
-                        is ReleaseCheckResult.UpToDate -> {
-                            _uiState.value = ApkUpdateUiState.UpToDate(
-                                installedVersion = parsed.installedVersion,
-                                lastCheckedMillis = checkedAt,
-                                statusNote = "NYXORA Browser v${parsed.installedVersion} is up to date"
+                    }
+                    _uiState.value = ApkUpdateUiState.Error(
+                        message = "Unable to check for updates (HTTP $responseCode). Please try again later.",
+                        recoverableRelease = currentState.activeReleaseInfo
+                    )
+                    return@launch
+                }
+
+                if (bodyText.isNotBlank()) {
+                    runCatching { updatePrefs.edit().putString(KEY_CACHED_RELEASE_JSON, bodyText).apply() }
+                }
+                val parsed = parseLatestReleaseResponse(
+                    json = bodyText,
+                    installedVersionName = installedVersionName,
+                    installedVersionCode = installedVersionCode,
+                    supportedAbis = Build.SUPPORTED_ABIS.toList(),
+                    allowHttpForLocalTesting = allowHttpForLocalTesting
+                )
+
+                when (parsed) {
+                    is ReleaseCheckResult.UpdateAvailable -> {
+                        // Check if this release APK was already downloaded and verified in cache
+                        val cachedFile = getTargetApkFile(parsed.release)
+                        if (cachedFile.exists() && cachedFile.length() > 0L) {
+                            val verification = verifyDownloadedApk(
+                                context = appContext,
+                                apkFile = cachedFile,
+                                expectedPackageName = appContext.packageName,
+                                installedVersionCode = installedVersionCode,
+                                installedVersionName = installedVersionName,
+                                expectedSha256Hex = parsed.release.expectedSha256Hex,
+                                archiveInspector = archiveInspector
                             )
+                            if (verification is ApkVerificationResult.Valid) {
+                                _uiState.value = ApkUpdateUiState.ReadyToInstall(
+                                    release = parsed.release,
+                                    apkFile = verification.apkFile,
+                                    sha256Hex = verification.sha256Hex
+                                )
+                                return@launch
+                            } else {
+                                cachedFile.delete()
+                            }
                         }
-                        is ReleaseCheckResult.NoValidReleaseOrApkAsset -> {
-                            // Do not claim a release is available until a real APK asset is published
-                            _uiState.value = ApkUpdateUiState.UpToDate(
-                                installedVersion = parsed.installedVersion,
-                                lastCheckedMillis = checkedAt,
-                                statusNote = "NYXORA Browser v${parsed.installedVersion} is up to date"
-                            )
-                        }
-                        is ReleaseCheckResult.Failure -> {
-                            _uiState.value = ApkUpdateUiState.Error(
-                                message = parsed.errorMessage
-                            )
-                        }
+                        _uiState.value = ApkUpdateUiState.UpdateAvailable(
+                            release = parsed.release,
+                            installedVersion = parsed.installedVersion
+                        )
+                    }
+                    is ReleaseCheckResult.UpToDate -> {
+                        _uiState.value = ApkUpdateUiState.UpToDate(
+                            installedVersion = parsed.installedVersion,
+                            lastCheckedMillis = checkedAt,
+                            statusNote = "NYXORA Browser v${parsed.installedVersion} is up to date"
+                        )
+                    }
+                    is ReleaseCheckResult.NoValidReleaseOrApkAsset -> {
+                        // Do not claim a release is available until a real APK asset is published
+                        _uiState.value = ApkUpdateUiState.UpToDate(
+                            installedVersion = parsed.installedVersion,
+                            lastCheckedMillis = checkedAt,
+                            statusNote = "NYXORA Browser v${parsed.installedVersion} is up to date"
+                        )
+                    }
+                    is ReleaseCheckResult.Failure -> {
+                        _uiState.value = ApkUpdateUiState.Error(
+                            message = parsed.errorMessage
+                        )
                     }
                 }
             } catch (ce: CancellationException) {
@@ -598,7 +640,8 @@ class NyxoraApkUpdateManager(
         activeDownloadJob?.cancel()
         activeDownloadJob = scope.launch(ioDispatcher) {
             val updatesDir = getUpdatesDirectory(appContext)
-            val partFile = File(updatesDir, "nyxora-update-${sanitizeVersionToken(targetRelease.cleanVersion)}.apk.part")
+            val buildSuffix = if (targetRelease.versionCode > 0) "-b${targetRelease.versionCode}" else ""
+            val partFile = File(updatesDir, "nyxora-update-${sanitizeVersionToken(targetRelease.cleanVersion)}$buildSuffix.apk.part")
             val finalApkFile = getTargetApkFile(targetRelease)
 
             try {
@@ -880,13 +923,20 @@ class NyxoraApkUpdateManager(
     fun getTargetApkFile(release: GitHubReleaseApkInfo): File {
         val updatesDir = getUpdatesDirectory(appContext)
         val cleanVer = sanitizeVersionToken(release.cleanVersion)
-        return File(updatesDir, "nyxora-browser-v$cleanVer.apk")
+        val buildSuffix = if (release.versionCode > 0) "-b${release.versionCode}" else ""
+        return File(updatesDir, "nyxora-browser-v$cleanVer$buildSuffix.apk")
     }
 
     companion object {
-        const val DEFAULT_GITHUB_REPO = "sudhamoy-nyxora/nyxora-browser"
+        const val DEFAULT_GITHUB_REPO = "Sudhamoy-X/N-browser-"
+        private const val LEGACY_PLACEHOLDER_GITHUB_REPO = "sudhamoy-nyxora/nyxora-browser"
+        const val DEFAULT_DEBUG_RELEASE_TAG = "nyxora-debug-latest"
+        const val DEFAULT_GITHUB_DEBUG_RELEASE_URL =
+            "https://api.github.com/repos/$DEFAULT_GITHUB_REPO/releases/tags/$DEFAULT_DEBUG_RELEASE_TAG"
         const val DEFAULT_GITHUB_RELEASES_LATEST_URL =
             "https://api.github.com/repos/$DEFAULT_GITHUB_REPO/releases/latest"
+        const val PREDICTABLE_LATEST_APK_DOWNLOAD_URL =
+            "https://github.com/$DEFAULT_GITHUB_REPO/releases/download/$DEFAULT_DEBUG_RELEASE_TAG/NYXORA-Browser-debug-latest.apk"
         const val APK_MIME_TYPE = "application/vnd.android.package-archive"
         private const val PREFS_NAME = "nyxora_apk_update_prefs"
         private const val KEY_LAST_CHECKED_AT = "last_checked_at_ms"
@@ -901,14 +951,26 @@ class NyxoraApkUpdateManager(
         )
         private val SHA256_HEX_REGEX = Regex("\\b([a-fA-F0-9]{64})\\b")
         private val VERSION_CODE_PATTERNS = listOf(
-            Regex("""(?i)["']?version[_-]?code["']?\s*[:=]\s*`?(\d+)`?"""),
-            Regex("""(?i)version\s+code\**\s*[:=]?\s*`?(\d+)`?"""),
-            Regex("""(?i)\bversionCode\s+(\d+)\b"""),
+            Regex("""(?i)["']?version[_-]?code["']?[\s*:=-]+`?(\d+)`?"""),
+            Regex("""(?i)version\s+code[\s*:=-]+`?(\d+)`?"""),
+            Regex("""(?i)\bversionCode[\s*:=-]+`?(\d+)`?\b"""),
+            Regex("""(?i)\bbuild\s*#?\s*(\d+)\b"""),
             Regex("""(?i)-b(\d+)\.apk\b""")
         )
+        private val VERSION_NAME_PATTERNS = listOf(
+            Regex("""(?i)["']?version[_-]?name["']?[\s*:=-]+["'`]?v?(\d+\.\d+(?:\.\d+)?)["'`]?"""),
+            Regex("""(?i)version\s+name[\s*:=-]+`?v?(\d+\.\d+(?:\.\d+)?)`?"""),
+            Regex("""(?i)\bversionName[\s*:=-]+["'`]?v?(\d+\.\d+(?:\.\d+)?)["'`]?"""),
+            Regex("""(?i)nyxora-browser-v(\d+\.\d+(?:\.\d+)?)(?:-b\d+)?\.apk\b"""),
+            Regex("""(?i)\bv(\d+\.\d+(?:\.\d+)?)\b""")
+        )
+        private val COMMIT_SHA_PATTERNS = listOf(
+            Regex("""(?i)["']?commit[_-]?sha["']?[\s*:=-]+["'`]?([a-f0-9]{7,40})["'`]?"""),
+            Regex("""(?i)commit(?:\s+sha)?[\s*:=-]+`?([a-f0-9]{7,40})`?""")
+        )
         private val MIN_SUPPORTED_CODE_PATTERNS = listOf(
-            Regex("""(?i)["']?min[_-]?supported[_-]?version[_-]?code["']?\s*[:=]\s*`?(\d+)`?"""),
-            Regex("""(?i)min(?:imum)?\s+supported\s+version\s+code\**\s*[:=]?\s*`?(\d+)`?""")
+            Regex("""(?i)["']?min[_-]?supported[_-]?version[_-]?code["']?[\s*:=-]+`?(\d+)`?"""),
+            Regex("""(?i)min(?:imum)?\s+supported\s+version\s+code[\s*:=-]+`?(\d+)`?""")
         )
 
         fun configuredGitHubRepoSlug(): String {
@@ -920,7 +982,8 @@ class NyxoraApkUpdateManager(
                 raw.isNotBlank() &&
                 raw.contains('/') &&
                 !raw.equals("DEFAULT_VALUE", ignoreCase = true) &&
-                !raw.startsWith("MY_", ignoreCase = true)
+                !raw.startsWith("MY_", ignoreCase = true) &&
+                !raw.equals(LEGACY_PLACEHOLDER_GITHUB_REPO, ignoreCase = true)
             ) {
                 raw
             } else {
@@ -969,12 +1032,30 @@ class NyxoraApkUpdateManager(
         }
 
         fun configuredReleaseApiEndpoint(): String {
+            val repoSlug = configuredGitHubRepoSlug()
+            val defaultDebugUrl = "https://api.github.com/repos/$repoSlug/releases/tags/$DEFAULT_DEBUG_RELEASE_TAG"
+            val defaultLatestUrl = "https://api.github.com/repos/$repoSlug/releases/latest"
             val explicitUrl = runCatching { BuildConfig.NYXORA_GITHUB_RELEASE_API_URL }.getOrDefault("").trim()
-            if (explicitUrl.startsWith("https://", ignoreCase = true)) {
+            if (explicitUrl.startsWith("https://", ignoreCase = true) &&
+                !explicitUrl.contains(LEGACY_PLACEHOLDER_GITHUB_REPO, ignoreCase = true) &&
+                !explicitUrl.equals(defaultLatestUrl, ignoreCase = true)
+            ) {
                 return explicitUrl
             }
-            val repoSlug = configuredGitHubRepoSlug()
-            return "https://api.github.com/repos/$repoSlug/releases/latest"
+            return defaultDebugUrl
+        }
+
+        internal fun resolveFallbackReleaseEndpoint(primaryEndpoint: String): String? {
+            val clean = primaryEndpoint.trim().removeSuffix("/")
+            return when {
+                clean.endsWith("/releases/tags/$DEFAULT_DEBUG_RELEASE_TAG", ignoreCase = true) -> {
+                    clean.substringBeforeLast("/releases/tags/") + "/releases/latest"
+                }
+                clean.endsWith("/releases/latest", ignoreCase = true) -> {
+                    clean.substringBeforeLast("/releases/latest") + "/releases/tags/$DEFAULT_DEBUG_RELEASE_TAG"
+                }
+                else -> null
+            }
         }
 
         fun defaultUpdateHttpClient(): OkHttpClient {
@@ -1012,6 +1093,9 @@ class NyxoraApkUpdateManager(
          */
         fun isPreReleaseVersionString(rawVersionOrTag: String): Boolean {
             val cleaned = normalizeVersionString(rawVersionOrTag).substringBefore('+').lowercase()
+            if (cleaned == DEFAULT_DEBUG_RELEASE_TAG.lowercase()) {
+                return false
+            }
             if ('-' in cleaned) {
                 val suffix = cleaned.substringAfter('-')
                 if (PRE_RELEASE_KEYWORDS.any { suffix.contains(it) }) {
@@ -1090,11 +1174,14 @@ class NyxoraApkUpdateManager(
             val normalizedLatest = normalizeVersionString(latestTagOrVersion)
             if (normalizedLatest.isBlank()) return false
             if (isPreReleaseVersionString(normalizedLatest)) return false
-            val latestParts = parseNumericVersionParts(normalizedLatest)
-            if (latestParts.isEmpty()) return false
 
             if (releaseVersionCode > 0 && releaseVersionCode <= installedVersionCode) {
                 return false
+            }
+
+            val latestParts = parseNumericVersionParts(normalizedLatest)
+            if (latestParts.isEmpty()) {
+                return releaseVersionCode > installedVersionCode
             }
 
             val semverComparison = compareVersions(installedVersionName, normalizedLatest)
@@ -1107,8 +1194,12 @@ class NyxoraApkUpdateManager(
             return false
         }
 
-        internal fun extractVersionCodeFromReleaseNotes(releaseBody: String, assetName: String = ""): Int {
-            val combined = "$releaseBody\n$assetName"
+        internal fun extractVersionCodeFromReleaseNotes(
+            releaseBody: String,
+            assetName: String = "",
+            releaseTitle: String = ""
+        ): Int {
+            val combined = "$releaseBody\n$releaseTitle\n$assetName"
             for (pattern in VERSION_CODE_PATTERNS) {
                 val match = pattern.find(combined)
                 val code = match?.groupValues?.getOrNull(1)?.toIntOrNull()
@@ -1117,6 +1208,34 @@ class NyxoraApkUpdateManager(
                 }
             }
             return 0
+        }
+
+        internal fun extractVersionNameFromReleaseNotes(
+            releaseBody: String,
+            releaseTitle: String = "",
+            assetName: String = ""
+        ): String {
+            val combined = "$releaseBody\n$releaseTitle\n$assetName"
+            for (pattern in VERSION_NAME_PATTERNS) {
+                val match = pattern.find(combined)
+                val ver = match?.groupValues?.getOrNull(1)?.trim().orEmpty()
+                if (ver.isNotBlank() && parseNumericVersionParts(ver).isNotEmpty()) {
+                    return ver
+                }
+            }
+            return ""
+        }
+
+        internal fun extractCommitShaFromReleaseNotes(releaseBody: String): String {
+            if (releaseBody.isBlank()) return ""
+            for (pattern in COMMIT_SHA_PATTERNS) {
+                val match = pattern.find(releaseBody)
+                val sha = match?.groupValues?.getOrNull(1)?.trim().orEmpty()
+                if (sha.isNotBlank()) {
+                    return sha.lowercase()
+                }
+            }
+            return ""
         }
 
         internal fun extractMinSupportedVersionCodeFromReleaseNotes(releaseBody: String): Int {
@@ -1132,8 +1251,9 @@ class NyxoraApkUpdateManager(
         }
 
         /**
-         * Parses a GitHub `/releases/latest` JSON payload, enforces stable release & real `.apk` asset rules,
-         * and compares both the release versionName and versionCode against the installed app.
+         * Parses a GitHub release JSON payload (`/releases/tags/nyxora-debug-latest` or `/releases/latest`),
+         * enforces non-draft / non-prerelease & real `.apk` asset rules, and compares both `versionCode`
+         * and `versionName` against the installed NYXORA Browser.
          */
         fun parseLatestReleaseResponse(
             json: String,
@@ -1158,16 +1278,6 @@ class NyxoraApkUpdateManager(
 
                 val rawTag = root.optString("tag_name", "").trim()
                 val releaseName = root.optString("name", "").trim().ifBlank { rawTag }
-                val versionCandidate = rawTag.ifBlank { releaseName }
-                val cleanVersion = normalizeVersionString(versionCandidate)
-
-                if (cleanVersion.isBlank() || isPreReleaseVersionString(versionCandidate)) {
-                    return ReleaseCheckResult.NoValidReleaseOrApkAsset(
-                        installedVersion = installedVersionName,
-                        reason = "Release tag '$versionCandidate' is not a valid stable version."
-                    )
-                }
-
                 val assetsArray = root.optJSONArray("assets") ?: JSONArray()
                 val releaseBody = root.optString("body", "").trim()
                 val publishedAt = root.optString("published_at", "").trim()
@@ -1178,13 +1288,54 @@ class NyxoraApkUpdateManager(
                     releaseBody = releaseBody,
                     supportedAbis = supportedAbis,
                     allowHttpForLocalTesting = allowHttpForLocalTesting
-                ) ?: return ReleaseCheckResult.NoValidReleaseOrApkAsset(
-                    installedVersion = installedVersionName,
-                    reason = "Release $rawTag does not contain a published APK asset."
                 )
 
                 val explicitVersionCode = root.optInt("version_code", 0).takeIf { it > 0 }
-                    ?: extractVersionCodeFromReleaseNotes(releaseBody, selectedAsset.name)
+                    ?: extractVersionCodeFromReleaseNotes(releaseBody, selectedAsset?.name.orEmpty(), releaseName)
+                val explicitVersionName = root.optString("version_name", "").trim().ifBlank {
+                    extractVersionNameFromReleaseNotes(releaseBody, releaseName, selectedAsset?.name.orEmpty())
+                }
+                val commitSha = root.optString("commit_sha", "").trim().ifBlank {
+                    extractCommitShaFromReleaseNotes(releaseBody)
+                }
+
+                val versionCandidate = rawTag.ifBlank { releaseName }
+                if (isPreReleaseVersionString(versionCandidate)) {
+                    return ReleaseCheckResult.NoValidReleaseOrApkAsset(
+                        installedVersion = installedVersionName,
+                        reason = "Release tag '$versionCandidate' is a pre-release version."
+                    )
+                }
+
+                val tagVersionNormalized = normalizeVersionString(versionCandidate)
+                val cleanVersion = when {
+                    parseNumericVersionParts(tagVersionNormalized).isNotEmpty() -> tagVersionNormalized
+                    explicitVersionName.isNotBlank() && parseNumericVersionParts(explicitVersionName).isNotEmpty() -> {
+                        normalizeVersionString(explicitVersionName)
+                    }
+                    explicitVersionCode > 0 && versionCandidate.equals(DEFAULT_DEBUG_RELEASE_TAG, ignoreCase = true) -> {
+                        val baseParts = parseNumericVersionParts(installedVersionName)
+                        val major = baseParts.getOrElse(0) { 2 }
+                        val minor = baseParts.getOrElse(1) { 5 }
+                        "$major.$minor.$explicitVersionCode"
+                    }
+                    else -> ""
+                }
+
+                if (cleanVersion.isBlank() || isPreReleaseVersionString(cleanVersion)) {
+                    return ReleaseCheckResult.NoValidReleaseOrApkAsset(
+                        installedVersion = installedVersionName,
+                        reason = "Release tag '$versionCandidate' does not specify a valid version."
+                    )
+                }
+
+                if (selectedAsset == null) {
+                    return ReleaseCheckResult.NoValidReleaseOrApkAsset(
+                        installedVersion = installedVersionName,
+                        reason = "Release $rawTag does not contain a published APK asset."
+                    )
+                }
+
                 val minSupportedCode = root.optInt("min_supported_version_code", 0).takeIf { it > 0 }
                     ?: extractMinSupportedVersionCodeFromReleaseNotes(releaseBody)
 
@@ -1214,7 +1365,8 @@ class NyxoraApkUpdateManager(
                         expectedSha256Hex = selectedAsset.sha256Hex,
                         releaseHtmlUrl = htmlUrl,
                         versionCode = explicitVersionCode,
-                        minSupportedVersionCode = minSupportedCode
+                        minSupportedVersionCode = minSupportedCode,
+                        commitSha = commitSha
                     ),
                     installedVersion = installedVersionName
                 )
@@ -1258,10 +1410,15 @@ class NyxoraApkUpdateManager(
                 if (lowerName.contains("unsigned")) continue
 
                 var score = 100
+                if (lowerName.contains("nyxora-browser-debug-latest")) {
+                    score += 35
+                } else if (lowerName.contains("nyxora-browser")) {
+                    score += 30
+                }
                 if (lowerName.contains("universal")) {
                     score += 25
                 }
-                if (lowerName.contains("release")) {
+                if (lowerName.contains("release") || lowerName.contains("debug")) {
                     score += 20
                 }
                 supportedAbis.forEachIndexed { index, abi ->

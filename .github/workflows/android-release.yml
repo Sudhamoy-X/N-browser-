@@ -30,6 +30,7 @@ permissions:
 jobs:
   build-and-release-apk:
     name: Test, Build Signed Release APK & Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/V') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
 
     steps:
@@ -134,7 +135,7 @@ jobs:
           try:
               data = json.loads(sys.stdin.read() or "{}")
               body = data.get("body", "") or ""
-              m = re.search(r"(?i)version[\s_-]*code\**\s*[:=]?\s*`?(\d+)`?", body)
+              m = re.search(r"(?i)version[\s_-]*code[\s*:=-]+`?(\d+)`?", body)
               if m:
                   print(int(m.group(1)))
               else:
@@ -175,7 +176,7 @@ jobs:
             VERSION_CODE=$(( MAX_EXISTING_CODE + 1 ))
             TAG_NAME="v${VERSION_NAME}"
           else
-            # Automatic version increment on push to main/master or workflow_dispatch without tag
+            # Automatic version increment on workflow_dispatch without tag
             VERSION_CODE=$(( MAX_EXISTING_CODE + 1 ))
             VERSION_NAME=$(python3 -c '
           import re, sys
@@ -193,8 +194,6 @@ jobs:
           p_parts = parse_parts(pub_tag) if pub_tag else [0, 0, 0]
           base = g_parts if g_parts >= p_parts else p_parts
 
-          # If gradle_ver is already strictly newer than published tag, keep gradle major.minor and append/bump patch;
-          # otherwise increment patch (or minor) so every release has a strictly higher semantic versionName.
           if not pub_tag and g_parts > [2, 5]:
               candidate = ".".join(str(x) for x in g_parts)
           else:
@@ -225,24 +224,15 @@ jobs:
           RELEASE_KEY_ALIAS: ${{ secrets.NYXORA_KEY_ALIAS }}
         run: |
           set -euo pipefail
-          # 1. Ensure deterministic debug.keystore is decoded from repository's debug.keystore.base64
-          if [ ! -f "${GITHUB_WORKSPACE}/debug.keystore" ] && [ -f "${GITHUB_WORKSPACE}/debug.keystore.base64" ]; then
+          # 1. Ensure deterministic debug.keystore is decoded from repository's persistent debug.keystore.base64
+          if [ ! -f "${GITHUB_WORKSPACE}/debug.keystore" ] && [ -s "${GITHUB_WORKSPACE}/debug.keystore.base64" ]; then
             base64 --decode "${GITHUB_WORKSPACE}/debug.keystore.base64" > "${GITHUB_WORKSPACE}/debug.keystore"
           elif [ ! -f "${GITHUB_WORKSPACE}/debug.keystore" ]; then
-            keytool -genkeypair -v \
-              -keystore "${GITHUB_WORKSPACE}/debug.keystore" \
-              -storepass android \
-              -alias androiddebugkey \
-              -keypass android \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
+            echo "Error: Persistent signing key is missing. Ensure debug.keystore.base64 exists or configure signing secrets."
+            exit 1
           fi
 
           # 2. Prepare persistent release keystore at ${GITHUB_WORKSPACE}/my-upload-key.jks with alias 'upload'
-          #    matching app/build.gradle.kts signingConfigs.release so :app:assembleRelease always produces
-          #    a signed APK with a consistent certificate across all updates.
           TARGET_RELEASE_KS="${GITHUB_WORKSPACE}/my-upload-key.jks"
           rm -f "$TARGET_RELEASE_KS"
 
@@ -262,7 +252,6 @@ jobs:
             echo "key_password=${RELEASE_KEY_PASSWORD}" >> "$GITHUB_OUTPUT"
           else
             # Import the persistent repository key from debug.keystore into my-upload-key.jks under alias 'upload'
-            # so in-place upgrades over AI Studio builds never fail with signature mismatch.
             keytool -importkeystore \
               -srckeystore "${GITHUB_WORKSPACE}/debug.keystore" \
               -srcstorepass android \
@@ -297,9 +286,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ -x "./gradlew" ]; then
-            ./gradlew :app:testDebugUnitTest -Drobolectric.enabledSdks=34 --stacktrace
+            ./gradlew :app:testDebugUnitTest -Drobolectric.enabledSdks=34 -Drobolectric.dependency.repo.url=https://maven-central.storage-download.googleapis.com/maven2 --stacktrace
           else
-            gradle :app:testDebugUnitTest -Drobolectric.enabledSdks=34 --stacktrace
+            gradle :app:testDebugUnitTest -Drobolectric.enabledSdks=34 -Drobolectric.dependency.repo.url=https://maven-central.storage-download.googleapis.com/maven2 --stacktrace
           fi
 
       - name: Build Signed Release & Debug APKs and Validate Package & Signature
@@ -424,3 +413,11 @@ jobs:
             ${{ steps.build_apk.outputs.apk_file }}
             ${{ steps.build_apk.outputs.sha256_file }}
             ${{ steps.build_apk.outputs.metadata_file }}
+
+      - name: Remove Temporary Keystore Files After Build
+        if: always()
+        shell: bash
+        run: |
+          rm -f "${GITHUB_WORKSPACE}/debug.keystore"
+          rm -f "${GITHUB_WORKSPACE}/my-upload-key.jks"
+

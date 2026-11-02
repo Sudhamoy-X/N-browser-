@@ -606,11 +606,14 @@ class NyxoraApkUpdateTest {
 
         assertTrue(androidWorkflowContent.contains("branches:"))
         assertTrue(androidWorkflowContent.contains("- main"))
+        assertTrue(androidWorkflowContent.contains("workflow_dispatch:"))
         assertTrue(androidWorkflowContent.contains("java-version: '17'"))
         assertTrue(androidWorkflowContent.contains("sdkmanager"))
         assertTrue(androidWorkflowContent.contains("--sdk_root="))
         assertTrue(androidWorkflowContent.contains("--licenses"))
         assertFalse(androidWorkflowContent.contains("android-actions/setup-android"))
+        assertFalse(androidWorkflowContent.contains("keytool -genkeypair"))
+        assertFalse(releaseWorkflowContent.contains("keytool -genkeypair"))
         assertTrue(androidWorkflowContent.contains("platforms;android-36"))
         assertTrue(androidWorkflowContent.contains("platforms;android-36.1"))
         assertTrue(androidWorkflowContent.contains("build-tools;36.0.0"))
@@ -618,12 +621,108 @@ class NyxoraApkUpdateTest {
         assertTrue(androidWorkflowContent.contains("-Drobolectric.enabledSdks=34"))
         assertTrue(androidWorkflowContent.contains(":app:assembleDebug"))
         assertTrue(androidWorkflowContent.contains("app/build/outputs/apk/debug/app-debug.apk"))
+        assertTrue(androidWorkflowContent.contains("name: NYXORA-Debug-APK"))
+        assertTrue(androidWorkflowContent.contains("nyxora-debug-latest"))
+        assertTrue(androidWorkflowContent.contains("NYXORA-Browser-debug-latest.apk"))
+        assertTrue(androidWorkflowContent.contains("NYXORA_DEBUG_KEYSTORE_BASE64"))
+        assertTrue(androidWorkflowContent.contains("NYXORA_DEBUG_STORE_PASSWORD"))
+        assertTrue(androidWorkflowContent.contains("NYXORA_DEBUG_KEY_ALIAS"))
+        assertTrue(androidWorkflowContent.contains("NYXORA_DEBUG_KEY_PASSWORD"))
         assertTrue(androidWorkflowContent.contains("actions/upload-artifact@v4"))
+        assertTrue(androidWorkflowContent.contains("softprops/action-gh-release@v2"))
 
         val roboPropsStream = javaClass.classLoader?.getResourceAsStream("robolectric.properties")
         assertNotNull("Expected robolectric.properties on test classpath", roboPropsStream)
         val roboPropsText = roboPropsStream!!.bufferedReader().use { it.readText() }
         assertTrue(roboPropsText.contains("sdk=34,36"))
+    }
+
+    @Test
+    fun `nyxora-debug-latest channel and Sudhamoy-X N-browser- repo support monotonic builds and build-scoped snooze`() {
+        assertEquals("Sudhamoy-X/N-browser-", NyxoraApkUpdateManager.DEFAULT_GITHUB_REPO)
+        assertEquals("Sudhamoy-X/N-browser-", NyxoraApkUpdateManager.configuredGitHubRepoSlug())
+        assertEquals(
+            "https://api.github.com/repos/Sudhamoy-X/N-browser-/releases/tags/nyxora-debug-latest",
+            NyxoraApkUpdateManager.configuredReleaseApiEndpoint()
+        )
+        assertEquals(
+            "https://github.com/Sudhamoy-X/N-browser-/releases/download/nyxora-debug-latest/NYXORA-Browser-debug-latest.apk",
+            NyxoraApkUpdateManager.PREDICTABLE_LATEST_APK_DOWNLOAD_URL
+        )
+
+        val expectedSha = "b".repeat(64)
+        val debugChannelBuild104Json = """
+            {
+              "tag_name": "nyxora-debug-latest",
+              "name": "NYXORA Browser v2.5.104 (Build 104)",
+              "body": "### Release Metadata\n- **Package ID:** `com.aistudio.nyxorabrowser.vqxkpl`\n- **Version Name:** `2.5.104`\n- **Version Code:** `104`\n- **Commit SHA:** `9f8e7d6c5b4a3210`\n- **SHA-256 Checksum:** `$expectedSha`",
+              "draft": false,
+              "prerelease": false,
+              "published_at": "2026-11-02T05:00:00Z",
+              "assets": [
+                {
+                  "name": "NYXORA-Browser-debug-latest.apk",
+                  "browser_download_url": "https://github.com/Sudhamoy-X/N-browser-/releases/download/nyxora-debug-latest/NYXORA-Browser-debug-latest.apk",
+                  "size": 14680064,
+                  "state": "uploaded"
+                },
+                {
+                  "name": "app-debug.apk",
+                  "browser_download_url": "https://github.com/Sudhamoy-X/N-browser-/releases/download/nyxora-debug-latest/app-debug.apk",
+                  "size": 14680064,
+                  "state": "uploaded"
+                }
+              ]
+            }
+        """.trimIndent()
+
+        // 1. Installed version is 2.5 (versionCode = 3) -> Detects nyxora-debug-latest Build 104 as UpdateAvailable
+        val parsed104 = NyxoraApkUpdateManager.parseLatestReleaseResponse(
+            json = debugChannelBuild104Json,
+            installedVersionName = "2.5",
+            installedVersionCode = 3
+        )
+        assertTrue("Expected UpdateAvailable for nyxora-debug-latest Build 104, got $parsed104", parsed104 is ReleaseCheckResult.UpdateAvailable)
+        val release104 = (parsed104 as ReleaseCheckResult.UpdateAvailable).release
+        assertEquals("nyxora-debug-latest", release104.tagName)
+        assertEquals("2.5.104", release104.cleanVersion)
+        assertEquals(104, release104.versionCode)
+        assertEquals("9f8e7d6c5b4a3210", release104.commitSha)
+        assertEquals(expectedSha, release104.expectedSha256Hex)
+        assertEquals("NYXORA-Browser-debug-latest.apk", release104.assetName)
+        assertEquals("nyxora-debug-latest#104", release104.snoozeKey)
+
+        // 2. Installed versionCode is already 104 -> UpToDate
+        val upToDate104 = NyxoraApkUpdateManager.parseLatestReleaseResponse(
+            json = debugChannelBuild104Json,
+            installedVersionName = "2.5.104",
+            installedVersionCode = 104
+        )
+        assertTrue("Expected UpToDate when installed versionCode == 104, got $upToDate104", upToDate104 is ReleaseCheckResult.UpToDate)
+
+        // 3. Snoozing nyxora-debug-latest#104 does NOT suppress nyxora-debug-latest#105
+        val manager = NyxoraApkUpdateManager(
+            context = context,
+            scope = testScope,
+            ioDispatcher = Dispatchers.Unconfined,
+            installedVersionNameProvider = { "2.5" },
+            installedVersionCodeProvider = { 3 }
+        )
+        val state104 = ApkUpdateUiState.UpdateAvailable(release = release104, installedVersion = "2.5")
+        assertTrue(manager.shouldShowStartupUpdatePrompt(state104, manager.dismissedReleaseTag.value))
+        manager.dismissUpdatePromptForLater(release104)
+        assertFalse(manager.shouldShowStartupUpdatePrompt(state104, manager.dismissedReleaseTag.value))
+
+        val release105 = release104.copy(
+            cleanVersion = "2.5.105",
+            versionCode = 105,
+            releaseTitle = "NYXORA Browser v2.5.105 (Build 105)"
+        )
+        val state105 = ApkUpdateUiState.UpdateAvailable(release = release105, installedVersion = "2.5")
+        assertTrue(
+            "Expected startup prompt to reappear when a new build (105) is published to nyxora-debug-latest",
+            manager.shouldShowStartupUpdatePrompt(state105, manager.dismissedReleaseTag.value)
+        )
     }
 
     @Test
