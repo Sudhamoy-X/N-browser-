@@ -105,6 +105,10 @@ tasks.withType<Test> {
         "34"
       }
   systemProperty("robolectric.enabledSdks", enabledRobolectricSdk)
+  systemProperty(
+    "robolectric.dependency.repo.url",
+    "https://maven-central.storage-download.googleapis.com/maven2"
+  )
   testLogging {
     events("passed", "failed", "skipped")
     exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL

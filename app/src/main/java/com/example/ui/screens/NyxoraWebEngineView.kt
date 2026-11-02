@@ -341,8 +341,8 @@ class WebViewControllerHandle {
     /**
      * Applies high-clarity, aspect-preserving scaling and pan strictly to the active HTML5 `<video>`
      * element on the page (never scaling playback controls, captions, or the entire webpage).
-     * Avoids `will-change: transform` bitmap layer caching so Chromium renders video frames at full
-     * native viewport resolution, and requests highest available playback quality when zooming.
+     * Sizes the `<video>` layout box directly inside a centered flex container so Chromium and ABR
+     * streams (YouTube/HLS/DASH) render at full target resolution instead of magnifying a low-res bitmap.
      */
     fun applyHtml5VideoZoomTransform(
         scale: Float,
@@ -385,14 +385,28 @@ class WebViewControllerHandle {
                         var ytPlayer = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
                         if (ytPlayer) {
                             if (typeof ytPlayer.setPlaybackQualityRange === 'function') {
-                                ytPlayer.setPlaybackQualityRange('hd1080', 'highres');
+                                ytPlayer.setPlaybackQualityRange('hd2160', 'highres');
                             } else if (typeof ytPlayer.setPlaybackQuality === 'function') {
-                                ytPlayer.setPlaybackQuality('hd1080');
+                                ytPlayer.setPlaybackQuality('highres');
                             }
                         }
                     } catch (qe) {}
-                    var container = v.closest('.html5-video-container');
-                    if (container && (document.fullscreenElement || document.webkitFullscreenElement)) {
+                    var reqScale = ${clampedScale};
+                    var effectiveScale = reqScale;
+                    if (reqScale > 1.001 && v.videoWidth > 0 && v.videoHeight > 0) {
+                        var dpr = Math.max(window.devicePixelRatio || 1, 1);
+                        var viewW = Math.max(window.innerWidth || 360, 1) * dpr;
+                        var viewH = Math.max(window.innerHeight || 640, 1) * dpr;
+                        var sourceRatio = Math.max(v.videoWidth / viewW, v.videoHeight / viewH);
+                        var maxClearScale = Math.max(2.5, Math.min(5.0, sourceRatio * 2.25));
+                        effectiveScale = Math.min(reqScale, maxClearScale);
+                    }
+                    var container = v.closest('.html5-video-container') || v.parentElement;
+                    if (container && (document.fullscreenElement || document.webkitFullscreenElement || document.getElementById('__nyxora_fs_style__'))) {
+                        if (!container.hasAttribute('data-nyxora-fs-ancestor')) {
+                            container.setAttribute('data-nyxora-orig-css', container.style.cssText || '');
+                            container.setAttribute('data-nyxora-fs-ancestor', 'true');
+                        }
                         container.style.setProperty('width', '100%', 'important');
                         container.style.setProperty('height', '100%', 'important');
                         container.style.setProperty('position', 'absolute', 'important');
@@ -400,17 +414,31 @@ class WebViewControllerHandle {
                         container.style.setProperty('display', 'flex', 'important');
                         container.style.setProperty('align-items', 'center', 'important');
                         container.style.setProperty('justify-content', 'center', 'important');
+                        container.style.setProperty('overflow', 'hidden', 'important');
+                        container.style.setProperty('padding', '0', 'important');
+                        container.style.setProperty('margin', '0', 'important');
                     }
+                    var docStyle = document.documentElement.style;
+                    docStyle.setProperty('--nyxora-video-fit', '${objectFitValue}');
                     v.setAttribute('data-nyxora-aspect', '${aspectAttr}');
                     v.style.setProperty('object-fit', '${objectFitValue}', 'important');
                     v.style.setProperty('object-position', 'center center', 'important');
                     v.style.willChange = 'auto';
-                    if (${clampedScale} <= 1.001 && Math.abs(${panX}) < 0.5 && Math.abs(${panY}) < 0.5) {
+                    if (effectiveScale <= 1.001 && Math.abs(${panX}) < 0.5 && Math.abs(${panY}) < 0.5) {
+                        docStyle.setProperty('--nyxora-video-size', '100%');
+                        docStyle.setProperty('--nyxora-video-tx', '0px');
+                        docStyle.setProperty('--nyxora-video-ty', '0px');
                         if (v.getAttribute('data-nyxora-zoomed') === 'true') {
                             v.style.transform = v.getAttribute('data-nyxora-orig-transform') || '';
                             v.style.transformOrigin = v.getAttribute('data-nyxora-orig-origin') || '';
                             v.removeAttribute('data-nyxora-zoomed');
                         }
+                        v.style.setProperty('width', '100%', 'important');
+                        v.style.setProperty('height', '100%', 'important');
+                        v.style.setProperty('max-width', '100vw', 'important');
+                        v.style.setProperty('max-height', '100dvh', 'important');
+                        v.style.setProperty('top', '0', 'important');
+                        v.style.setProperty('left', '0', 'important');
                         if (!${isFillMode}) {
                             v.removeAttribute('data-nyxora-aspect');
                         }
@@ -420,15 +448,23 @@ class WebViewControllerHandle {
                             v.setAttribute('data-nyxora-orig-origin', v.style.transformOrigin || '');
                             v.setAttribute('data-nyxora-zoomed', 'true');
                         }
-                        v.style.setProperty('width', '100%', 'important');
-                        v.style.setProperty('height', '100%', 'important');
-                        v.style.setProperty('max-width', '100vw', 'important');
-                        v.style.setProperty('max-height', '100dvh', 'important');
+                        var sizePct = (effectiveScale * 100).toFixed(2) + '%';
+                        docStyle.setProperty('--nyxora-video-size', sizePct);
+                        docStyle.setProperty('--nyxora-video-tx', '${panX}px');
+                        docStyle.setProperty('--nyxora-video-ty', '${panY}px');
+                        v.style.setProperty('flex-shrink', '0', 'important');
+                        v.style.setProperty('width', sizePct, 'important');
+                        v.style.setProperty('height', sizePct, 'important');
+                        v.style.setProperty('min-width', sizePct, 'important');
+                        v.style.setProperty('min-height', sizePct, 'important');
+                        v.style.setProperty('max-width', 'none', 'important');
+                        v.style.setProperty('max-height', 'none', 'important');
                         v.style.setProperty('top', '0', 'important');
                         v.style.setProperty('left', '0', 'important');
                         v.style.transformOrigin = 'center center';
-                        v.style.transform = 'translate(${panX}px, ${panY}px) scale(${clampedScale})';
+                        v.style.setProperty('transform', 'translate(${panX}px, ${panY}px)', 'important');
                     }
+                    window.dispatchEvent(new Event('resize'));
                     return JSON.stringify({supported: true, reason: null});
                 } catch (e) {
                     return JSON.stringify({supported: false, reason: e.message || 'Video zoom restricted by player'});
@@ -456,12 +492,32 @@ class WebViewControllerHandle {
      * with zero wasted bottom space, keeps playback controls overlaid near the bottom edge,
      * requests the highest available video resolution, and restores cleanly on exit.
      */
-    internal fun syncHtml5FullscreenVideoLayout(enteringFullscreen: Boolean) {
-        val wv = webView ?: return
+    internal fun syncHtml5FullscreenVideoLayout(
+        enteringFullscreen: Boolean,
+        onHtml5VideoDetected: ((Boolean) -> Unit)? = null
+    ) {
+        val wv = webView
+        if (wv == null) {
+            onHtml5VideoDetected?.invoke(false)
+            return
+        }
         val js = if (enteringFullscreen) {
             """
             (function() {
                 try {
+                    var docStyle = document.documentElement.style;
+                    if (!docStyle.getPropertyValue('--nyxora-video-size')) {
+                        docStyle.setProperty('--nyxora-video-size', '100%');
+                    }
+                    if (!docStyle.getPropertyValue('--nyxora-video-fit')) {
+                        docStyle.setProperty('--nyxora-video-fit', 'contain');
+                    }
+                    if (!docStyle.getPropertyValue('--nyxora-video-tx')) {
+                        docStyle.setProperty('--nyxora-video-tx', '0px');
+                    }
+                    if (!docStyle.getPropertyValue('--nyxora-video-ty')) {
+                        docStyle.setProperty('--nyxora-video-ty', '0px');
+                    }
                     var styleEl = document.getElementById('__nyxora_fs_style__');
                     if (!styleEl) {
                         styleEl = document.createElement('style');
@@ -471,72 +527,148 @@ class WebViewControllerHandle {
                     styleEl.textContent =
                         ':fullscreen, :-webkit-full-screen, ' +
                         '.html5-video-player:fullscreen, .html5-video-player:-webkit-full-screen, ' +
+                        ':fullscreen .html5-video-player, :-webkit-full-screen .html5-video-player, ' +
+                        '.html5-video-player.ytp-fullscreen, #movie_player.ytp-fullscreen, ' +
                         '#movie_player:fullscreen, #movie_player:-webkit-full-screen, ' +
+                        ':fullscreen #movie_player, :-webkit-full-screen #movie_player, ' +
                         '#player-container-id:fullscreen, #player-container-id:-webkit-full-screen, ' +
-                        'ytm-player:fullscreen, ytm-player:-webkit-full-screen { ' +
+                        ':fullscreen #player-container-id, :-webkit-full-screen #player-container-id, ' +
+                        ':fullscreen .player-container, :-webkit-full-screen .player-container, ' +
+                        ':fullscreen #player, :-webkit-full-screen #player, ' +
+                        'ytm-player:fullscreen, ytm-player:-webkit-full-screen, ' +
+                        ':fullscreen ytm-player, :-webkit-full-screen ytm-player { ' +
                         'position: fixed !important; inset: 0 !important; ' +
                         'width: 100vw !important; height: 100dvh !important; min-height: 100vh !important; ' +
                         'max-width: 100vw !important; max-height: 100dvh !important; ' +
-                        'margin: 0 !important; padding: 0 !important; ' +
+                        'margin: 0 !important; padding: 0 !important; padding-bottom: 0 !important; ' +
                         'top: 0 !important; left: 0 !important; right: 0 !important; bottom: 0 !important; ' +
                         'background-color: #000 !important; overflow: hidden !important; ' +
+                        '} ' +
+                        ':fullscreen .player-size, :-webkit-full-screen .player-size, ' +
+                        '.ytp-fullscreen .player-size { ' +
+                        'padding: 0 !important; padding-bottom: 0 !important; margin: 0 !important; ' +
+                        'width: 100% !important; height: 100% !important; max-height: 100dvh !important; ' +
                         '} ' +
                         ':fullscreen .html5-video-container, :-webkit-full-screen .html5-video-container, ' +
                         '.html5-video-player:fullscreen .html5-video-container, ' +
                         '.html5-video-player:-webkit-full-screen .html5-video-container, ' +
+                        ':fullscreen .html5-video-player .html5-video-container, ' +
+                        ':-webkit-full-screen .html5-video-player .html5-video-container, ' +
                         '#movie_player:fullscreen .html5-video-container, ' +
-                        '#movie_player:-webkit-full-screen .html5-video-container { ' +
+                        '#movie_player:-webkit-full-screen .html5-video-container, ' +
+                        '.ytp-fullscreen .html5-video-container { ' +
                         'position: absolute !important; inset: 0 !important; ' +
                         'width: 100% !important; height: 100% !important; ' +
                         'display: flex !important; align-items: center !important; justify-content: center !important; ' +
+                        'overflow: hidden !important; ' +
                         'margin: 0 !important; padding: 0 !important; top: 0 !important; left: 0 !important; ' +
                         '} ' +
                         ':fullscreen video, :-webkit-full-screen video, ' +
                         'video:fullscreen, video:-webkit-full-screen, ' +
                         '.html5-video-player:fullscreen video.html5-main-video, ' +
                         '.html5-video-player:-webkit-full-screen video.html5-main-video, ' +
-                        '#movie_player:fullscreen video, #movie_player:-webkit-full-screen video { ' +
-                        'position: relative !important; ' +
-                        'width: 100% !important; height: 100% !important; ' +
-                        'max-width: 100vw !important; max-height: 100dvh !important; ' +
-                        'object-fit: contain !important; object-position: center center !important; ' +
+                        ':fullscreen .html5-video-player video.html5-main-video, ' +
+                        ':-webkit-full-screen .html5-video-player video.html5-main-video, ' +
+                        '#movie_player:fullscreen video, #movie_player:-webkit-full-screen video, ' +
+                        ':fullscreen #movie_player video, :-webkit-full-screen #movie_player video, ' +
+                        '.ytp-fullscreen video.html5-main-video, ' +
+                        'video[data-nyxora-zoomed="true"], video[data-nyxora-aspect] { ' +
+                        'position: relative !important; flex-shrink: 0 !important; ' +
+                        'width: var(--nyxora-video-size, 100%) !important; ' +
+                        'height: var(--nyxora-video-size, 100%) !important; ' +
+                        'min-width: var(--nyxora-video-size, 100%) !important; ' +
+                        'min-height: var(--nyxora-video-size, 100%) !important; ' +
+                        'max-width: none !important; max-height: none !important; ' +
+                        'object-fit: var(--nyxora-video-fit, contain) !important; ' +
+                        'object-position: center center !important; ' +
                         'top: 0 !important; left: 0 !important; right: 0 !important; bottom: 0 !important; ' +
                         'margin: auto !important; ' +
+                        'transform: translate(var(--nyxora-video-tx, 0px), var(--nyxora-video-ty, 0px)) !important; ' +
                         '} ' +
                         ':fullscreen video[data-nyxora-aspect="fill"], ' +
-                        ':-webkit-full-screen video[data-nyxora-aspect="fill"] { ' +
+                        ':-webkit-full-screen video[data-nyxora-aspect="fill"], ' +
+                        'video[data-nyxora-aspect="fill"] { ' +
                         'object-fit: cover !important; ' +
                         '} ' +
+                        ':fullscreen #player-control-overlay, :-webkit-full-screen #player-control-overlay, ' +
+                        ':fullscreen ytm-custom-control, :-webkit-full-screen ytm-custom-control, ' +
+                        ':fullscreen .player-controls-content, :-webkit-full-screen .player-controls-content { ' +
+                        'position: absolute !important; inset: 0 !important; ' +
+                        'width: 100% !important; height: 100% !important; max-height: 100dvh !important; ' +
+                        'margin: 0 !important; padding: 0 !important; ' +
+                        '} ' +
                         ':fullscreen .ytp-chrome-bottom, :-webkit-full-screen .ytp-chrome-bottom, ' +
+                        '.ytp-fullscreen .ytp-chrome-bottom, ' +
                         ':fullscreen .player-controls-bottom, :-webkit-full-screen .player-controls-bottom, ' +
+                        ':fullscreen .player-controls-pb, :-webkit-full-screen .player-controls-pb, ' +
                         ':fullscreen ytm-custom-control .player-controls-bottom, ' +
                         ':-webkit-full-screen ytm-custom-control .player-controls-bottom, ' +
                         ':fullscreen #player-control-overlay .player-controls-bottom, ' +
                         ':-webkit-full-screen #player-control-overlay .player-controls-bottom { ' +
-                        'bottom: env(safe-area-inset-bottom, 0px) !important; ' +
-                        'margin-bottom: 0 !important; padding-bottom: 6px !important; ' +
+                        'bottom: env(safe-area-inset-bottom, 4px) !important; ' +
+                        'margin-bottom: 0 !important; padding-bottom: 4px !important; ' +
                         '} ' +
+                        ':fullscreen .watch-below-the-player, :-webkit-full-screen .watch-below-the-player, ' +
+                        ':fullscreen ytm-single-column-watch-next-results-renderer, ' +
+                        ':-webkit-full-screen ytm-single-column-watch-next-results-renderer, ' +
+                        ':fullscreen ytm-mobile-topbar-renderer, :-webkit-full-screen ytm-mobile-topbar-renderer, ' +
+                        ':fullscreen ytm-pivot-bar-renderer, :-webkit-full-screen ytm-pivot-bar-renderer, ' +
+                        ':fullscreen #masthead-container, :-webkit-full-screen #masthead-container, ' +
                         ':fullscreen .ytp-ad-companion-slot, :-webkit-full-screen .ytp-ad-companion-slot, ' +
                         ':fullscreen ytm-companion-slot, :-webkit-full-screen ytm-companion-slot, ' +
+                        ':fullscreen ytm-engagement-panel-section-list-renderer, ' +
+                        ':-webkit-full-screen ytm-engagement-panel-section-list-renderer, ' +
                         ':fullscreen .fullscreen-engagement-panel-placeholder, ' +
                         ':-webkit-full-screen .fullscreen-engagement-panel-placeholder { ' +
                         'display: none !important; height: 0 !important; max-height: 0 !important; ' +
                         'margin: 0 !important; padding: 0 !important; ' +
                         '}';
+                    var videos = document.querySelectorAll('video');
+                    var hasPlayableVideo = false;
+                    for (var i = 0; i < videos.length; i++) {
+                        var v = videos[i];
+                        if (!v.mediaKeys && !v.webkitKeys) {
+                            hasPlayableVideo = true;
+                        }
+                        if (!v.hasAttribute('data-nyxora-orig-video-css')) {
+                            v.setAttribute('data-nyxora-orig-video-css', v.style.cssText || '');
+                        }
+                        v.style.setProperty('width', 'var(--nyxora-video-size, 100%)', 'important');
+                        v.style.setProperty('height', 'var(--nyxora-video-size, 100%)', 'important');
+                        v.style.setProperty('top', '0', 'important');
+                        v.style.setProperty('left', '0', 'important');
+                        var parent = v.parentElement;
+                        var depth = 0;
+                        var fsRoot = document.fullscreenElement || document.webkitFullscreenElement || document.body;
+                        while (parent && parent !== document.documentElement && depth < 6) {
+                            if (!parent.hasAttribute('data-nyxora-fs-ancestor')) {
+                                parent.setAttribute('data-nyxora-orig-css', parent.style.cssText || '');
+                                parent.setAttribute('data-nyxora-fs-ancestor', 'true');
+                            }
+                            parent.style.setProperty('padding-bottom', '0', 'important');
+                            parent.style.setProperty('margin-bottom', '0', 'important');
+                            if (parent === fsRoot) break;
+                            parent = parent.parentElement;
+                            depth++;
+                        }
+                    }
                     try {
                         var ytPlayer = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
                         if (ytPlayer) {
                             if (typeof ytPlayer.setPlaybackQualityRange === 'function') {
-                                ytPlayer.setPlaybackQualityRange('hd1080', 'highres');
+                                ytPlayer.setPlaybackQualityRange('hd2160', 'highres');
                             } else if (typeof ytPlayer.setPlaybackQuality === 'function') {
-                                ytPlayer.setPlaybackQuality('hd1080');
+                                ytPlayer.setPlaybackQuality('highres');
                             }
                         }
                     } catch (qe) {}
                     window.dispatchEvent(new Event('resize'));
                     setTimeout(function() { window.dispatchEvent(new Event('resize')); }, 80);
                     setTimeout(function() { window.dispatchEvent(new Event('resize')); }, 240);
-                } catch (e) {}
+                    return JSON.stringify({hasVideo: hasPlayableVideo});
+                } catch (e) {
+                    return JSON.stringify({hasVideo: false});
+                }
             })();
             """.trimIndent()
         } else {
@@ -547,14 +679,37 @@ class WebViewControllerHandle {
                     if (styleEl && styleEl.parentNode) {
                         styleEl.parentNode.removeChild(styleEl);
                     }
-                    var videos = document.querySelectorAll('video[data-nyxora-aspect], video[data-nyxora-zoomed]');
+                    var docStyle = document.documentElement.style;
+                    docStyle.removeProperty('--nyxora-video-size');
+                    docStyle.removeProperty('--nyxora-video-fit');
+                    docStyle.removeProperty('--nyxora-video-tx');
+                    docStyle.removeProperty('--nyxora-video-ty');
+                    var ancestors = document.querySelectorAll('[data-nyxora-fs-ancestor]');
+                    for (var a = 0; a < ancestors.length; a++) {
+                        var el = ancestors[a];
+                        el.style.cssText = el.getAttribute('data-nyxora-orig-css') || '';
+                        el.removeAttribute('data-nyxora-orig-css');
+                        el.removeAttribute('data-nyxora-fs-ancestor');
+                    }
+                    var videos = document.querySelectorAll('video');
                     for (var i = 0; i < videos.length; i++) {
                         var v = videos[i];
-                        v.style.transform = v.getAttribute('data-nyxora-orig-transform') || '';
-                        v.style.transformOrigin = v.getAttribute('data-nyxora-orig-origin') || '';
-                        v.style.willChange = '';
-                        v.style.removeProperty('object-fit');
-                        v.style.removeProperty('object-position');
+                        if (v.hasAttribute('data-nyxora-orig-video-css')) {
+                            v.style.cssText = v.getAttribute('data-nyxora-orig-video-css') || '';
+                            v.removeAttribute('data-nyxora-orig-video-css');
+                        } else {
+                            v.style.transform = v.getAttribute('data-nyxora-orig-transform') || '';
+                            v.style.transformOrigin = v.getAttribute('data-nyxora-orig-origin') || '';
+                            v.style.willChange = '';
+                            v.style.removeProperty('object-fit');
+                            v.style.removeProperty('object-position');
+                            v.style.removeProperty('width');
+                            v.style.removeProperty('height');
+                            v.style.removeProperty('min-width');
+                            v.style.removeProperty('min-height');
+                            v.style.removeProperty('max-width');
+                            v.style.removeProperty('max-height');
+                        }
                         v.removeAttribute('data-nyxora-zoomed');
                         v.removeAttribute('data-nyxora-aspect');
                     }
@@ -565,11 +720,21 @@ class WebViewControllerHandle {
                     }
                     window.dispatchEvent(new Event('resize'));
                     setTimeout(function() { window.dispatchEvent(new Event('resize')); }, 80);
-                } catch (e) {}
+                    return JSON.stringify({hasVideo: false});
+                } catch (e) {
+                    return JSON.stringify({hasVideo: false});
+                }
             })();
             """.trimIndent()
         }
-        runCatching { wv.evaluateJavascript(js, null) }
+        runCatching {
+            wv.evaluateJavascript(js) { raw ->
+                val detected = raw?.contains("\"hasVideo\":true") == true || raw?.contains("\\\"hasVideo\\\":true") == true
+                onHtml5VideoDetected?.invoke(detected)
+            }
+        }.onFailure {
+            onHtml5VideoDetected?.invoke(false)
+        }
     }
 
     fun extractReaderArticle(onResult: (ReaderArticle?) -> Unit) {
@@ -831,14 +996,21 @@ fun NyxoraWebEngineView(
         currentVideoZoom = 1.0f
         currentVideoPanX = 0f
         currentVideoPanY = 0f
-        val resetScale = if (currentVideoAspect == VideoAspectMode.FILL) 1.18f else 1.0f
         controllerHandle.applyHtml5VideoZoomTransform(
-            scale = resetScale,
+            scale = 1.0f,
             panX = 0f,
             panY = 0f,
             aspectMode = currentVideoAspect
         ) { supported, _ ->
             html5DomZoomSupported = supported
+            if (supported) {
+                fullscreenCustomView?.let { v ->
+                    v.scaleX = 1.0f
+                    v.scaleY = 1.0f
+                    v.translationX = 0f
+                    v.translationY = 0f
+                }
+            }
         }
     }
 
@@ -905,8 +1077,9 @@ fun NyxoraWebEngineView(
             videoRequestedOrientation = videoRequestedOrientation
         )
 
-        // Synchronously attach and size the custom video view to the full window bounds so Chromium's
-        // FullScreenView immediately reports full-screen viewport dimensions to the video player.
+        // Synchronously attach and size both the WebView and custom video view to the full window bounds
+        // so Chromium's FullScreenView and DOM viewport (100vh / 100dvh / window.innerHeight) immediately
+        // match 100% of the screen dimensions with zero wasted bottom space.
         runCatching {
             (view.parent as? ViewGroup)?.removeView(view)
             fullscreenHostContainer.removeAllViews()
@@ -931,6 +1104,14 @@ fun NyxoraWebEngineView(
             val dm = context.resources.displayMetrics
             val fullW = maxOf(decor?.width ?: 0, dm.widthPixels).coerceAtLeast(1)
             val fullH = maxOf(decor?.height ?: 0, dm.heightPixels).coerceAtLeast(1)
+            controllerHandle.webView?.let { wv ->
+                wv.setPadding(0, 0, 0, 0)
+                wv.measure(
+                    View.MeasureSpec.makeMeasureSpec(fullW, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(fullH, View.MeasureSpec.EXACTLY)
+                )
+                wv.layout(0, 0, fullW, fullH)
+            }
             fullscreenHostContainer.measure(
                 View.MeasureSpec.makeMeasureSpec(fullW, View.MeasureSpec.EXACTLY),
                 View.MeasureSpec.makeMeasureSpec(fullH, View.MeasureSpec.EXACTLY)
@@ -948,7 +1129,15 @@ fun NyxoraWebEngineView(
         videoToolbarInteractionTick++
         controllerHandle.fullscreenCustomView = view
         controllerHandle.isFullscreen = true
-        controllerHandle.syncHtml5FullscreenVideoLayout(enteringFullscreen = true)
+        controllerHandle.syncHtml5FullscreenVideoLayout(enteringFullscreen = true) { hasHtml5Video ->
+            html5DomZoomSupported = hasHtml5Video
+            if (hasHtml5Video) {
+                view.scaleX = 1.0f
+                view.scaleY = 1.0f
+                view.translationX = 0f
+                view.translationY = 0f
+            }
+        }
     }
 
     val currentOnEnterFullscreen by rememberUpdatedState(enterFullscreenVideo)
@@ -1305,8 +1494,28 @@ fun NyxoraWebEngineView(
                         if (newSize != fullscreenContainerSize) {
                             fullscreenContainerSize = newSize
                             if (newSize.width > 0 && newSize.height > 0) {
+                                runCatching {
+                                    controllerHandle.webView?.let { wv ->
+                                        wv.setPadding(0, 0, 0, 0)
+                                        if (wv.width != newSize.width || wv.height != newSize.height) {
+                                            wv.measure(
+                                                View.MeasureSpec.makeMeasureSpec(newSize.width, View.MeasureSpec.EXACTLY),
+                                                View.MeasureSpec.makeMeasureSpec(newSize.height, View.MeasureSpec.EXACTLY)
+                                            )
+                                            wv.layout(0, 0, newSize.width, newSize.height)
+                                        }
+                                    }
+                                }
                                 fullscreenHostContainer.forceExpandVideoHierarchy()
-                                controllerHandle.syncHtml5FullscreenVideoLayout(enteringFullscreen = true)
+                                controllerHandle.syncHtml5FullscreenVideoLayout(enteringFullscreen = true) { hasHtml5Video ->
+                                    if (hasHtml5Video) {
+                                        html5DomZoomSupported = true
+                                        customVideoView.scaleX = 1.0f
+                                        customVideoView.scaleY = 1.0f
+                                        customVideoView.translationX = 0f
+                                        customVideoView.translationY = 0f
+                                    }
+                                }
                             }
                         }
                     }
@@ -1348,12 +1557,18 @@ fun NyxoraWebEngineView(
                                         isVideoToolbarVisible = true
                                         videoToolbarInteractionTick++
                                         controllerHandle.applyHtml5VideoZoomTransform(
-                                            scale = next.zoom * (if (currentVideoAspect == VideoAspectMode.FILL) 1.18f else 1.0f),
+                                            scale = next.zoom,
                                             panX = next.panX,
                                             panY = next.panY,
                                             aspectMode = currentVideoAspect
                                         ) { supported, _ ->
                                             html5DomZoomSupported = supported
+                                            if (supported) {
+                                                customVideoView.scaleX = 1.0f
+                                                customVideoView.scaleY = 1.0f
+                                                customVideoView.translationX = 0f
+                                                customVideoView.translationY = 0f
+                                            }
                                         }
                                         event.changes.forEach { change ->
                                             if (change.position != change.previousPosition) {
@@ -1382,12 +1597,18 @@ fun NyxoraWebEngineView(
                                         currentVideoPanY = next.panY
                                         videoToolbarInteractionTick++
                                         controllerHandle.applyHtml5VideoZoomTransform(
-                                            scale = next.zoom * (if (currentVideoAspect == VideoAspectMode.FILL) 1.18f else 1.0f),
+                                            scale = next.zoom,
                                             panX = next.panX,
                                             panY = next.panY,
                                             aspectMode = currentVideoAspect
                                         ) { supported, _ ->
                                             html5DomZoomSupported = supported
+                                            if (supported) {
+                                                customVideoView.scaleX = 1.0f
+                                                customVideoView.scaleY = 1.0f
+                                                customVideoView.translationX = 0f
+                                                customVideoView.translationY = 0f
+                                            }
                                         }
                                     }
                                 }
@@ -1490,12 +1711,18 @@ fun NyxoraWebEngineView(
                                         currentVideoPanX = prevTransform.panX
                                         currentVideoPanY = prevTransform.panY
                                         controllerHandle.applyHtml5VideoZoomTransform(
-                                            scale = prevTransform.zoom * baseAspectScale,
+                                            scale = prevTransform.zoom,
                                             panX = prevTransform.panX,
                                             panY = prevTransform.panY,
                                             aspectMode = currentVideoAspect
                                         ) { supported, _ ->
                                             html5DomZoomSupported = supported
+                                            if (supported) {
+                                                customVideoView.scaleX = 1.0f
+                                                customVideoView.scaleY = 1.0f
+                                                customVideoView.translationX = 0f
+                                                customVideoView.translationY = 0f
+                                            }
                                         }
                                     }
                                     onToast("Video Zoom: ${(currentVideoZoom * 100f).roundToInt()}%")
@@ -1588,14 +1815,19 @@ fun NyxoraWebEngineView(
                                     VideoAspectMode.FILL
                                 }
                                 currentVideoAspect = nextAspect
-                                val nextBaseScale = if (nextAspect == VideoAspectMode.FILL) 1.18f else 1.0f
                                 controllerHandle.applyHtml5VideoZoomTransform(
-                                    scale = currentVideoZoom * nextBaseScale,
+                                    scale = currentVideoZoom,
                                     panX = currentVideoPanX,
                                     panY = currentVideoPanY,
                                     aspectMode = nextAspect
                                 ) { supported, _ ->
                                     html5DomZoomSupported = supported
+                                    if (supported) {
+                                        customVideoView.scaleX = 1.0f
+                                        customVideoView.scaleY = 1.0f
+                                        customVideoView.translationX = 0f
+                                        customVideoView.translationY = 0f
+                                    }
                                 }
                                 val modeLabel = if (nextAspect == VideoAspectMode.FILL) {
                                     "Fill Screen"
@@ -1633,12 +1865,18 @@ fun NyxoraWebEngineView(
                                 currentVideoPanX = nextTransform.panX
                                 currentVideoPanY = nextTransform.panY
                                 controllerHandle.applyHtml5VideoZoomTransform(
-                                    scale = nextTransform.zoom * baseAspectScale,
+                                    scale = nextTransform.zoom,
                                     panX = nextTransform.panX,
                                     panY = nextTransform.panY,
                                     aspectMode = currentVideoAspect
                                 ) { supported, reason ->
                                     html5DomZoomSupported = supported
+                                    if (supported) {
+                                        customVideoView.scaleX = 1.0f
+                                        customVideoView.scaleY = 1.0f
+                                        customVideoView.translationX = 0f
+                                        customVideoView.translationY = 0f
+                                    }
                                     if (!supported && reason != null && reason.contains("DRM")) {
                                         onToast(reason)
                                     }
