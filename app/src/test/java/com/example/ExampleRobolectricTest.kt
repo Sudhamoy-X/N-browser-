@@ -642,9 +642,15 @@ class ExampleRobolectricTest {
         // Verify easy bookmark access directly below the homepage search bar
         composeTestRule.onNodeWithTag("home_bookmarks_quick_access_button").assertIsDisplayed()
 
-        // Verify Version 2.5 build metadata
-        assertEquals("2.5", BuildConfig.VERSION_NAME)
-        assertEquals(3, BuildConfig.VERSION_CODE)
+        // Verify Version 2.5 build metadata (supports local "2.5" / code 3 and CI monotonic "2.5.<build>" / code >= 3)
+        assertTrue(
+            "Expected BuildConfig.VERSION_NAME to be \"2.5\" or start with \"2.5.\", but was \"${BuildConfig.VERSION_NAME}\"",
+            BuildConfig.VERSION_NAME == "2.5" || BuildConfig.VERSION_NAME.startsWith("2.5.")
+        )
+        assertTrue(
+            "Expected BuildConfig.VERSION_CODE >= 3, but was ${BuildConfig.VERSION_CODE}",
+            BuildConfig.VERSION_CODE >= 3
+        )
 
         // 3. Open bottom menu -> Settings -> Verify 7 categories, Room Sync removed from Settings, and About NYXORA works
         composeTestRule.onNodeWithTag("toolbar_overflow_menu_button").performClick()
@@ -2527,9 +2533,15 @@ class ExampleRobolectricTest {
 
         val vm = checkNotNull(composeTestRule.activity.activeBrowserViewModel)
 
-        // 1. Verify Version 2.5 and incremented VersionCode (3 > 2)
-        assertEquals("2.5", BuildConfig.VERSION_NAME)
-        assertEquals(3, BuildConfig.VERSION_CODE)
+        // 1. Verify Version 2.5 and incremented VersionCode (supports local "2.5" / code 3 and CI monotonic "2.5.<build>" / code >= 3)
+        assertTrue(
+            "Expected BuildConfig.VERSION_NAME to be \"2.5\" or start with \"2.5.\", but was \"${BuildConfig.VERSION_NAME}\"",
+            BuildConfig.VERSION_NAME == "2.5" || BuildConfig.VERSION_NAME.startsWith("2.5.")
+        )
+        assertTrue(
+            "Expected BuildConfig.VERSION_CODE >= 3, but was ${BuildConfig.VERSION_CODE}",
+            BuildConfig.VERSION_CODE >= 3
+        )
         assertTrue(
             "2.6 must be recognized as newer than 2.5",
             com.example.domain.update.NyxoraApkUpdateManager.compareVersions("2.5", "v2.6") < 0
