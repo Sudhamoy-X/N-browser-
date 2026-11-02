@@ -672,6 +672,7 @@ fun NyxoraConnectSheet(
     onRemoveParticipant: (String) -> Unit,
     onTransferHost: (String) -> Unit,
     onSimulateNetworkDrop: () -> Unit,
+    onReconnectNow: () -> Unit = onManualResync,
     onToast: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -860,6 +861,11 @@ fun NyxoraConnectSheet(
                         videoCompatibility = videoCompatibility,
                         participantControlsDisabledNotice = participantControlsDisabledNotice,
                         onSetAllowParticipantControls = onSetAllowParticipantControls,
+                        onUpdateRoomConfig = onUpdateRoomConfig,
+                        onManualResync = onManualResync,
+                        onReconnectNow = onReconnectNow,
+                        onRemoveParticipant = onRemoveParticipant,
+                        onTransferHost = onTransferHost,
                         onHostPlaybackControl = onHostPlaybackControl,
                         onLeaveOrCloseRoom = onLeaveOrCloseRoom,
                         onToast = onToast
@@ -1027,6 +1033,11 @@ private fun NyxoraConnectSimpleActiveRoom(
     videoCompatibility: VideoCompatibilityState,
     participantControlsDisabledNotice: String? = null,
     onSetAllowParticipantControls: (Boolean) -> Unit = {},
+    onUpdateRoomConfig: (String?, RoomSyncMode?, Boolean?, RoomPermissionsConfig?) -> Unit = { _, _, _, _ -> },
+    onManualResync: () -> Unit = {},
+    onReconnectNow: () -> Unit = onManualResync,
+    onRemoveParticipant: (String) -> Unit = {},
+    onTransferHost: (String) -> Unit = {},
     onHostPlaybackControl: (Boolean, Double?) -> Unit,
     onLeaveOrCloseRoom: () -> Unit,
     onToast: (String) -> Unit
@@ -1038,15 +1049,18 @@ private fun NyxoraConnectSimpleActiveRoom(
             videoCompatibility == VideoCompatibilityState.IFRAME_OR_EMBED_RESTRICTED
     val hasSupportedMedia = !isUnsupportedOrProtected &&
         (videoCompatibility == VideoCompatibilityState.COMPATIBLE_HTML5 || pb != null)
-    val canControlPlayback = hasSupportedMedia &&
-        (isHost || (room.permissions.allowParticipantControls && room.permissions.allowParticipantPlaybackControl))
+    val canPlayPausePlayback = hasSupportedMedia &&
+        (isHost || room.permissions.canParticipantPlayPauseVideo)
+    val canSeekPlayback = hasSupportedMedia &&
+        (isHost || room.permissions.canParticipantSeekVideo)
+    var permissionsExpanded by rememberSaveable { mutableStateOf(true) }
 
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(10.dp),
         contentPadding = PaddingValues(bottom = 16.dp)
     ) {
-        // 1. Compact Active Room Card: Room Code, Connection Status, Copy Code, Share Code, Leave Room
+        // 1. Compact Active Room Card: Room Code, Connection Status, Recovery Indicator, Copy/Share/Leave, Master Switch
         item {
             Surface(
                 shape = RoundedCornerShape(12.dp),
@@ -1083,16 +1097,67 @@ private fun NyxoraConnectSimpleActiveRoom(
                             )
                         }
                         val roleLabel = if (isHost) "Host" else "Participant"
-                        val summaryLabel = if (connectionStatus.isConnectedOrSynced) {
-                            "$roleLabel • ${connectionStatus.label}"
-                        } else {
-                            "$roleLabel • ${connectionStatus.label}"
-                        }
+                        val summaryLabel = "$roleLabel • ${connectionStatus.label}"
                         Text(
                             text = summaryLabel,
                             style = MaterialTheme.typography.labelMedium,
                             color = if (connectionStatus.isConnectedOrSynced) NyxoraElectricBlue else NyxoraWarningAmber
                         )
+                    }
+
+                    if (connectionStatus == SyncConnectionStatus.RECONNECTING ||
+                        connectionStatus == SyncConnectionStatus.CONNECTING
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = NyxoraWarningAmber.copy(alpha = 0.14f),
+                            border = BorderStroke(1.dp, NyxoraWarningAmber.copy(alpha = 0.45f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .wrapContentHeight()
+                                .testTag("connect_reconnecting_banner")
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Outlined.Refresh,
+                                        contentDescription = null,
+                                        tint = NyxoraWarningAmber,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        text = if (connectionStatus == SyncConnectionStatus.RECONNECTING) {
+                                            "Reconnecting and restoring room session…"
+                                        } else {
+                                            "Authenticating room handshake…"
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                                TextButton(
+                                    onClick = onReconnectNow,
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    modifier = Modifier.testTag("connect_reconnect_now_button")
+                                ) {
+                                    Text(
+                                        text = "Retry Now",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                                        color = NyxoraElectricBlue
+                                    )
+                                }
+                            }
+                        }
                     }
 
                     Row(
@@ -1232,7 +1297,7 @@ private fun NyxoraConnectSimpleActiveRoom(
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
                                 Text(
-                                    text = "Let connected participants search, navigate, open pages, and control playback",
+                                    text = "Master switch for shared participant browser and media controls",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -1334,7 +1399,7 @@ private fun NyxoraConnectSimpleActiveRoom(
                     ) {
                         OutlinedButton(
                             onClick = { onHostPlaybackControl(pb?.isPlaying ?: true, -10.0) },
-                            enabled = canControlPlayback,
+                            enabled = canSeekPlayback,
                             shape = RoundedCornerShape(10.dp),
                             modifier = Modifier
                                 .weight(1f)
@@ -1356,7 +1421,7 @@ private fun NyxoraConnectSimpleActiveRoom(
                                 val nextPlay = !(pb?.isPlaying ?: false)
                                 onHostPlaybackControl(nextPlay, null)
                             },
-                            enabled = canControlPlayback,
+                            enabled = canPlayPausePlayback,
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = NyxoraElectricBlue,
                                 contentColor = Color.White
@@ -1382,7 +1447,7 @@ private fun NyxoraConnectSimpleActiveRoom(
 
                         OutlinedButton(
                             onClick = { onHostPlaybackControl(pb?.isPlaying ?: true, 10.0) },
-                            enabled = canControlPlayback,
+                            enabled = canSeekPlayback,
                             shape = RoundedCornerShape(10.dp),
                             modifier = Modifier
                                 .weight(1f)
@@ -1402,6 +1467,314 @@ private fun NyxoraConnectSimpleActiveRoom(
                 }
             }
         }
+
+        // 3. Host Granular Permissions Card (or Participant Permission Status Summary)
+        item {
+            if (isHost) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.28f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("connect_host_permissions_card")
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { permissionsExpanded = !permissionsExpanded }
+                                .testTag("connect_host_permissions_header"),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Host Permissions",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = if (room.permissions.allowParticipantControls) {
+                                        "Configure individual participant permissions"
+                                    } else {
+                                        "Master switch is OFF (participants are in view-only mode)"
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            IconButton(
+                                onClick = { permissionsExpanded = !permissionsExpanded },
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .testTag("connect_host_permissions_expand_toggle")
+                            ) {
+                                Icon(
+                                    imageVector = if (permissionsExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                                    contentDescription = "Toggle Host Permissions",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        if (permissionsExpanded) {
+                            val perms = room.permissions
+                            val controlsActive = perms.allowParticipantControls
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.18f))
+
+                            HostPermissionToggleRow(
+                                title = "Browser Navigation",
+                                subtitle = "Allow participants to sync page navigation & back/forward",
+                                checked = perms.allowParticipantNavigationSync,
+                                enabled = controlsActive,
+                                switchTag = "connect_perm_navigation_switch",
+                                onCheckedChange = { enabled ->
+                                    onUpdateRoomConfig(null, null, null, perms.copy(allowParticipantNavigationSync = enabled))
+                                }
+                            )
+                            HostPermissionToggleRow(
+                                title = "URL & Search Input",
+                                subtitle = "Allow participants to enter URLs or search queries",
+                                checked = perms.allowParticipantUrlInput,
+                                enabled = controlsActive && perms.allowParticipantNavigationSync,
+                                switchTag = "connect_perm_url_input_switch",
+                                onCheckedChange = { enabled ->
+                                    onUpdateRoomConfig(null, null, null, perms.copy(allowParticipantUrlInput = enabled))
+                                }
+                            )
+                            HostPermissionToggleRow(
+                                title = "Video Play & Pause",
+                                subtitle = "Allow participants to play and pause shared video",
+                                checked = perms.allowParticipantVideoPlayPause,
+                                enabled = controlsActive && perms.allowParticipantPlaybackControl,
+                                switchTag = "connect_perm_video_play_pause_switch",
+                                onCheckedChange = { enabled ->
+                                    onUpdateRoomConfig(null, null, null, perms.copy(allowParticipantVideoPlayPause = enabled))
+                                }
+                            )
+                            HostPermissionToggleRow(
+                                title = "Video Seek Forward / Backward",
+                                subtitle = "Allow participants to seek or jump timeline position",
+                                checked = perms.allowParticipantVideoSeek,
+                                enabled = controlsActive && perms.allowParticipantPlaybackControl,
+                                switchTag = "connect_perm_video_seek_switch",
+                                onCheckedChange = { enabled ->
+                                    onUpdateRoomConfig(null, null, null, perms.copy(allowParticipantVideoSeek = enabled))
+                                }
+                            )
+                            HostPermissionToggleRow(
+                                title = "Volume Control",
+                                subtitle = "Allow participants to adjust shared playback volume/mute",
+                                checked = perms.allowParticipantVolumeControl,
+                                enabled = controlsActive && perms.allowParticipantPlaybackControl,
+                                switchTag = "connect_perm_volume_switch",
+                                onCheckedChange = { enabled ->
+                                    onUpdateRoomConfig(null, null, null, perms.copy(allowParticipantVolumeControl = enabled))
+                                }
+                            )
+                            HostPermissionToggleRow(
+                                title = "Fullscreen & Orientation",
+                                subtitle = "Allow participants to control fullscreen and orientation state",
+                                checked = perms.allowParticipantFullscreenControl,
+                                enabled = controlsActive && perms.allowParticipantPlaybackControl,
+                                switchTag = "connect_perm_fullscreen_switch",
+                                onCheckedChange = { enabled ->
+                                    onUpdateRoomConfig(null, null, null, perms.copy(allowParticipantFullscreenControl = enabled))
+                                }
+                            )
+                            HostPermissionToggleRow(
+                                title = "Shared Chat",
+                                subtitle = "Allow participants to send messages in room chat",
+                                checked = perms.allowParticipantChat,
+                                enabled = true,
+                                switchTag = "connect_perm_chat_switch",
+                                onCheckedChange = { enabled ->
+                                    onUpdateRoomConfig(null, null, null, perms.copy(allowParticipantChat = enabled))
+                                }
+                            )
+                            HostPermissionToggleRow(
+                                title = "Other Playback Controls",
+                                subtitle = "Allow participants to use playback speed & auxiliary media controls",
+                                checked = perms.allowParticipantPlaybackControl,
+                                enabled = controlsActive,
+                                switchTag = "connect_perm_playback_switch",
+                                onCheckedChange = { enabled ->
+                                    onUpdateRoomConfig(null, null, null, perms.copy(allowParticipantPlaybackControl = enabled))
+                                }
+                            )
+                        }
+                    }
+                }
+            } else {
+                val perms = room.permissions
+                val allowedList = buildList {
+                    if (perms.canParticipantNavigateBrowser) add("Navigation")
+                    if (perms.canParticipantInputUrl) add("URL Input")
+                    if (perms.canParticipantPlayPauseVideo) add("Play/Pause")
+                    if (perms.canParticipantSeekVideo) add("Seek")
+                    if (perms.canParticipantControlVolume) add("Volume")
+                    if (perms.canParticipantControlFullscreen) add("Fullscreen")
+                    if (perms.canParticipantSendChat) add("Chat")
+                }
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.28f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("connect_participant_permissions_card")
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "Your Room Permissions",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = if (allowedList.isEmpty()) {
+                                "View-only mode • Host has disabled all participant controls and chat"
+                            } else {
+                                "Enabled by Host: ${allowedList.joinToString(", ")}"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag("connect_participant_permission_summary_text")
+                        )
+                    }
+                }
+            }
+        }
+
+        // 4. Connected Participants Card
+        item {
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.28f)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("connect_participants_card")
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "Connected Participants (${room.members.size}/${room.permissions.maxParticipants})",
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    room.members.forEach { member ->
+                        val isSelf = member.deviceId == localDeviceId
+                        val isMemberHost = member.deviceId == room.hostDeviceId || member.role == RoomRole.HOST
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 2.dp)
+                                .testTag("connect_member_row_${member.deviceId}"),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = buildString {
+                                        append(member.deviceName)
+                                        if (isSelf) append(" (You)")
+                                        if (isMemberHost) append(" • Host")
+                                    },
+                                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = member.status.label,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (member.status.isConnectedOrSynced) NyxoraSuccessGreen else NyxoraWarningAmber
+                                )
+                            }
+                            if (isHost && !isSelf) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    IconButton(
+                                        onClick = { onTransferHost(member.deviceId) },
+                                        modifier = Modifier
+                                            .size(32.dp)
+                                            .testTag("connect_transfer_host_${member.deviceId}")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Outlined.SwapHoriz,
+                                            contentDescription = "Transfer Host",
+                                            tint = NyxoraElectricBlue,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = { onRemoveParticipant(member.deviceId) },
+                                        modifier = Modifier
+                                            .size(32.dp)
+                                            .testTag("connect_remove_member_${member.deviceId}")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Outlined.PersonRemove,
+                                            contentDescription = "Remove Participant",
+                                            tint = NyxoraDangerRed,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HostPermissionToggleRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    enabled: Boolean,
+    switchTag: String,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .wrapContentHeight(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
+                color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        Switch(
+            checked = checked,
+            enabled = enabled,
+            onCheckedChange = onCheckedChange,
+            modifier = Modifier
+                .semantics { contentDescription = title }
+                .testTag(switchTag)
+        )
     }
 }
 

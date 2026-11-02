@@ -523,7 +523,7 @@ class NyxoraBrowserViewModel(
 
     // --- NAVIGATION & ADDRESS BAR ---
 
-    fun navigateInActiveTab(rawInput: String) {
+    fun navigateInActiveTab(rawInput: String, isUrlInput: Boolean = false) {
         val trimmedInput = rawInput.trim()
         if (NyxoraConnectSecurity.isNyxoraConnectInvitationUrl(trimmedInput)) {
             _activeOverlay.value = OverlaySheet.NYXORA_CONNECT
@@ -609,7 +609,8 @@ class NyxoraBrowserViewModel(
                         title = newTitle,
                         isPrivateTab = false,
                         isPrivateMode = false,
-                        eventType = RealtimeEventType.NAVIGATE_URL
+                        eventType = RealtimeEventType.NAVIGATE_URL,
+                        isUrlInput = isUrlInput
                     )
                 }
             }
@@ -2402,6 +2403,39 @@ class NyxoraBrowserViewModel(
         }
     }
 
+    fun onAppForegrounded(context: Context) {
+        connectManager.onAppForegrounded()
+        if (connectManager.roomState.value == null) {
+            runCatching {
+                val prefs = context.applicationContext.getSharedPreferences(CONNECT_SESSION_PREFS, Context.MODE_PRIVATE)
+                val savedJson = prefs.getString(KEY_RECOVERABLE_CONNECT_SESSION, null)
+                if (!savedJson.isNullOrBlank()) {
+                    val restored = connectManager.restoreSessionFromJson(savedJson)
+                    if (!restored) {
+                        prefs.edit().remove(KEY_RECOVERABLE_CONNECT_SESSION).apply()
+                    }
+                }
+            }
+        }
+    }
+
+    fun onAppBackgrounded(context: Context) {
+        connectManager.onAppBackgrounded()
+        runCatching {
+            val prefs = context.applicationContext.getSharedPreferences(CONNECT_SESSION_PREFS, Context.MODE_PRIVATE)
+            val snapshot = connectManager.exportRecoverableSessionJson()
+            if (!snapshot.isNullOrBlank()) {
+                prefs.edit().putString(KEY_RECOVERABLE_CONNECT_SESSION, snapshot).apply()
+            } else {
+                prefs.edit().remove(KEY_RECOVERABLE_CONNECT_SESSION).apply()
+            }
+        }
+    }
+
+    fun onNetworkAvailabilityChanged(isAvailable: Boolean) {
+        connectManager.onNetworkAvailabilityChanged(isAvailable)
+    }
+
     override fun onCleared() {
         connectManager.leaveOrCloseRoom(notifyServer = true)
         super.onCleared()
@@ -2409,6 +2443,8 @@ class NyxoraBrowserViewModel(
 
     companion object {
         private const val TAG = "NyxoraBrowserVM"
+        private const val CONNECT_SESSION_PREFS = "nyxora_connect_session_store"
+        private const val KEY_RECOVERABLE_CONNECT_SESSION = "recoverable_connect_session_json"
 
         fun provideFactory(): ViewModelProvider.Factory = viewModelFactory {
             initializer {

@@ -206,7 +206,15 @@ class NyxoraWebSocketRelayServer {
         try {
             while (running.get() && !socket.isClosed) {
                 val frame = readWebSocketFrame(input) ?: break
-                connection.lastSeenMillis = System.currentTimeMillis()
+                val seenNow = System.currentTimeMillis()
+                connection.lastSeenMillis = seenNow
+                if (connection.authenticated && connection.roomId.isNotBlank() && connection.deviceId.isNotBlank()) {
+                    rooms[connection.roomId]?.let { roomCtx ->
+                        synchronized(roomCtx) {
+                            updateMemberHeartbeat(roomCtx, connection.deviceId, seenNow)
+                        }
+                    }
+                }
                 when (frame.opcode) {
                     0x1 -> { // Text frame
                         val text = String(frame.payload, Charsets.UTF_8)
@@ -220,7 +228,7 @@ class NyxoraWebSocketRelayServer {
                         connection.sendPongFrame(frame.payload)
                     }
                     0xA -> { // Pong frame
-                        // Heartbeat updated via lastSeenMillis
+                        // Heartbeat updated via lastSeenMillis above
                     }
                 }
             }
@@ -239,7 +247,7 @@ class NyxoraWebSocketRelayServer {
 
         // Rate limit check per sender device
         if (!rateLimiter.tryAcquire(envelope.senderDeviceId, now)) {
-            sendErrorEvent(conn, envelope.roomId, "RATE_LIMITED", "Too many requests; slowing down")
+            sendPermissionOrRateWarning(conn, envelope.roomId, "RATE_LIMITED", "Too many requests; slowing down")
             return
         }
 
@@ -255,15 +263,19 @@ class NyxoraWebSocketRelayServer {
         }
 
         var roomCtx = rooms[normalizedRoomId]
-        if (roomCtx == null && envelope.type == RealtimeEventType.JOIN_REQUEST && envelope.senderRole == RoomRole.HOST) {
+        if (roomCtx == null && envelope.type == RealtimeEventType.JOIN_REQUEST) {
             val payloadObj = runCatching { JSONObject(envelope.payloadJson) }.getOrNull()
+            val isReconnectingSession = payloadObj?.optBoolean("reconnectingSession", false) == true
             val snapshotObj = payloadObj?.optJSONObject("hostRoomSnapshot")
-            if (snapshotObj != null) {
+                ?: payloadObj?.optJSONObject("roomRecoverySnapshot")
+            if (snapshotObj != null && (envelope.senderRole == RoomRole.HOST || isReconnectingSession)) {
                 val derivedKey = NyxoraConnectSecurity.deriveRoomCodeHandshakeKey(normalizedRoomId)
                 val candidateKey = snapshotObj.optString("accessKey", "").trim().uppercase().ifBlank { derivedKey }
                 val validSig = (candidateKey.isNotBlank() && NyxoraConnectSecurity.verifyEventHmac(candidateKey, envelope)) ||
                     (derivedKey.isNotBlank() && NyxoraConnectSecurity.verifyEventHmac(derivedKey, envelope))
                 if (validSig) {
+                    val recoveredHostId = snapshotObj.optString("hostDeviceId", "").trim()
+                        .ifBlank { envelope.senderDeviceId }
                     val parsedRoom = NyxoraConnectRoomState.fromSnapshotJson(
                         obj = snapshotObj,
                         existingAccessKey = candidateKey,
@@ -271,7 +283,7 @@ class NyxoraWebSocketRelayServer {
                     ).copy(
                         roomId = normalizedRoomId,
                         accessKey = candidateKey,
-                        hostDeviceId = envelope.senderDeviceId
+                        hostDeviceId = if (envelope.senderRole == RoomRole.HOST) envelope.senderDeviceId else recoveredHostId
                     )
                     registerNewRoom(parsedRoom)
                     roomCtx = rooms[normalizedRoomId]
@@ -284,7 +296,7 @@ class NyxoraWebSocketRelayServer {
         }
 
         synchronized(roomCtx) {
-            val currentRoom = roomCtx.state
+            var currentRoom = roomCtx.state
             if (now > currentRoom.expiresAtMillis) {
                 rooms.remove(normalizedRoomId)
                 sendRejectEvent(conn, normalizedRoomId, "ROOM_EXPIRED", "This room has expired")
@@ -310,13 +322,37 @@ class NyxoraWebSocketRelayServer {
                 return
             }
 
-            // Strictly verify that the socket and senderDeviceId belong to an authenticated member of this room
-            val authenticatedMember = currentRoom.members.firstOrNull { it.deviceId == envelope.senderDeviceId }
-            val isSocketAuthenticatedForRoom = conn.authenticated &&
+            // Verify membership and auto-heal socket/member binding if the device is an existing member or already authenticated on this socket
+            var authenticatedMember = currentRoom.members.firstOrNull { it.deviceId == envelope.senderDeviceId }
+            val isKnownHost = envelope.senderDeviceId == currentRoom.hostDeviceId
+            val isSocketBoundToMember = conn.authenticated &&
                 conn.roomId.equals(normalizedRoomId, ignoreCase = true) &&
-                conn.deviceId == envelope.senderDeviceId &&
-                authenticatedMember != null
-            if (!isSocketAuthenticatedForRoom) {
+                conn.deviceId == envelope.senderDeviceId
+
+            if (authenticatedMember == null && (isSocketBoundToMember || isKnownHost)) {
+                val restoredMember = ConnectedDeviceMember(
+                    deviceId = envelope.senderDeviceId,
+                    deviceName = if (isKnownHost) "Host Device" else "Participant Device",
+                    role = if (isKnownHost) RoomRole.HOST else RoomRole.PARTICIPANT,
+                    status = SyncConnectionStatus.SYNCED,
+                    joinedAtMillis = now,
+                    lastHeartbeatMillis = now,
+                    isFollowingPaused = false
+                )
+                val updatedMembers = (currentRoom.members + restoredMember).distinctBy { it.deviceId }
+                roomCtx.state = currentRoom.copy(members = updatedMembers)
+                currentRoom = roomCtx.state
+                authenticatedMember = restoredMember
+            }
+
+            if (authenticatedMember != null && !isSocketBoundToMember) {
+                conn.authenticated = true
+                conn.roomId = normalizedRoomId
+                conn.deviceId = envelope.senderDeviceId
+                conn.lastSeenMillis = now
+            }
+
+            if (!conn.authenticated || authenticatedMember == null) {
                 sendRejectEvent(
                     conn,
                     normalizedRoomId,
@@ -326,14 +362,26 @@ class NyxoraWebSocketRelayServer {
                 return
             }
 
+            // Refresh member heartbeat on every valid authenticated event
+            updateMemberHeartbeat(roomCtx, envelope.senderDeviceId, now)
+            currentRoom = roomCtx.state
+
             when (envelope.type) {
                 RealtimeEventType.HEARTBEAT_PING -> {
-                    updateMemberHeartbeat(roomCtx, envelope.senderDeviceId, now)
+                    val clientSentMs = runCatching {
+                        JSONObject(envelope.payloadJson).optLong("clientTimeMillis", 0L)
+                    }.getOrDefault(0L)
+                    val pongPayload = JSONObject()
+                        .put("serverTimeMillis", now)
+                        .apply {
+                            if (clientSentMs > 0L) put("clientTimeMillis", clientSentMs)
+                        }
+                        .toString()
                     val pongEnvelope = createServerSignedEnvelope(
                         room = roomCtx.state,
                         seq = roomCtx.sequenceGenerator.incrementAndGet(),
                         type = RealtimeEventType.HEARTBEAT_PONG,
-                        payloadJson = JSONObject().put("serverTimeMillis", now).toString()
+                        payloadJson = pongPayload
                     )
                     conn.sendTextFrame(pongEnvelope.toJsonString())
                 }
@@ -350,6 +398,13 @@ class NyxoraWebSocketRelayServer {
                         )
                         broadcastToRoom(normalizedRoomId, closedEnvelope)
                         rooms.remove(normalizedRoomId)
+                    } else {
+                        sendPermissionDenied(
+                            conn = conn,
+                            room = currentRoom,
+                            code = "HOST_ONLY_ACTION",
+                            message = "Only the room host can close the room for all participants."
+                        )
                     }
                 }
                 RealtimeEventType.UPDATE_ROOM_CONFIG -> {
@@ -374,6 +429,13 @@ class NyxoraWebSocketRelayServer {
                             lastSequenceNumber = nextSeq
                         )
                         broadcastSnapshotToRoom(roomCtx)
+                    } else {
+                        sendPermissionDenied(
+                            conn = conn,
+                            room = currentRoom,
+                            code = "HOST_ONLY_ACTION",
+                            message = "Only the room host can update room permissions."
+                        )
                     }
                 }
                 RealtimeEventType.REMOVE_PARTICIPANT -> {
@@ -399,6 +461,13 @@ class NyxoraWebSocketRelayServer {
                             }
                             broadcastSnapshotToRoom(roomCtx)
                         }
+                    } else {
+                        sendPermissionDenied(
+                            conn = conn,
+                            room = currentRoom,
+                            code = "HOST_ONLY_ACTION",
+                            message = "Only the room host can remove participants."
+                        )
                     }
                 }
                 RealtimeEventType.TRANSFER_HOST -> {
@@ -423,6 +492,13 @@ class NyxoraWebSocketRelayServer {
                             )
                             broadcastSnapshotToRoom(roomCtx)
                         }
+                    } else {
+                        sendPermissionDenied(
+                            conn = conn,
+                            room = currentRoom,
+                            code = "HOST_ONLY_ACTION",
+                            message = "Only the room host can transfer host authority."
+                        )
                     }
                 }
                 RealtimeEventType.PARTICIPANT_FOLLOW_STATE -> {
@@ -452,27 +528,42 @@ class NyxoraWebSocketRelayServer {
                 RealtimeEventType.SELECT_TAB_NAVIGATION,
                 RealtimeEventType.NEW_PAGE_OPENED -> {
                     val isHost = envelope.senderDeviceId == currentRoom.hostDeviceId
-                    val allowedByPermission = isHost ||
-                        (currentRoom.permissions.allowParticipantControls &&
-                            currentRoom.permissions.allowParticipantNavigationSync)
-                    if (!allowedByPermission) {
-                        val deniedEnv = createServerSignedEnvelope(
-                            room = currentRoom,
-                            seq = currentRoom.lastSequenceNumber,
-                            type = RealtimeEventType.PERMISSION_DENIED,
-                            payloadJson = JSONObject()
-                                .put("code", "PARTICIPANT_CONTROLS_DISABLED")
-                                .put(
-                                    "message",
-                                    "Shared controls are disabled by the host — only the host can control shared navigation and playback."
+                    val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: JSONObject()
+                    if (!isHost) {
+                        val perms = currentRoom.permissions
+                        val isUrlInputAction = envelope.type == RealtimeEventType.NAVIGATE_URL ||
+                            envelope.type == RealtimeEventType.NEW_PAGE_OPENED
+                        when {
+                            !perms.allowParticipantControls -> {
+                                sendPermissionDenied(
+                                    conn = conn,
+                                    room = currentRoom,
+                                    code = "PARTICIPANT_CONTROLS_DISABLED",
+                                    message = "Shared controls are disabled by the host — only the host can control shared navigation and playback."
                                 )
-                                .toString()
-                        )
-                        conn.sendTextFrame(deniedEnv.toJsonString())
-                        return
+                                return
+                            }
+                            !perms.allowParticipantNavigationSync -> {
+                                sendPermissionDenied(
+                                    conn = conn,
+                                    room = currentRoom,
+                                    code = "NAVIGATION_SYNC_DISABLED",
+                                    message = "Browser navigation is disabled by the host."
+                                )
+                                return
+                            }
+                            isUrlInputAction && !perms.allowParticipantUrlInput -> {
+                                sendPermissionDenied(
+                                    conn = conn,
+                                    room = currentRoom,
+                                    code = "URL_INPUT_DISABLED",
+                                    message = "URL and search input is disabled by the host."
+                                )
+                                return
+                            }
+                        }
                     }
                     if (currentRoom.isSyncActive) {
-                        val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: JSONObject()
                         val rawUrl = payload.optString("url", "")
                         val sanitizedUrl = if (rawUrl.isNotBlank()) {
                             NyxoraConnectSecurity.sanitizeUrlForSync(rawUrl, isPrivateTab = false, isPrivateMode = false)
@@ -510,30 +601,102 @@ class NyxoraWebSocketRelayServer {
                 RealtimeEventType.PLAYBACK_ACTION,
                 RealtimeEventType.PLAYBACK_BEACON -> {
                     val isHost = envelope.senderDeviceId == currentRoom.hostDeviceId
-                    val allowedByPermission = isHost ||
-                        (envelope.type == RealtimeEventType.PLAYBACK_ACTION &&
-                            currentRoom.permissions.allowParticipantControls &&
-                            currentRoom.permissions.allowParticipantPlaybackControl)
-                    if (!allowedByPermission) {
-                        if (envelope.type == RealtimeEventType.PLAYBACK_ACTION) {
-                            val deniedEnv = createServerSignedEnvelope(
-                                room = currentRoom,
-                                seq = currentRoom.lastSequenceNumber,
-                                type = RealtimeEventType.PERMISSION_DENIED,
-                                payloadJson = JSONObject()
-                                    .put("code", "PARTICIPANT_CONTROLS_DISABLED")
-                                    .put(
-                                        "message",
-                                        "Shared controls are disabled by the host — only the host can control shared navigation and playback."
-                                    )
-                                    .toString()
-                            )
-                            conn.sendTextFrame(deniedEnv.toJsonString())
-                        }
+                    if (!isHost && envelope.type == RealtimeEventType.PLAYBACK_BEACON) {
                         return
                     }
+                    val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: return
+                    if (!isHost) {
+                        val perms = currentRoom.permissions
+                        val actionType = payload.optString("controlActionType", "").trim().uppercase()
+                        val prevPb = currentRoom.playbackState
+                        val nextPlaying = payload.optBoolean("isPlaying", prevPb?.isPlaying ?: false)
+                        val nextPos = payload.optDouble("positionSeconds", prevPb?.positionSeconds ?: 0.0).coerceAtLeast(0.0)
+                        val nextRate = payload.optDouble("playbackRate", prevPb?.playbackRate ?: 1.0).coerceIn(0.25, 2.0)
+                        val nextVolume = payload.optDouble("volumeLevel", prevPb?.volumeLevel ?: 1.0).coerceIn(0.0, 1.0)
+                        val nextMuted = payload.optBoolean("isMuted", prevPb?.isMuted ?: false)
+                        val nextFullscreen = payload.optBoolean("isFullscreen", prevPb?.isFullscreen ?: false)
+                        val nextOrientation = payload.optString("orientationMode", prevPb?.orientationMode ?: "AUTO")
+
+                        val isVolumeAction = actionType == "VOLUME" ||
+                            (actionType.isBlank() && prevPb != null &&
+                                (kotlin.math.abs(nextVolume - prevPb.volumeLevel) > 0.01 || nextMuted != prevPb.isMuted))
+                        val isFullscreenAction = actionType == "FULLSCREEN" || actionType == "ORIENTATION" ||
+                            (actionType.isBlank() && prevPb != null &&
+                                (nextFullscreen != prevPb.isFullscreen || nextOrientation != prevPb.orientationMode))
+                        val isSeekAction = actionType == "SEEK" ||
+                            (actionType.isBlank() && prevPb != null && kotlin.math.abs(nextPos - prevPb.positionSeconds) >= 1.5)
+                        val isPlayPauseAction = actionType == "PLAY" || actionType == "PAUSE" || actionType == "PLAY_PAUSE" ||
+                            (actionType.isBlank() && (prevPb == null || nextPlaying != prevPb.isPlaying))
+                        val isRateAction = actionType == "RATE" ||
+                            (actionType.isBlank() && prevPb != null && kotlin.math.abs(nextRate - prevPb.playbackRate) > 0.02)
+
+                        when {
+                            !perms.allowParticipantControls -> {
+                                sendPermissionDenied(
+                                    conn = conn,
+                                    room = currentRoom,
+                                    code = "PARTICIPANT_CONTROLS_DISABLED",
+                                    message = "Shared controls are disabled by the host — only the host can control shared navigation and playback."
+                                )
+                                return
+                            }
+                            !perms.allowParticipantPlaybackControl -> {
+                                sendPermissionDenied(
+                                    conn = conn,
+                                    room = currentRoom,
+                                    code = "PLAYBACK_CONTROL_DISABLED",
+                                    message = "Shared playback controls are disabled by the host."
+                                )
+                                return
+                            }
+                            isVolumeAction && !perms.allowParticipantVolumeControl -> {
+                                sendPermissionDenied(
+                                    conn = conn,
+                                    room = currentRoom,
+                                    code = "VOLUME_CONTROL_DISABLED",
+                                    message = "Volume control is disabled by the host."
+                                )
+                                return
+                            }
+                            isFullscreenAction && !perms.allowParticipantFullscreenControl -> {
+                                sendPermissionDenied(
+                                    conn = conn,
+                                    room = currentRoom,
+                                    code = "FULLSCREEN_CONTROL_DISABLED",
+                                    message = "Fullscreen and orientation controls are disabled by the host."
+                                )
+                                return
+                            }
+                            isSeekAction && !perms.allowParticipantVideoSeek -> {
+                                sendPermissionDenied(
+                                    conn = conn,
+                                    room = currentRoom,
+                                    code = "VIDEO_SEEK_DISABLED",
+                                    message = "Video seek controls are disabled by the host."
+                                )
+                                return
+                            }
+                            isPlayPauseAction && !perms.allowParticipantVideoPlayPause -> {
+                                sendPermissionDenied(
+                                    conn = conn,
+                                    room = currentRoom,
+                                    code = "VIDEO_PLAY_PAUSE_DISABLED",
+                                    message = "Video play and pause controls are disabled by the host."
+                                )
+                                return
+                            }
+                            isRateAction && !perms.allowParticipantPlaybackControl -> {
+                                sendPermissionDenied(
+                                    conn = conn,
+                                    room = currentRoom,
+                                    code = "PLAYBACK_CONTROL_DISABLED",
+                                    message = "Shared playback controls are disabled by the host."
+                                )
+                                return
+                            }
+                        }
+                    }
                     if (currentRoom.isSyncActive) {
-                        val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: return
                         val nextSeq = roomCtx.sequenceGenerator.incrementAndGet()
                         val rawUrl = payload.optString("pageUrl", currentRoom.currentSyncedUrl)
                         val safePageUrl = NyxoraConnectSecurity.sanitizeUrlForSync(rawUrl, false, false)
@@ -544,6 +707,11 @@ class NyxoraWebSocketRelayServer {
                             positionSeconds = payload.optDouble("positionSeconds", 0.0).coerceAtLeast(0.0),
                             durationSeconds = payload.optDouble("durationSeconds", 0.0).coerceAtLeast(0.0),
                             playbackRate = payload.optDouble("playbackRate", 1.0).coerceIn(0.25, 2.0),
+                            volumeLevel = payload.optDouble("volumeLevel", currentRoom.playbackState?.volumeLevel ?: 1.0).coerceIn(0.0, 1.0),
+                            isMuted = payload.optBoolean("isMuted", currentRoom.playbackState?.isMuted ?: false),
+                            isFullscreen = payload.optBoolean("isFullscreen", currentRoom.playbackState?.isFullscreen ?: false),
+                            orientationMode = payload.optString("orientationMode", currentRoom.playbackState?.orientationMode ?: "AUTO").ifBlank { "AUTO" },
+                            controlActionType = payload.optString("controlActionType", "").trim().uppercase(),
                             updatedAtMillis = now,
                             updatedByDeviceId = envelope.senderDeviceId,
                             sequenceNumber = nextSeq
@@ -566,6 +734,15 @@ class NyxoraWebSocketRelayServer {
                 }
                 RealtimeEventType.CHAT_MESSAGE -> {
                     val isHost = envelope.senderDeviceId == currentRoom.hostDeviceId
+                    if (!isHost && !currentRoom.permissions.allowParticipantChat) {
+                        sendPermissionDenied(
+                            conn = conn,
+                            room = currentRoom,
+                            code = "CHAT_DISABLED",
+                            message = "Shared chat is disabled by the host."
+                        )
+                        return
+                    }
                     val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: return
                     val rawText = payload.optString("text", "")
                     val sanitizedText = NyxoraConnectSecurity.sanitizeChatMessageForSync(
@@ -617,6 +794,37 @@ class NyxoraWebSocketRelayServer {
                 }
                 else -> Unit
             }
+        }
+    }
+
+    private fun sendPermissionDenied(
+        conn: ClientSessionConnection,
+        room: NyxoraConnectRoomState,
+        code: String,
+        message: String
+    ) {
+        val deniedEnv = createServerSignedEnvelope(
+            room = room,
+            seq = room.lastSequenceNumber,
+            type = RealtimeEventType.PERMISSION_DENIED,
+            payloadJson = JSONObject()
+                .put("code", code)
+                .put("message", message)
+                .put("permissions", room.permissions.toJson())
+                .toString()
+        )
+        conn.sendTextFrame(deniedEnv.toJsonString())
+    }
+
+    private fun sendPermissionOrRateWarning(
+        conn: ClientSessionConnection,
+        roomId: String,
+        code: String,
+        message: String
+    ) {
+        val room = rooms[roomId.trim().uppercase()]?.state
+        if (room != null) {
+            sendPermissionDenied(conn, room, code, message)
         }
     }
 
@@ -863,17 +1071,39 @@ class NyxoraWebSocketRelayServer {
                 } else {
                     var changed = false
                     val cleanedMembers = room.members.mapNotNull { m ->
-                        val silenceMs = now - m.lastHeartbeatMillis
-                        when {
-                            silenceMs > 60_000L && m.deviceId != room.hostDeviceId -> {
-                                changed = true
-                                null
+                        val activeSocket = clients.firstOrNull {
+                            it.authenticated &&
+                                it.roomId.equals(room.roomId, ignoreCase = true) &&
+                                it.deviceId == m.deviceId &&
+                                !it.socket.isClosed
+                        }
+                        if (activeSocket != null) {
+                            val latestSeen = maxOf(m.lastHeartbeatMillis, activeSocket.lastSeenMillis)
+                            val expectedStatus = if (m.isFollowingPaused) {
+                                SyncConnectionStatus.PAUSED_FOLLOWING
+                            } else {
+                                SyncConnectionStatus.SYNCED
                             }
-                            silenceMs > 20_000L && m.status != SyncConnectionStatus.RECONNECTING -> {
+                            if (m.status != expectedStatus || latestSeen > m.lastHeartbeatMillis) {
                                 changed = true
-                                m.copy(status = SyncConnectionStatus.RECONNECTING)
+                                m.copy(status = expectedStatus, lastHeartbeatMillis = latestSeen)
+                            } else {
+                                m
                             }
-                            else -> m
+                        } else {
+                            val silenceMs = now - m.lastHeartbeatMillis
+                            when {
+                                // Only remove a disconnected non-host participant after a 10-minute grace period
+                                silenceMs > PARTICIPANT_RECONNECT_GRACE_MS && m.deviceId != room.hostDeviceId -> {
+                                    changed = true
+                                    null
+                                }
+                                silenceMs > 30_000L && m.status != SyncConnectionStatus.RECONNECTING -> {
+                                    changed = true
+                                    m.copy(status = SyncConnectionStatus.RECONNECTING)
+                                }
+                                else -> m
+                            }
                         }
                     }
                     if (changed) {
@@ -886,6 +1116,10 @@ class NyxoraWebSocketRelayServer {
                 }
             }
         }
+    }
+
+    companion object {
+        const val PARTICIPANT_RECONNECT_GRACE_MS = 10 * 60 * 1000L
     }
 
     private fun broadcastSnapshotToRoom(roomCtx: HostedRoomContext) {

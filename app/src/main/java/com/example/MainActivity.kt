@@ -2,9 +2,12 @@ package com.example
 
 import android.app.PictureInPictureParams
 import android.content.ComponentCallbacks2
+import android.content.Context
 import android.content.Intent
 import android.graphics.Color as AndroidColor
 import android.graphics.drawable.ColorDrawable
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.Build
 import android.os.Bundle
 import android.util.Rational
@@ -33,6 +36,17 @@ class MainActivity : ComponentActivity() {
 
     internal var activeBrowserViewModel: NyxoraBrowserViewModel? = null
     private var pendingIntentUrl by mutableStateOf<String?>(null)
+    private var networkCallbackRegistered = false
+
+    private val connectNetworkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            activeBrowserViewModel?.onNetworkAvailabilityChanged(true)
+        }
+
+        override fun onLost(network: Network) {
+            activeBrowserViewModel?.onNetworkAvailabilityChanged(false)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         if (java.io.File("/dev/dri/renderD128").exists()) {
@@ -79,6 +93,10 @@ class MainActivity : ComponentActivity() {
             val settings by vm.settings.collectAsStateWithLifecycle()
             val isPrivateMode by vm.isPrivateMode.collectAsStateWithLifecycle()
 
+            LaunchedEffect(vm) {
+                vm.onAppForegrounded(applicationContext)
+            }
+
             // Warm up browser engine, HTTP cache, and DNS prefetch AFTER the first frame is drawn
             LaunchedEffect(Unit) {
                 withFrameNanos { /* Wait for first UI frame to complete */ }
@@ -122,10 +140,35 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        activeBrowserViewModel?.onAppForegrounded(this)
+        if (!networkCallbackRegistered) {
+            runCatching {
+                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                cm?.registerDefaultNetworkCallback(connectNetworkCallback)
+                networkCallbackRegistered = true
+            }
+        }
+    }
+
     override fun onResume() {
         super.onResume()
+        activeBrowserViewModel?.onAppForegrounded(this)
         activeBrowserViewModel?.refreshApkInstallPermission(this)
         activeBrowserViewModel?.checkForApkUpdates(force = false)
+    }
+
+    override fun onStop() {
+        if (networkCallbackRegistered) {
+            runCatching {
+                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                cm?.unregisterNetworkCallback(connectNetworkCallback)
+            }
+            networkCallbackRegistered = false
+        }
+        activeBrowserViewModel?.onAppBackgrounded(this)
+        super.onStop()
     }
 
     override fun onNewIntent(intent: Intent) {

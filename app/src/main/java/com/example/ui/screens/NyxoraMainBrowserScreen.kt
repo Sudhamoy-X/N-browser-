@@ -557,7 +557,7 @@ fun NyxoraMainBrowserScreen(
 
     val showTopAddressBar = !activeTab.isHomePage || findInPageVisible
     val activeRoom = connectRoomState
-    val showConnectBanner = activeRoom != null && connectStatus != SyncConnectionStatus.DISCONNECTED
+    val showConnectBanner = activeRoom != null && !connectStatus.isTerminalOrDisconnected
     val isHomeEdgeToEdgeTop = activeTab.isHomePage && !showTopAddressBar && !showConnectBanner
 
     Scaffold(
@@ -625,7 +625,7 @@ fun NyxoraMainBrowserScreen(
                                     isEditingAddress = false
                                     focusManager.clearFocus()
                                     if (submitted.isNotEmpty()) {
-                                        viewModel.navigateInActiveTab(submitted)
+                                        viewModel.navigateInActiveTab(submitted, isUrlInput = true)
                                     }
                                 },
                                 onClearAddress = { addressInput = "" },
@@ -651,7 +651,7 @@ fun NyxoraMainBrowserScreen(
                             )
                         }
 
-                        if (activeRoom != null && connectStatus != SyncConnectionStatus.DISCONNECTED) {
+                        if (activeRoom != null && !connectStatus.isTerminalOrDisconnected) {
                             NyxoraConnectStatusBanner(
                                 roomState = activeRoom,
                                 localDeviceId = viewModel.connectManager.localDeviceId,
@@ -838,7 +838,7 @@ fun NyxoraMainBrowserScreen(
                     onNavigateToUrl = { input ->
                         isEditingAddress = false
                         focusManager.clearFocus()
-                        viewModel.navigateInActiveTab(input)
+                        viewModel.navigateInActiveTab(input, isUrlInput = true)
                     },
                     onAddShortcut = { title, url ->
                         viewModel.addBookmarkOrShortcut(title, url, "Shortcuts", isShortcut = true)
@@ -1241,7 +1241,7 @@ fun NyxoraMainBrowserScreen(
                 isPrivateMode = isPrivateMode,
                 isDesktopMode = activeTab.desktopMode,
                 isCurrentPageBookmarked = isActivePageBookmarked,
-                isRoomSyncActive = connectRoomState != null && connectStatus != SyncConnectionStatus.DISCONNECTED,
+                isRoomSyncActive = connectRoomState != null && !connectStatus.isTerminalOrDisconnected,
                 hasUpdateAvailable = apkUpdateState.hasUpdateIndicator,
                 onDismiss = { showOverflowMenu = false },
                 onOpenBookmarks = { viewModel.setOverlaySheet(OverlaySheet.BOOKMARKS) },
@@ -1511,10 +1511,28 @@ fun NyxoraMainBrowserScreen(
                 onHostPlaybackControl = { shouldPlay, seekDelta ->
                     val currentRoom = viewModel.connectManager.roomState.value
                     val isHost = currentRoom?.hostDeviceId == viewModel.connectManager.localDeviceId
-                    if (currentRoom != null && !isHost && !currentRoom.permissions.allowParticipantControls) {
+                    val isSeekAction = seekDelta != null
+                    val hasActionPermission = isHost || (
+                        currentRoom != null && (
+                            if (isSeekAction) {
+                                currentRoom.permissions.canParticipantSeekVideo
+                            } else {
+                                currentRoom.permissions.canParticipantPlayPauseVideo
+                            }
+                            )
+                        )
+                    if (currentRoom != null && !hasActionPermission) {
+                        val deniedMsg = when {
+                            !currentRoom.permissions.allowParticipantControls ->
+                                "Shared controls are disabled by the host"
+                            isSeekAction ->
+                                "Video seek controls are disabled by the host"
+                            else ->
+                                "Video play/pause controls are disabled by the host"
+                        }
                         viewModel.emitToast(
                             viewModel.connectManager.participantControlsDisabledNotice.value
-                                ?: "Shared controls are disabled by the host"
+                                ?: deniedMsg
                         )
                         return@NyxoraConnectSheet
                     }
@@ -1544,7 +1562,8 @@ fun NyxoraMainBrowserScreen(
                             playbackRate = result.playbackRate,
                             isBeacon = false,
                             isPrivateTab = activeTab.isPrivate,
-                            isPrivateMode = isPrivateMode
+                            isPrivateMode = isPrivateMode,
+                            controlActionType = if (isSeekAction) "SEEK" else "PLAY_PAUSE"
                         )
                         if (!sent) {
                             viewModel.emitToast("Unable to synchronize playback in current room state")
@@ -1569,6 +1588,10 @@ fun NyxoraMainBrowserScreen(
                 onSimulateNetworkDrop = {
                     viewModel.connectManager.simulateNetworkInterruptionForReconnect()
                     viewModel.emitToast("Simulated network drop — reconnecting…")
+                },
+                onReconnectNow = {
+                    viewModel.connectManager.reconnectNowIfNeeded()
+                    viewModel.emitToast("Reconnecting to room…")
                 },
                 onToast = viewModel::emitToast,
                 onDismiss = { viewModel.setOverlaySheet(OverlaySheet.NONE) }

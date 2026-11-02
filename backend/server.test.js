@@ -747,6 +747,251 @@ test('NYXORA Backend: real-time chat, secret redaction, member verification, and
   }
 });
 
+test('NYXORA Backend: Granular Host Permissions (URL input, Seek vs Play/Pause, Volume, Fullscreen, Chat) & Host-Only Config Authority', async () => {
+  const server = createNyxoraConnectServer();
+  const { httpServer } = server;
+  await new Promise((r) => httpServer.listen(0, '127.0.0.1', r));
+  const port = httpServer.address().port;
+
+  const roomId = 'NYX-PERM-2826';
+  const hostDeviceId = 'host-perm-1';
+  const partDeviceId = 'part-perm-2';
+  const roomKey = deriveRoomCodeHandshakeKey(roomId);
+
+  const hostWs = await openRawWebSocket(port, roomId, hostDeviceId);
+  const partWs = await openRawWebSocket(port, roomId, partDeviceId);
+
+  try {
+    // 1. Host creates room
+    hostWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'JOIN_REQUEST',
+      senderDeviceId: hostDeviceId,
+      senderRole: 'HOST',
+      sequenceNumber: 1,
+      signingSecret: roomKey,
+      payloadObj: {
+        deviceName: 'Host Controller',
+        hostRoomSnapshot: {
+          roomId,
+          roomName: 'Granular Permissions Room',
+          accessKey: roomKey,
+          hostDeviceId,
+          authorityEpoch: 1,
+          mode: 'WATCH_TOGETHER',
+          isSyncActive: true,
+          currentSyncedUrl: 'https://example.com/watch'
+        }
+      }
+    }));
+    assert.equal((await hostWs.nextMessage()).type, 'JOIN_ACCEPTED');
+    assert.equal((await hostWs.nextMessage()).type, 'ROOM_STATE_SNAPSHOT');
+
+    // 2. Participant joins room
+    partWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'JOIN_REQUEST',
+      senderDeviceId: partDeviceId,
+      senderRole: 'PARTICIPANT',
+      sequenceNumber: 1,
+      signingSecret: roomKey,
+      payloadObj: { deviceName: 'Participant Viewer' }
+    }));
+    assert.equal((await partWs.nextMessage()).type, 'JOIN_ACCEPTED');
+    assert.equal((await partWs.nextMessage()).type, 'ROOM_STATE_SNAPSHOT');
+    assert.equal((await hostWs.nextMessage()).type, 'ROOM_STATE_SNAPSHOT');
+
+    // 3. Non-host participant cannot update room permissions (HOST_ONLY_ACTION)
+    partWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'UPDATE_ROOM_CONFIG',
+      senderDeviceId: partDeviceId,
+      senderRole: 'PARTICIPANT',
+      sequenceNumber: 2,
+      signingSecret: roomKey,
+      payloadObj: {
+        permissions: { allowParticipantControls: false }
+      }
+    }));
+    const hostOnlyDenied = await partWs.nextMessage();
+    assert.equal(hostOnlyDenied.type, 'PERMISSION_DENIED');
+    assert.equal(JSON.parse(hostOnlyDenied.payloadJson).code, 'HOST_ONLY_ACTION');
+
+    // 4. Host disables ONLY Video Seek while keeping Play/Pause enabled
+    hostWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'UPDATE_ROOM_CONFIG',
+      senderDeviceId: hostDeviceId,
+      senderRole: 'HOST',
+      sequenceNumber: 2,
+      signingSecret: roomKey,
+      payloadObj: {
+        permissions: {
+          allowParticipantControls: true,
+          allowParticipantVideoPlayPause: true,
+          allowParticipantVideoSeek: false,
+          allowParticipantVolumeControl: false,
+          allowParticipantFullscreenControl: false,
+          allowParticipantUrlInput: false,
+          allowParticipantNavigationSync: true,
+          allowParticipantChat: false,
+          allowParticipantPlaybackControl: true
+        }
+      }
+    }));
+    const hostCfgSnap = await hostWs.nextMessage();
+    const partCfgSnap = await partWs.nextMessage();
+    assert.equal(hostCfgSnap.type, 'ROOM_STATE_SNAPSHOT');
+    const updatedPerms = JSON.parse(partCfgSnap.payloadJson).permissions;
+    assert.equal(updatedPerms.allowParticipantControls, true, 'Master switch must remain true when individual permissions are toggled');
+    assert.equal(updatedPerms.allowParticipantVideoPlayPause, true);
+    assert.equal(updatedPerms.allowParticipantVideoSeek, false);
+    assert.equal(updatedPerms.allowParticipantChat, false);
+    assert.equal(updatedPerms.allowParticipantUrlInput, false);
+
+    // 5. Participant can Play/Pause video (controlActionType: PLAY_PAUSE)
+    partWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'PLAYBACK_ACTION',
+      senderDeviceId: partDeviceId,
+      senderRole: 'PARTICIPANT',
+      sequenceNumber: 3,
+      signingSecret: roomKey,
+      payloadObj: {
+        pageUrl: 'https://example.com/watch',
+        isPlaying: true,
+        positionSeconds: 10.0,
+        durationSeconds: 120.0,
+        playbackRate: 1.0,
+        controlActionType: 'PLAY_PAUSE'
+      }
+    }));
+    const hostPlayReceived = await hostWs.nextMessage();
+    const partPlayEcho = await partWs.nextMessage();
+    assert.equal(hostPlayReceived.type, 'PLAYBACK_ACTION');
+    assert.equal(partPlayEcho.type, 'PLAYBACK_ACTION');
+
+    // 6. Participant cannot Seek video (controlActionType: SEEK -> VIDEO_SEEK_DISABLED)
+    partWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'PLAYBACK_ACTION',
+      senderDeviceId: partDeviceId,
+      senderRole: 'PARTICIPANT',
+      sequenceNumber: 4,
+      signingSecret: roomKey,
+      payloadObj: {
+        pageUrl: 'https://example.com/watch',
+        isPlaying: true,
+        positionSeconds: 45.0,
+        durationSeconds: 120.0,
+        playbackRate: 1.0,
+        controlActionType: 'SEEK'
+      }
+    }));
+    const seekDenied = await partWs.nextMessage();
+    assert.equal(seekDenied.type, 'PERMISSION_DENIED');
+    assert.equal(JSON.parse(seekDenied.payloadJson).code, 'VIDEO_SEEK_DISABLED');
+
+    // 7. Participant cannot control Volume or Fullscreen when disabled
+    partWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'PLAYBACK_ACTION',
+      senderDeviceId: partDeviceId,
+      senderRole: 'PARTICIPANT',
+      sequenceNumber: 5,
+      signingSecret: roomKey,
+      payloadObj: {
+        pageUrl: 'https://example.com/watch',
+        isPlaying: true,
+        positionSeconds: 10.0,
+        durationSeconds: 120.0,
+        volumeLevel: 0.5,
+        controlActionType: 'VOLUME'
+      }
+    }));
+    const volDenied = await partWs.nextMessage();
+    assert.equal(volDenied.type, 'PERMISSION_DENIED');
+    assert.equal(JSON.parse(volDenied.payloadJson).code, 'VOLUME_CONTROL_DISABLED');
+
+    partWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'PLAYBACK_ACTION',
+      senderDeviceId: partDeviceId,
+      senderRole: 'PARTICIPANT',
+      sequenceNumber: 6,
+      signingSecret: roomKey,
+      payloadObj: {
+        pageUrl: 'https://example.com/watch',
+        isPlaying: true,
+        positionSeconds: 10.0,
+        durationSeconds: 120.0,
+        isFullscreen: true,
+        controlActionType: 'FULLSCREEN'
+      }
+    }));
+    const fsDenied = await partWs.nextMessage();
+    assert.equal(fsDenied.type, 'PERMISSION_DENIED');
+    assert.equal(JSON.parse(fsDenied.payloadJson).code, 'FULLSCREEN_CONTROL_DISABLED');
+
+    // 8. Participant cannot change URL via address bar input (isUrlInput: true -> URL_INPUT_DISABLED)
+    partWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'NAVIGATE_URL',
+      senderDeviceId: partDeviceId,
+      senderRole: 'PARTICIPANT',
+      sequenceNumber: 7,
+      signingSecret: roomKey,
+      payloadObj: {
+        url: 'https://example.com/new-search',
+        title: 'Search',
+        isUrlInput: true
+      }
+    }));
+    const urlInputDenied = await partWs.nextMessage();
+    assert.equal(urlInputDenied.type, 'PERMISSION_DENIED');
+    assert.equal(JSON.parse(urlInputDenied.payloadJson).code, 'URL_INPUT_DISABLED');
+
+    // 9. Participant cannot send chat while allowParticipantChat is false, but room stays connected
+    partWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'CHAT_MESSAGE',
+      senderDeviceId: partDeviceId,
+      senderRole: 'PARTICIPANT',
+      sequenceNumber: 8,
+      signingSecret: roomKey,
+      payloadObj: {
+        messageId: 'msg-blocked-chat',
+        senderName: 'Participant Viewer',
+        text: 'Can I chat?'
+      }
+    }));
+    const chatDenied = await partWs.nextMessage();
+    assert.equal(chatDenied.type, 'PERMISSION_DENIED');
+    assert.equal(JSON.parse(chatDenied.payloadJson).code, 'CHAT_DISABLED');
+
+    // Verify room is still connected and Host can still send chat
+    hostWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'CHAT_MESSAGE',
+      senderDeviceId: hostDeviceId,
+      senderRole: 'HOST',
+      sequenceNumber: 3,
+      signingSecret: roomKey,
+      payloadObj: {
+        messageId: 'msg-host-announcement',
+        senderName: 'Host Controller',
+        text: 'Host announcement works while participant chat is muted'
+      }
+    }));
+    assert.equal((await hostWs.nextMessage()).type, 'CHAT_MESSAGE');
+    assert.equal((await partWs.nextMessage()).type, 'CHAT_MESSAGE');
+  } finally {
+    partWs.close();
+    hostWs.close();
+    await server.close();
+  }
+});
+
 
 
 

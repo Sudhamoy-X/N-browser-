@@ -1437,6 +1437,196 @@ class NyxoraConnectTest {
             hostManager.leaveOrCloseRoom()
         }
     }
+
+    @Test
+    fun testGranularHostPermissionsAndPersistentChatConnectionStability() {
+        val hostManager = NyxoraConnectSessionManager(
+            scope = testScope,
+            localDeviceId = "dev_host_granular",
+            initialDeviceName = "Host Device",
+            sharedRelayServer = relayServer
+        )
+        val participantManager = NyxoraConnectSessionManager(
+            scope = testScope,
+            localDeviceId = "dev_part_granular",
+            initialDeviceName = "Participant Device",
+            sharedRelayServer = relayServer
+        )
+
+        val hostCommands = CopyOnWriteArrayList<IncomingRemoteSyncCommand>()
+        val partCommands = CopyOnWriteArrayList<IncomingRemoteSyncCommand>()
+        val hostJob = testScope.launch {
+            hostManager.remoteSyncCommands.collect { hostCommands.add(it) }
+        }
+        val partJob = testScope.launch {
+            participantManager.remoteSyncCommands.collect { partCommands.add(it) }
+        }
+
+        try {
+            // 1. Host creates room & Participant joins via Room Code
+            val room = hostManager.createRoom(
+                roomName = "Granular Host Permissions Room",
+                mode = RoomSyncMode.WATCH_TOGETHER
+            )
+            assertTrue(awaitCondition { hostManager.connectionStatus.value == SyncConnectionStatus.SYNCED })
+            assertTrue(participantManager.joinRoom(room.roomId))
+            assertTrue(
+                awaitCondition {
+                    participantManager.connectionStatus.value == SyncConnectionStatus.SYNCED &&
+                        (hostManager.roomState.value?.members?.size ?: 0) == 2
+                }
+            )
+            participantManager.updateVideoCompatibility(VideoCompatibilityState.COMPATIBLE_HTML5)
+            hostManager.updateVideoCompatibility(VideoCompatibilityState.COMPATIBLE_HTML5)
+
+            // 2. Opening and closing chat repeatedly must NEVER disconnect the room or create duplicate members
+            for (cycle in 1..4) {
+                participantManager.setChatOverlayExpanded(true)
+                hostManager.setChatOverlayExpanded(true)
+                participantManager.setChatOverlayExpanded(false)
+                hostManager.setChatOverlayExpanded(false)
+            }
+            assertEquals(SyncConnectionStatus.SYNCED, participantManager.connectionStatus.value)
+            assertEquals(SyncConnectionStatus.SYNCED, hostManager.connectionStatus.value)
+            assertEquals(2, hostManager.roomState.value?.members?.size)
+
+            // 3. Host disables ONLY Video Seek -> Participant can still Play/Pause, but cannot Seek
+            hostManager.setAllowParticipantVideoSeek(false)
+            assertTrue(
+                awaitCondition {
+                    val perms = participantManager.roomState.value?.permissions
+                    perms?.allowParticipantControls == true &&
+                        perms.allowParticipantVideoPlayPause &&
+                        !perms.allowParticipantVideoSeek
+                }
+            )
+
+            // Participant Play/Pause works
+            assertTrue(
+                participantManager.publishPlaybackEvent(
+                    pageUrl = "https://example.com/watch",
+                    isPlaying = true,
+                    positionSeconds = 12.0,
+                    durationSeconds = 120.0,
+                    controlActionType = "PLAY_PAUSE"
+                )
+            )
+            // Participant Seek is blocked
+            assertFalse(
+                participantManager.publishPlaybackEvent(
+                    pageUrl = "https://example.com/watch",
+                    isPlaying = true,
+                    positionSeconds = 45.0,
+                    durationSeconds = 120.0,
+                    controlActionType = "SEEK"
+                )
+            )
+            assertTrue(
+                participantManager.participantControlsDisabledNotice.value?.contains("seek", ignoreCase = true) == true
+            )
+
+            // 4. Host disables ONLY Chat -> Participant cannot send messages, but room remains connected
+            hostManager.setAllowParticipantChat(false)
+            assertTrue(
+                awaitCondition {
+                    val perms = participantManager.roomState.value?.permissions
+                    perms?.allowParticipantControls == true && !perms.allowParticipantChat
+                }
+            )
+            assertFalse(participantManager.sendChatMessage("Blocked participant chat"))
+            assertEquals(SyncConnectionStatus.SYNCED, participantManager.connectionStatus.value)
+
+            // Re-enable Chat -> Participant can send messages immediately
+            hostManager.setAllowParticipantChat(true)
+            assertTrue(
+                awaitCondition {
+                    participantManager.roomState.value?.permissions?.allowParticipantChat == true
+                }
+            )
+            assertTrue(participantManager.sendChatMessage("Chat re-enabled!"))
+            assertTrue(
+                awaitCondition {
+                    hostManager.chatMessages.value.any { it.text == "Chat re-enabled!" }
+                }
+            )
+
+            // 5. Host disables ONLY URL Input -> Participant cannot submit URL/search input, but normal navigation sync still works
+            hostManager.setAllowParticipantUrlInput(false)
+            assertTrue(
+                awaitCondition {
+                    val perms = participantManager.roomState.value?.permissions
+                    perms?.allowParticipantControls == true &&
+                        perms.allowParticipantNavigationSync &&
+                        !perms.allowParticipantUrlInput
+                }
+            )
+            assertFalse(
+                participantManager.publishUrlNavigation(
+                    url = "https://example.com/address-bar-input",
+                    title = "Blocked Address Bar Input",
+                    isPrivateTab = false,
+                    isPrivateMode = false,
+                    isUrlInput = true
+                )
+            )
+            assertTrue(
+                participantManager.publishUrlNavigation(
+                    url = "https://example.com/in-page-link",
+                    title = "Allowed Link Click",
+                    isPrivateTab = false,
+                    isPrivateMode = false,
+                    isUrlInput = false
+                )
+            )
+
+            // 6. Host toggles Volume and Fullscreen permissions independently
+            hostManager.setAllowParticipantVolumeControl(false)
+            hostManager.setAllowParticipantFullscreenControl(false)
+            assertTrue(
+                awaitCondition {
+                    val perms = participantManager.roomState.value?.permissions
+                    perms?.allowParticipantVolumeControl == false &&
+                        perms.allowParticipantFullscreenControl == false
+                }
+            )
+            assertFalse(
+                participantManager.publishVolumeControlEvent(
+                    pageUrl = "https://example.com/watch",
+                    volumeLevel = 0.4,
+                    isMuted = false
+                )
+            )
+            assertFalse(
+                participantManager.publishFullscreenControlEvent(
+                    pageUrl = "https://example.com/watch",
+                    isFullscreen = true,
+                    orientationMode = "LANDSCAPE"
+                )
+            )
+
+            // 7. Session export & foreground/background transition preserves active room connection
+            val exportedSessionJson = participantManager.exportRecoverableSessionJson()
+            assertNotNull(exportedSessionJson)
+            participantManager.onAppBackgrounded()
+            participantManager.onAppForegrounded()
+            assertEquals(SyncConnectionStatus.SYNCED, participantManager.connectionStatus.value)
+
+            // 8. Leaving the room as Host closes the room cleanly for Participant (ROOM_CLOSED)
+            hostManager.leaveOrCloseRoom(notifyServer = true)
+            assertTrue(
+                awaitCondition {
+                    participantManager.sessionLifecycleState.value == SyncConnectionStatus.ROOM_CLOSED &&
+                        participantManager.connectionStatus.value == SyncConnectionStatus.DISCONNECTED &&
+                        !participantManager.isInRoom
+                }
+            )
+        } finally {
+            hostJob.cancel()
+            partJob.cancel()
+            participantManager.leaveOrCloseRoom()
+            hostManager.leaveOrCloseRoom()
+        }
+    }
 }
 
 

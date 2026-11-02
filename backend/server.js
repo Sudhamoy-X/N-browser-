@@ -53,23 +53,49 @@ function normalizeRoomPermissions(rawPerms, fallbackPerms) {
     syncBackForward: true,
     syncTabSelection: false,
     syncNewlyOpenedPages: true,
-    allowParticipantPlaybackControl: true,
+    allowParticipantControls: true,
     allowParticipantNavigationSync: true,
-    allowParticipantControls: true
+    allowParticipantUrlInput: true,
+    allowParticipantVideoPlayPause: true,
+    allowParticipantVideoSeek: true,
+    allowParticipantVolumeControl: true,
+    allowParticipantFullscreenControl: true,
+    allowParticipantChat: true,
+    allowParticipantPlaybackControl: true
   };
   if (!rawPerms || typeof rawPerms !== 'object') {
     return { ...base };
   }
   const merged = { ...base, ...rawPerms };
   const hasExplicitMaster = Object.prototype.hasOwnProperty.call(rawPerms, 'allowParticipantControls');
-  const masterAllowed = hasExplicitMaster ? Boolean(rawPerms.allowParticipantControls) : Boolean(merged.allowParticipantControls !== false);
-  const pbAllowed = hasExplicitMaster && !Object.prototype.hasOwnProperty.call(rawPerms, 'allowParticipantPlaybackControl')
-    ? masterAllowed
-    : (Boolean(merged.allowParticipantPlaybackControl !== false) && (!hasExplicitMaster || masterAllowed));
-  const navAllowed = hasExplicitMaster && !Object.prototype.hasOwnProperty.call(rawPerms, 'allowParticipantNavigationSync')
-    ? masterAllowed
-    : (Boolean(merged.allowParticipantNavigationSync !== false) && (!hasExplicitMaster || masterAllowed));
-  const effectiveControls = masterAllowed && pbAllowed && navAllowed;
+  const masterAllowed = hasExplicitMaster
+    ? Boolean(rawPerms.allowParticipantControls)
+    : Boolean(merged.allowParticipantControls !== false);
+  const pbAllowed = Object.prototype.hasOwnProperty.call(rawPerms, 'allowParticipantPlaybackControl')
+    ? Boolean(rawPerms.allowParticipantPlaybackControl)
+    : Boolean(merged.allowParticipantPlaybackControl !== false);
+  const navAllowed = Object.prototype.hasOwnProperty.call(rawPerms, 'allowParticipantNavigationSync')
+    ? Boolean(rawPerms.allowParticipantNavigationSync)
+    : Boolean(merged.allowParticipantNavigationSync !== false);
+  const urlInputAllowed = Object.prototype.hasOwnProperty.call(rawPerms, 'allowParticipantUrlInput')
+    ? Boolean(rawPerms.allowParticipantUrlInput)
+    : (Object.prototype.hasOwnProperty.call(rawPerms, 'allowParticipantNavigationSync') ? navAllowed : Boolean(merged.allowParticipantUrlInput !== false));
+  const playPauseAllowed = Object.prototype.hasOwnProperty.call(rawPerms, 'allowParticipantVideoPlayPause')
+    ? Boolean(rawPerms.allowParticipantVideoPlayPause)
+    : (Object.prototype.hasOwnProperty.call(rawPerms, 'allowParticipantPlaybackControl') ? pbAllowed : Boolean(merged.allowParticipantVideoPlayPause !== false));
+  const seekAllowed = Object.prototype.hasOwnProperty.call(rawPerms, 'allowParticipantVideoSeek')
+    ? Boolean(rawPerms.allowParticipantVideoSeek)
+    : (Object.prototype.hasOwnProperty.call(rawPerms, 'allowParticipantPlaybackControl') ? pbAllowed : Boolean(merged.allowParticipantVideoSeek !== false));
+  const volumeAllowed = Object.prototype.hasOwnProperty.call(rawPerms, 'allowParticipantVolumeControl')
+    ? Boolean(rawPerms.allowParticipantVolumeControl)
+    : (Object.prototype.hasOwnProperty.call(rawPerms, 'allowParticipantPlaybackControl') ? pbAllowed : Boolean(merged.allowParticipantVolumeControl !== false));
+  const fullscreenAllowed = Object.prototype.hasOwnProperty.call(rawPerms, 'allowParticipantFullscreenControl')
+    ? Boolean(rawPerms.allowParticipantFullscreenControl)
+    : (Object.prototype.hasOwnProperty.call(rawPerms, 'allowParticipantPlaybackControl') ? pbAllowed : Boolean(merged.allowParticipantFullscreenControl !== false));
+  const chatAllowed = Object.prototype.hasOwnProperty.call(rawPerms, 'allowParticipantChat')
+    ? Boolean(rawPerms.allowParticipantChat)
+    : Boolean(merged.allowParticipantChat !== false);
+
   return {
     maxParticipants: Math.min(10, Math.max(2, Number(merged.maxParticipants || 5))),
     isRoomLocked: Boolean(merged.isRoomLocked),
@@ -77,9 +103,15 @@ function normalizeRoomPermissions(rawPerms, fallbackPerms) {
     syncBackForward: merged.syncBackForward !== false,
     syncTabSelection: Boolean(merged.syncTabSelection),
     syncNewlyOpenedPages: merged.syncNewlyOpenedPages !== false,
-    allowParticipantPlaybackControl: pbAllowed,
+    allowParticipantControls: masterAllowed,
     allowParticipantNavigationSync: navAllowed,
-    allowParticipantControls: effectiveControls
+    allowParticipantUrlInput: urlInputAllowed,
+    allowParticipantVideoPlayPause: playPauseAllowed,
+    allowParticipantVideoSeek: seekAllowed,
+    allowParticipantVolumeControl: volumeAllowed,
+    allowParticipantFullscreenControl: fullscreenAllowed,
+    allowParticipantChat: chatAllowed,
+    allowParticipantPlaybackControl: pbAllowed
   };
 }
 
@@ -532,63 +564,67 @@ function createNyxoraConnectServer(options = {}) {
     let roomCtx = rooms.get(normalizedRoomId);
     const now = Date.now();
 
-    // Allow Host to bootstrap/register a room on the relay via a signed JOIN_REQUEST containing hostRoomSnapshot
-    if (!roomCtx && envelope.type === 'JOIN_REQUEST' && envelope.senderRole === 'HOST' && payloadObj.hostRoomSnapshot) {
-      const snap = payloadObj.hostRoomSnapshot;
-      const derivedKey = deriveRoomCodeHandshakeKey(normalizedRoomId);
-      const candidateKey = String(snap.accessKey || '').trim().toUpperCase() || derivedKey;
-      const expectedHmac = computeEventHmac(
-        candidateKey,
-        normalizedRoomId,
-        envelope.eventId,
-        envelope.type,
-        envelope.senderDeviceId,
-        envelope.authorityEpoch || 1,
-        envelope.sequenceNumber || 1,
-        envelope.timestampMillis || now,
-        envelope.payloadJson
-      );
-      const expectedDerivedHmac = derivedKey
-        ? computeEventHmac(
-            derivedKey,
-            normalizedRoomId,
-            envelope.eventId,
-            envelope.type,
-            envelope.senderDeviceId,
-            envelope.authorityEpoch || 1,
-            envelope.sequenceNumber || 1,
-            envelope.timestampMillis || now,
-            envelope.payloadJson
-          )
-        : '';
-      if (candidateKey &&
-          (timingSafeHexEqual(expectedHmac, envelope.hmacSignature) ||
-           (expectedDerivedHmac && timingSafeHexEqual(expectedDerivedHmac, envelope.hmacSignature)))) {
-        roomCtx = {
-          state: {
-            roomId: normalizedRoomId,
-            roomName: String(snap.roomName || 'NYXORA Room').slice(0, 48),
-            accessKey: candidateKey,
-            endpointUrl: String(snap.endpointUrl || ''),
-            hostDeviceId: envelope.senderDeviceId,
-            authorityEpoch: Number(snap.authorityEpoch || 1),
-            mode: snap.mode || 'BROWSE_TOGETHER',
-            isSyncActive: snap.isSyncActive !== false,
-            permissions: normalizeRoomPermissions(snap.permissions),
-            members: Array.isArray(snap.members) ? snap.members : [],
-            currentSyncedUrl: String(snap.currentSyncedUrl || ''),
-            currentSyncedTitle: String(snap.currentSyncedTitle || ''),
-            playbackState: snap.playbackState || null,
-            chatMessages: Array.isArray(snap.chatMessages) ? snap.chatMessages.slice(-100) : [],
-            createdAtMillis: Number(snap.createdAtMillis || now),
-            expiresAtMillis: Number(snap.expiresAtMillis || (now + DEFAULT_ROOM_TTL_MS)),
-            lastSequenceNumber: Number(snap.lastSequenceNumber || 1)
-          },
-          revokedTokenIds: new Set(),
-          consumedSingleUseTokens: new Map(),
-          kickedDeviceIds: new Set()
-        };
-        rooms.set(normalizedRoomId, roomCtx);
+    // Allow Host or a reconnecting authenticated session to bootstrap/recover a room on the relay
+    if (!roomCtx && envelope.type === 'JOIN_REQUEST') {
+      const snap = payloadObj.hostRoomSnapshot || payloadObj.roomRecoverySnapshot;
+      const isHostBootstrap = envelope.senderRole === 'HOST' && Boolean(snap);
+      const isSessionRecovery = Boolean(payloadObj.reconnectingSession) && Boolean(snap);
+      if ((isHostBootstrap || isSessionRecovery) && snap) {
+        const derivedKey = deriveRoomCodeHandshakeKey(normalizedRoomId);
+        const candidateKey = String(snap.accessKey || '').trim().toUpperCase() || derivedKey;
+        const expectedHmac = computeEventHmac(
+          candidateKey,
+          normalizedRoomId,
+          envelope.eventId,
+          envelope.type,
+          envelope.senderDeviceId,
+          envelope.authorityEpoch || 1,
+          envelope.sequenceNumber || 1,
+          envelope.timestampMillis || now,
+          envelope.payloadJson
+        );
+        const expectedDerivedHmac = derivedKey
+          ? computeEventHmac(
+              derivedKey,
+              normalizedRoomId,
+              envelope.eventId,
+              envelope.type,
+              envelope.senderDeviceId,
+              envelope.authorityEpoch || 1,
+              envelope.sequenceNumber || 1,
+              envelope.timestampMillis || now,
+              envelope.payloadJson
+            )
+          : '';
+        if (candidateKey &&
+            (timingSafeHexEqual(expectedHmac, envelope.hmacSignature) ||
+             (expectedDerivedHmac && timingSafeHexEqual(expectedDerivedHmac, envelope.hmacSignature)))) {
+          roomCtx = {
+            state: {
+              roomId: normalizedRoomId,
+              roomName: String(snap.roomName || 'NYXORA Room').slice(0, 48),
+              accessKey: candidateKey,
+              endpointUrl: String(snap.endpointUrl || ''),
+              hostDeviceId: String(snap.hostDeviceId || envelope.senderDeviceId),
+              authorityEpoch: Number(snap.authorityEpoch || 1),
+              mode: snap.mode || 'BROWSE_TOGETHER',
+              isSyncActive: snap.isSyncActive !== false,
+              permissions: normalizeRoomPermissions(snap.permissions),
+              members: Array.isArray(snap.members) ? snap.members : [],
+              currentSyncedUrl: String(snap.currentSyncedUrl || ''),
+              currentSyncedTitle: String(snap.currentSyncedTitle || ''),
+              playbackState: snap.playbackState || null,
+              chatMessages: Array.isArray(snap.chatMessages) ? snap.chatMessages.slice(-100) : [],
+              createdAtMillis: Number(snap.createdAtMillis || now),
+              expiresAtMillis: Math.max(Number(snap.expiresAtMillis || (now + DEFAULT_ROOM_TTL_MS)), now + 30 * 60 * 1000),
+              lastSequenceNumber: Number(snap.lastSequenceNumber || 1)
+            },
+            revokedTokenIds: new Set(),
+            consumedSingleUseTokens: new Map(),
+            kickedDeviceIds: new Set()
+          };
+          rooms.set(normalizedRoomId, roomCtx);
+        }
       }
     }
 
@@ -722,7 +758,8 @@ function createNyxoraConnectServer(options = {}) {
         return;
       }
 
-      const isAlreadyMember = roomCtx.state.members.some((m) => m.deviceId === envelope.senderDeviceId);
+      const existingMemberEntry = roomCtx.state.members.find((m) => m.deviceId === envelope.senderDeviceId);
+      const isAlreadyMember = Boolean(existingMemberEntry);
       const isHost = roomCtx.state.hostDeviceId === envelope.senderDeviceId;
       if (!isAlreadyMember && !isHost) {
         if (roomCtx.state.permissions.isRoomLocked) {
@@ -740,26 +777,29 @@ function createNyxoraConnectServer(options = {}) {
         if (existingClient !== client && existingClient.roomId === normalizedRoomId && existingClient.deviceId === envelope.senderDeviceId) {
           existingClient.roomId = null;
           existingClient.deviceId = null;
+          existingClient.authenticated = false;
           existingClient.close();
         }
       }
 
       client.roomId = normalizedRoomId;
       client.deviceId = envelope.senderDeviceId;
+      client.authenticated = true;
 
-      const deviceName = String(payloadObj.deviceName || 'Android Device').trim().slice(0, 36) || 'Android Device';
+      const deviceName = String(payloadObj.deviceName || (existingMemberEntry && existingMemberEntry.deviceName) || 'Android Device').trim().slice(0, 36) || 'Android Device';
       const memberEntry = {
         deviceId: envelope.senderDeviceId,
         deviceName,
         role: isHost ? 'HOST' : 'PARTICIPANT',
-        status: 'SYNCED',
-        joinedAtMillis: now,
+        status: existingMemberEntry && existingMemberEntry.isFollowingPaused ? 'PAUSED_FOLLOWING' : 'SYNCED',
+        joinedAtMillis: existingMemberEntry ? existingMemberEntry.joinedAtMillis : now,
         lastHeartbeatMillis: now,
-        isFollowingPaused: false
+        isFollowingPaused: Boolean(existingMemberEntry && existingMemberEntry.isFollowingPaused)
       };
 
       const filteredMembers = roomCtx.state.members.filter((m) => m.deviceId !== envelope.senderDeviceId);
       roomCtx.state.members = [...filteredMembers, memberEntry];
+      roomCtx.state.expiresAtMillis = Math.max(roomCtx.state.expiresAtMillis, now + DEFAULT_ROOM_TTL_MS);
 
       const joinAcceptedFrame = createServerSignedEnvelope(
         roomCtx.state,
@@ -804,12 +844,48 @@ function createNyxoraConnectServer(options = {}) {
       return;
     }
 
-    // Strictly verify that the socket and senderDeviceId belong to an authenticated member of this room
-    const authenticatedMember = (roomCtx.state.members || []).find((m) => m.deviceId === envelope.senderDeviceId);
+    let authenticatedMember = (roomCtx.state.members || []).find((m) => m.deviceId === envelope.senderDeviceId);
+
+    // If this socket was already authenticated for this member, or the member is already registered
+    // in roomCtx.state.members and re-established a socket with a valid cryptographic signature,
+    // heal the socket/member state instead of disconnecting.
+    if (authenticatedMember && (client.roomId !== normalizedRoomId || client.deviceId !== envelope.senderDeviceId)) {
+      for (const existingClient of clients) {
+        if (existingClient !== client && existingClient.roomId === normalizedRoomId && existingClient.deviceId === envelope.senderDeviceId) {
+          existingClient.roomId = null;
+          existingClient.deviceId = null;
+          existingClient.authenticated = false;
+          existingClient.close();
+        }
+      }
+      client.roomId = normalizedRoomId;
+      client.deviceId = envelope.senderDeviceId;
+      client.authenticated = true;
+    } else if (!authenticatedMember && client.authenticated && client.roomId === normalizedRoomId && client.deviceId === envelope.senderDeviceId) {
+      const isHost = roomCtx.state.hostDeviceId === envelope.senderDeviceId;
+      authenticatedMember = {
+        deviceId: envelope.senderDeviceId,
+        deviceName: String(payloadObj.senderName || payloadObj.deviceName || (isHost ? 'Host' : 'Participant')).trim().slice(0, 36) || 'Participant',
+        role: isHost ? 'HOST' : 'PARTICIPANT',
+        status: 'SYNCED',
+        joinedAtMillis: now,
+        lastHeartbeatMillis: now,
+        isFollowingPaused: false
+      };
+      roomCtx.state.members = [...(roomCtx.state.members || []), authenticatedMember];
+    }
+
     if (client.roomId !== normalizedRoomId || client.deviceId !== envelope.senderDeviceId || !authenticatedMember) {
       sendRejectFrame(client, normalizedRoomId, 'NOT_ROOM_MEMBER', 'Only authenticated room members can send chat or use shared controls');
       return;
     }
+
+    // Refresh member heartbeat on every valid authenticated frame
+    roomCtx.state.members = (roomCtx.state.members || []).map((m) =>
+      m.deviceId === envelope.senderDeviceId
+        ? { ...m, lastHeartbeatMillis: now, status: m.isFollowingPaused ? 'PAUSED_FOLLOWING' : 'SYNCED' }
+        : m
+    );
 
     const isHostSender = roomCtx.state.hostDeviceId === envelope.senderDeviceId;
     const perms = normalizeRoomPermissions(roomCtx.state.permissions);
@@ -817,10 +893,11 @@ function createNyxoraConnectServer(options = {}) {
 
     switch (envelope.type) {
       case 'HEARTBEAT_PING': {
-        roomCtx.state.members = roomCtx.state.members.map((m) =>
-          m.deviceId === envelope.senderDeviceId ? { ...m, lastHeartbeatMillis: now, status: m.isFollowingPaused ? 'PAUSED_FOLLOWING' : 'SYNCED' } : m
-        );
-        const pongFrame = createServerSignedEnvelope(roomCtx.state, 'HEARTBEAT_PONG', { serverTimeMillis: now });
+        const clientTimeMillis = Number(payloadObj.clientTimeMillis || now);
+        const pongFrame = createServerSignedEnvelope(roomCtx.state, 'HEARTBEAT_PONG', {
+          serverTimeMillis: now,
+          clientTimeMillis
+        });
         client.sendText(pongFrame);
         break;
       }
@@ -833,19 +910,41 @@ function createNyxoraConnectServer(options = {}) {
           const closedFrame = createServerSignedEnvelope(roomCtx.state, 'ROOM_CLOSED', { reason: 'Host closed the room' });
           broadcastToRoom(normalizedRoomId, closedFrame, null);
           rooms.delete(normalizedRoomId);
+        } else {
+          const deniedFrame = createServerSignedEnvelope(roomCtx.state, 'PERMISSION_DENIED', {
+            code: 'HOST_ONLY_ACTION',
+            message: 'Only the host can close the room.',
+            permissions: perms
+          });
+          client.sendText(deniedFrame);
         }
         break;
       }
       case 'NAVIGATE_URL':
       case 'SELECT_TAB_NAVIGATION':
       case 'NEW_PAGE_OPENED': {
-        if (!isHostSender && (!perms.allowParticipantControls || !perms.allowParticipantNavigationSync)) {
-          const deniedFrame = createServerSignedEnvelope(roomCtx.state, 'PERMISSION_DENIED', {
-            code: 'PARTICIPANT_CONTROLS_DISABLED',
-            message: 'Shared controls are disabled by the host — only the host can control shared navigation and playback.'
-          });
-          client.sendText(deniedFrame);
-          break;
+        if (!isHostSender) {
+          const isUrlInput = Boolean(payloadObj.isUrlInput);
+          const allowed = perms.allowParticipantControls &&
+            perms.allowParticipantNavigationSync &&
+            (!isUrlInput || perms.allowParticipantUrlInput);
+          if (!allowed) {
+            const denyCode = !perms.allowParticipantControls
+              ? 'PARTICIPANT_CONTROLS_DISABLED'
+              : (isUrlInput && !perms.allowParticipantUrlInput ? 'URL_INPUT_DISABLED' : 'NAVIGATION_SYNC_DISABLED');
+            const denyMsg = !perms.allowParticipantControls
+              ? 'Shared controls are disabled by the host — only the host can control shared navigation and playback.'
+              : (isUrlInput && !perms.allowParticipantUrlInput
+                  ? 'URL and search input sync is restricted by the host.'
+                  : 'Browser navigation sync is restricted by the host.');
+            const deniedFrame = createServerSignedEnvelope(roomCtx.state, 'PERMISSION_DENIED', {
+              code: denyCode,
+              message: denyMsg,
+              permissions: perms
+            });
+            client.sendText(deniedFrame);
+            break;
+          }
         }
         if (!roomCtx.state.isSyncActive) break;
         const safeUrl = sanitizeUrlForSync(payloadObj.url);
@@ -864,9 +963,14 @@ function createNyxoraConnectServer(options = {}) {
       case 'NAVIGATE_BACK':
       case 'NAVIGATE_FORWARD': {
         if (!isHostSender && (!perms.allowParticipantControls || !perms.allowParticipantNavigationSync)) {
+          const denyCode = !perms.allowParticipantControls ? 'PARTICIPANT_CONTROLS_DISABLED' : 'NAVIGATION_SYNC_DISABLED';
+          const denyMsg = !perms.allowParticipantControls
+            ? 'Shared controls are disabled by the host — only the host can control shared navigation and playback.'
+            : 'Browser navigation sync is restricted by the host.';
           const deniedFrame = createServerSignedEnvelope(roomCtx.state, 'PERMISSION_DENIED', {
-            code: 'PARTICIPANT_CONTROLS_DISABLED',
-            message: 'Shared controls are disabled by the host — only the host can control shared navigation and playback.'
+            code: denyCode,
+            message: denyMsg,
+            permissions: perms
           });
           client.sendText(deniedFrame);
           break;
@@ -882,25 +986,75 @@ function createNyxoraConnectServer(options = {}) {
       }
       case 'PLAYBACK_ACTION':
       case 'PLAYBACK_BEACON': {
-        if (!isHostSender && (!perms.allowParticipantControls || !perms.allowParticipantPlaybackControl || envelope.type === 'PLAYBACK_BEACON')) {
-          if (envelope.type === 'PLAYBACK_ACTION') {
+        if (!isHostSender) {
+          if (envelope.type === 'PLAYBACK_BEACON') break;
+          const actionKind = String(payloadObj.controlActionType || payloadObj.actionType || 'PLAY_PAUSE').toUpperCase();
+          const specificAllowed = (() => {
+            if (!perms.allowParticipantControls) return false;
+            switch (actionKind) {
+              case 'PLAY':
+              case 'PAUSE':
+              case 'PLAY_PAUSE':
+                return perms.allowParticipantPlaybackControl && perms.allowParticipantVideoPlayPause;
+              case 'SEEK':
+                return perms.allowParticipantPlaybackControl && perms.allowParticipantVideoSeek;
+              case 'VOLUME':
+              case 'MUTE':
+                return perms.allowParticipantPlaybackControl && perms.allowParticipantVolumeControl;
+              case 'FULLSCREEN':
+              case 'ORIENTATION':
+                return perms.allowParticipantPlaybackControl && perms.allowParticipantFullscreenControl;
+              default:
+                return perms.allowParticipantPlaybackControl;
+            }
+          })();
+          if (!specificAllowed) {
+            const denyCode = !perms.allowParticipantControls
+              ? 'PARTICIPANT_CONTROLS_DISABLED'
+              : (!perms.allowParticipantPlaybackControl
+                  ? 'PLAYBACK_CONTROL_DISABLED'
+                  : (actionKind === 'SEEK'
+                      ? 'VIDEO_SEEK_DISABLED'
+                      : (actionKind === 'VOLUME' || actionKind === 'MUTE'
+                          ? 'VOLUME_CONTROL_DISABLED'
+                          : (actionKind === 'FULLSCREEN' || actionKind === 'ORIENTATION'
+                              ? 'FULLSCREEN_CONTROL_DISABLED'
+                              : 'VIDEO_PLAY_PAUSE_DISABLED'))));
+            const denyMsg = !perms.allowParticipantControls
+              ? 'Shared controls are disabled by the host — only the host can control shared navigation and playback.'
+              : (actionKind === 'SEEK' && !perms.allowParticipantVideoSeek
+                  ? 'Video seeking is restricted by the host.'
+                  : ((actionKind === 'VOLUME' || actionKind === 'MUTE') && !perms.allowParticipantVolumeControl
+                      ? 'Shared volume control is restricted by the host.'
+                      : ((actionKind === 'FULLSCREEN' || actionKind === 'ORIENTATION') && !perms.allowParticipantFullscreenControl
+                          ? 'Fullscreen and orientation sync is restricted by the host.'
+                          : (!perms.allowParticipantVideoPlayPause
+                              ? 'Video play and pause controls are restricted by the host.'
+                              : 'Shared playback controls are restricted by the host.'))));
             const deniedFrame = createServerSignedEnvelope(roomCtx.state, 'PERMISSION_DENIED', {
-              code: 'PARTICIPANT_CONTROLS_DISABLED',
-              message: 'Shared controls are disabled by the host — only the host can control shared navigation and playback.'
+              code: denyCode,
+              message: denyMsg,
+              permissions: perms
             });
             client.sendText(deniedFrame);
+            break;
           }
-          break;
         }
         if (!roomCtx.state.isSyncActive) break;
         const safePageUrl = sanitizeUrlForSync(payloadObj.pageUrl || roomCtx.state.currentSyncedUrl);
         if (!safePageUrl) break;
+        const existingPb = roomCtx.state.playbackState || {};
         const pbState = {
           pageUrl: safePageUrl,
           isPlaying: Boolean(payloadObj.isPlaying),
           positionSeconds: Math.max(0, Number(payloadObj.positionSeconds || 0)),
           durationSeconds: Math.max(0, Number(payloadObj.durationSeconds || 0)),
           playbackRate: Math.min(2.0, Math.max(0.25, Number(payloadObj.playbackRate || 1.0))),
+          volumeLevel: Math.min(1.0, Math.max(0.0, Number(payloadObj.volumeLevel !== undefined ? payloadObj.volumeLevel : (existingPb.volumeLevel !== undefined ? existingPb.volumeLevel : 1.0)))),
+          isMuted: Boolean(payloadObj.isMuted !== undefined ? payloadObj.isMuted : existingPb.isMuted),
+          isFullscreen: Boolean(payloadObj.isFullscreen !== undefined ? payloadObj.isFullscreen : existingPb.isFullscreen),
+          orientationMode: String(payloadObj.orientationMode || existingPb.orientationMode || 'AUTO'),
+          controlActionType: String(payloadObj.controlActionType || payloadObj.actionType || 'PLAY_PAUSE'),
           updatedAtMillis: now,
           updatedByDeviceId: envelope.senderDeviceId,
           sequenceNumber: (roomCtx.state.lastSequenceNumber || 1) + 1
@@ -912,6 +1066,15 @@ function createNyxoraConnectServer(options = {}) {
         break;
       }
       case 'CHAT_MESSAGE': {
+        if (!isHostSender && !perms.allowParticipantChat) {
+          const deniedFrame = createServerSignedEnvelope(roomCtx.state, 'PERMISSION_DENIED', {
+            code: 'CHAT_DISABLED',
+            message: 'Shared chat is currently disabled for participants by the host.',
+            permissions: perms
+          });
+          client.sendText(deniedFrame);
+          break;
+        }
         const sanitizedText = sanitizeChatMessageForSync(payloadObj.text, roomCtx.state.accessKey);
         if (!sanitizedText) break;
         const messageId = String(payloadObj.messageId || '').trim().slice(0, 64) || crypto.randomUUID();
@@ -932,7 +1095,15 @@ function createNyxoraConnectServer(options = {}) {
         break;
       }
       case 'UPDATE_ROOM_CONFIG': {
-        if (!isHostSender) break;
+        if (!isHostSender) {
+          const deniedFrame = createServerSignedEnvelope(roomCtx.state, 'PERMISSION_DENIED', {
+            code: 'HOST_ONLY_ACTION',
+            message: 'Only the room host can update room permissions.',
+            permissions: perms
+          });
+          client.sendText(deniedFrame);
+          break;
+        }
         if (payloadObj.roomName) roomCtx.state.roomName = String(payloadObj.roomName).slice(0, 48);
         if (payloadObj.mode) roomCtx.state.mode = payloadObj.mode;
         if (typeof payloadObj.isSyncActive === 'boolean') roomCtx.state.isSyncActive = payloadObj.isSyncActive;
@@ -940,6 +1111,55 @@ function createNyxoraConnectServer(options = {}) {
           roomCtx.state.permissions = normalizeRoomPermissions(payloadObj.permissions, roomCtx.state.permissions);
         }
         broadcastRoomSnapshot(roomCtx);
+        break;
+      }
+      case 'REMOVE_PARTICIPANT': {
+        if (!isHostSender) {
+          const deniedFrame = createServerSignedEnvelope(roomCtx.state, 'PERMISSION_DENIED', {
+            code: 'HOST_ONLY_ACTION',
+            message: 'Only the room host can remove participants.',
+            permissions: perms
+          });
+          client.sendText(deniedFrame);
+          break;
+        }
+        const targetId = String(payloadObj.targetDeviceId || '').trim();
+        if (targetId && targetId !== roomCtx.state.hostDeviceId) {
+          roomCtx.kickedDeviceIds.add(targetId);
+          roomCtx.state.members = (roomCtx.state.members || []).filter((m) => m.deviceId !== targetId);
+          for (const targetClient of clients) {
+            if (targetClient.roomId === normalizedRoomId && targetClient.deviceId === targetId) {
+              sendRejectFrame(targetClient, normalizedRoomId, 'PARTICIPANT_REMOVED', 'You were removed from the room by the host');
+              targetClient.roomId = null;
+              targetClient.deviceId = null;
+              targetClient.authenticated = false;
+              targetClient.close();
+            }
+          }
+          broadcastRoomSnapshot(roomCtx);
+        }
+        break;
+      }
+      case 'TRANSFER_HOST': {
+        if (!isHostSender) {
+          const deniedFrame = createServerSignedEnvelope(roomCtx.state, 'PERMISSION_DENIED', {
+            code: 'HOST_ONLY_ACTION',
+            message: 'Only the room host can transfer host permissions.',
+            permissions: perms
+          });
+          client.sendText(deniedFrame);
+          break;
+        }
+        const targetId = String(payloadObj.targetDeviceId || '').trim();
+        if (targetId && (roomCtx.state.members || []).some((m) => m.deviceId === targetId)) {
+          roomCtx.state.hostDeviceId = targetId;
+          roomCtx.state.authorityEpoch = (roomCtx.state.authorityEpoch || 1) + 1;
+          roomCtx.state.members = (roomCtx.state.members || []).map((m) => ({
+            ...m,
+            role: m.deviceId === targetId ? 'HOST' : 'PARTICIPANT'
+          }));
+          broadcastRoomSnapshot(roomCtx);
+        }
         break;
       }
       case 'PARTICIPANT_FOLLOW_STATE': {
@@ -1105,6 +1325,7 @@ function createNyxoraConnectServer(options = {}) {
       socket,
       roomId: null,
       deviceId: null,
+      authenticated: false,
       sendText(text) {
         if (socket.destroyed) return;
         const frame = encodeWebSocketFrame(0x1, Buffer.from(text, 'utf8'));
@@ -1137,8 +1358,19 @@ function createNyxoraConnectServer(options = {}) {
         } else if (frame.opcode === 0x8) {
           handleClientLeave(client);
           client.close();
-        } else if (frame.opcode === 0x9) {
-          if (!socket.destroyed) {
+        } else if (frame.opcode === 0x9 || frame.opcode === 0xA) {
+          if (client.roomId && client.deviceId) {
+            const roomCtx = rooms.get(client.roomId);
+            if (roomCtx && Array.isArray(roomCtx.state.members)) {
+              const now = Date.now();
+              roomCtx.state.members = roomCtx.state.members.map((m) =>
+                m.deviceId === client.deviceId
+                  ? { ...m, lastHeartbeatMillis: now, status: m.isFollowingPaused ? 'PAUSED_FOLLOWING' : 'SYNCED' }
+                  : m
+              );
+            }
+          }
+          if (frame.opcode === 0x9 && !socket.destroyed) {
             socket.write(encodeWebSocketFrame(0xA, frame.payload));
           }
         }
@@ -1191,6 +1423,7 @@ module.exports = {
   computeInviteTokenHmac,
   computeEventHmac,
   parseInviteToken,
+  normalizeRoomPermissions,
   redactSecretsForLog,
   encodeWebSocketFrame,
   decodeWebSocketFrames

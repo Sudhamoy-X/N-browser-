@@ -60,7 +60,9 @@ object NyxoraConnectNotificationHelper {
             SyncConnectionStatus.SYNCHRONIZING -> "Synchronizing room ${roomState.roomId}…"
             SyncConnectionStatus.RECONNECTING -> "Reconnecting to ${roomState.roomId}…"
             SyncConnectionStatus.PAUSED_FOLLOWING -> "Sync paused • ${roomState.roomId}"
-            SyncConnectionStatus.DISCONNECTED -> {
+            SyncConnectionStatus.DISCONNECTED,
+            SyncConnectionStatus.ROOM_CLOSED,
+            SyncConnectionStatus.AUTHENTICATION_FAILED -> {
                 notificationManager.cancel(NOTIFICATION_ID)
                 return
             }

@@ -26,10 +26,15 @@ enum class SyncConnectionStatus(val label: String) {
     SYNCHRONIZING("Connected"),
     SYNCED("Connected"),
     RECONNECTING("Reconnecting"),
-    PAUSED_FOLLOWING("Paused");
+    PAUSED_FOLLOWING("Paused"),
+    ROOM_CLOSED("Room Closed"),
+    AUTHENTICATION_FAILED("Authentication Failed");
 
     val isConnectedOrSynced: Boolean
         get() = this == CONNECTED || this == SYNCED || this == SYNCHRONIZING
+
+    val isTerminalOrDisconnected: Boolean
+        get() = this == DISCONNECTED || this == ROOM_CLOSED || this == AUTHENTICATION_FAILED
 }
 
 enum class VideoCompatibilityState(val label: String, val supportsDirectSync: Boolean) {
@@ -55,14 +60,40 @@ data class RoomPermissionsConfig(
     val syncNewlyOpenedPages: Boolean = true,
     val allowParticipantPlaybackControl: Boolean = true,
     val allowParticipantNavigationSync: Boolean = true,
-    val allowParticipantControls: Boolean = allowParticipantPlaybackControl && allowParticipantNavigationSync
+    val allowParticipantUrlInput: Boolean = true,
+    val allowParticipantVideoPlayPause: Boolean = true,
+    val allowParticipantVideoSeek: Boolean = true,
+    val allowParticipantVolumeControl: Boolean = true,
+    val allowParticipantFullscreenControl: Boolean = true,
+    val allowParticipantChat: Boolean = true,
+    val allowParticipantControls: Boolean = true
 ) {
+    val canParticipantNavigateBrowser: Boolean
+        get() = allowParticipantControls && allowParticipantNavigationSync
+
+    val canParticipantInputUrl: Boolean
+        get() = allowParticipantControls && allowParticipantNavigationSync && allowParticipantUrlInput
+
+    val canParticipantPlayPauseVideo: Boolean
+        get() = allowParticipantControls && allowParticipantPlaybackControl && allowParticipantVideoPlayPause
+
+    val canParticipantSeekVideo: Boolean
+        get() = allowParticipantControls && allowParticipantPlaybackControl && allowParticipantVideoSeek
+
+    val canParticipantControlVolume: Boolean
+        get() = allowParticipantControls && allowParticipantPlaybackControl && allowParticipantVolumeControl
+
+    val canParticipantControlFullscreen: Boolean
+        get() = allowParticipantControls && allowParticipantPlaybackControl && allowParticipantFullscreenControl
+
+    val canParticipantControlOtherPlayback: Boolean
+        get() = allowParticipantControls && allowParticipantPlaybackControl
+
+    val canParticipantSendChat: Boolean
+        get() = allowParticipantChat
+
     fun withParticipantControls(allowed: Boolean): RoomPermissionsConfig {
-        return copy(
-            allowParticipantControls = allowed,
-            allowParticipantPlaybackControl = allowed,
-            allowParticipantNavigationSync = allowed
-        )
+        return copy(allowParticipantControls = allowed)
     }
 
     fun toJson(): JSONObject = JSONObject().apply {
@@ -72,27 +103,29 @@ data class RoomPermissionsConfig(
         put("syncBackForward", syncBackForward)
         put("syncTabSelection", syncTabSelection)
         put("syncNewlyOpenedPages", syncNewlyOpenedPages)
-        put("allowParticipantPlaybackControl", allowParticipantPlaybackControl && allowParticipantControls)
-        put("allowParticipantNavigationSync", allowParticipantNavigationSync && allowParticipantControls)
-        put("allowParticipantControls", allowParticipantControls && allowParticipantPlaybackControl && allowParticipantNavigationSync)
+        put("allowParticipantPlaybackControl", allowParticipantPlaybackControl)
+        put("allowParticipantNavigationSync", allowParticipantNavigationSync)
+        put("allowParticipantUrlInput", allowParticipantUrlInput)
+        put("allowParticipantVideoPlayPause", allowParticipantVideoPlayPause)
+        put("allowParticipantVideoSeek", allowParticipantVideoSeek)
+        put("allowParticipantVolumeControl", allowParticipantVolumeControl)
+        put("allowParticipantFullscreenControl", allowParticipantFullscreenControl)
+        put("allowParticipantChat", allowParticipantChat)
+        put("allowParticipantControls", allowParticipantControls)
     }
 
     companion object {
         fun fromJson(obj: JSONObject?): RoomPermissionsConfig {
             if (obj == null) return RoomPermissionsConfig()
-            val hasMasterKey = obj.has("allowParticipantControls")
             val masterAllowed = obj.optBoolean("allowParticipantControls", true)
-            val pbAllowed = if (hasMasterKey && !obj.has("allowParticipantPlaybackControl")) {
-                masterAllowed
-            } else {
-                obj.optBoolean("allowParticipantPlaybackControl", masterAllowed) && (!hasMasterKey || masterAllowed)
-            }
-            val navAllowed = if (hasMasterKey && !obj.has("allowParticipantNavigationSync")) {
-                masterAllowed
-            } else {
-                obj.optBoolean("allowParticipantNavigationSync", masterAllowed) && (!hasMasterKey || masterAllowed)
-            }
-            val effectiveControls = masterAllowed && pbAllowed && navAllowed
+            val pbAllowed = obj.optBoolean("allowParticipantPlaybackControl", true)
+            val navAllowed = obj.optBoolean("allowParticipantNavigationSync", true)
+            val urlInputAllowed = obj.optBoolean("allowParticipantUrlInput", true)
+            val playPauseAllowed = obj.optBoolean("allowParticipantVideoPlayPause", true)
+            val seekAllowed = obj.optBoolean("allowParticipantVideoSeek", true)
+            val volumeAllowed = obj.optBoolean("allowParticipantVolumeControl", true)
+            val fullscreenAllowed = obj.optBoolean("allowParticipantFullscreenControl", true)
+            val chatAllowed = obj.optBoolean("allowParticipantChat", true)
             return RoomPermissionsConfig(
                 maxParticipants = obj.optInt("maxParticipants", 5).coerceIn(2, 10),
                 isRoomLocked = obj.optBoolean("isRoomLocked", false),
@@ -102,7 +135,13 @@ data class RoomPermissionsConfig(
                 syncNewlyOpenedPages = obj.optBoolean("syncNewlyOpenedPages", true),
                 allowParticipantPlaybackControl = pbAllowed,
                 allowParticipantNavigationSync = navAllowed,
-                allowParticipantControls = effectiveControls
+                allowParticipantUrlInput = urlInputAllowed,
+                allowParticipantVideoPlayPause = playPauseAllowed,
+                allowParticipantVideoSeek = seekAllowed,
+                allowParticipantVolumeControl = volumeAllowed,
+                allowParticipantFullscreenControl = fullscreenAllowed,
+                allowParticipantChat = chatAllowed,
+                allowParticipantControls = masterAllowed
             )
         }
     }
@@ -192,6 +231,11 @@ data class WatchTogetherPlaybackState(
     val positionSeconds: Double,
     val durationSeconds: Double,
     val playbackRate: Double = 1.0,
+    val volumeLevel: Double = 1.0,
+    val isMuted: Boolean = false,
+    val isFullscreen: Boolean = false,
+    val orientationMode: String = "AUTO",
+    val controlActionType: String = "",
     val updatedAtMillis: Long,
     val updatedByDeviceId: String,
     val sequenceNumber: Long
@@ -202,6 +246,13 @@ data class WatchTogetherPlaybackState(
         put("positionSeconds", positionSeconds)
         put("durationSeconds", durationSeconds)
         put("playbackRate", playbackRate)
+        put("volumeLevel", volumeLevel.coerceIn(0.0, 1.0))
+        put("isMuted", isMuted)
+        put("isFullscreen", isFullscreen)
+        put("orientationMode", orientationMode)
+        if (controlActionType.isNotBlank()) {
+            put("controlActionType", controlActionType)
+        }
         put("updatedAtMillis", updatedAtMillis)
         put("updatedByDeviceId", updatedByDeviceId)
         put("sequenceNumber", sequenceNumber)
@@ -218,6 +269,11 @@ data class WatchTogetherPlaybackState(
                 positionSeconds = obj.optDouble("positionSeconds", 0.0).let { if (it.isNaN() || it < 0.0) 0.0 else it },
                 durationSeconds = obj.optDouble("durationSeconds", 0.0).let { if (it.isNaN() || it < 0.0) 0.0 else it },
                 playbackRate = obj.optDouble("playbackRate", 1.0).let { if (it.isNaN()) 1.0 else it.coerceIn(0.25, 2.0) },
+                volumeLevel = obj.optDouble("volumeLevel", 1.0).let { if (it.isNaN()) 1.0 else it.coerceIn(0.0, 1.0) },
+                isMuted = obj.optBoolean("isMuted", false),
+                isFullscreen = obj.optBoolean("isFullscreen", false),
+                orientationMode = obj.optString("orientationMode", "AUTO").ifBlank { "AUTO" },
+                controlActionType = obj.optString("controlActionType", "").trim().uppercase(),
                 updatedAtMillis = obj.optLong("updatedAtMillis", 0L),
                 updatedByDeviceId = obj.optString("updatedByDeviceId", ""),
                 sequenceNumber = obj.optLong("sequenceNumber", 0L)

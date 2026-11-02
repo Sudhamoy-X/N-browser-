@@ -98,9 +98,12 @@ fun NyxoraFloatingChatOverlay(
     onSendMessage: (String) -> Boolean,
     modifier: Modifier = Modifier
 ) {
-    if (roomState == null || connectionStatus == SyncConnectionStatus.DISCONNECTED) {
+    if (roomState == null || connectionStatus.isTerminalOrDisconnected) {
         return
     }
+
+    val isHost = roomState.hostDeviceId == localDeviceId
+    val canSendChat = isHost || roomState.permissions.canParticipantSendChat
 
     // Automatically hide expanded chat overlay when entering fullscreen video while keeping indicator accessible
     LaunchedEffect(isFullscreenVideo) {
@@ -230,13 +233,35 @@ fun NyxoraFloatingChatOverlay(
                                         modifier = Modifier.size(15.dp)
                                     )
                                     Spacer(Modifier.width(6.dp))
-                                    Text(
-                                        text = "Room Chat (${roomState.members.size})",
-                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
+                                    Column {
+                                        Text(
+                                            text = "Room Chat (${roomState.members.size})",
+                                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        val chatStatusText = when {
+                                            connectionStatus == SyncConnectionStatus.RECONNECTING ||
+                                                connectionStatus == SyncConnectionStatus.CONNECTING -> "Reconnecting…"
+                                            !canSendChat -> "Chat disabled by host"
+                                            else -> "Live"
+                                        }
+                                        val chatStatusColor = when {
+                                            connectionStatus == SyncConnectionStatus.RECONNECTING ||
+                                                connectionStatus == SyncConnectionStatus.CONNECTING -> Color(0xFFFFB300)
+                                            !canSendChat -> NyxoraDangerRed
+                                            else -> Color(0xFF00E676)
+                                        }
+                                        Text(
+                                            text = chatStatusText,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = chatStatusColor,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.testTag("chat_panel_connection_status")
+                                        )
+                                    }
                                 }
 
                                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -319,10 +344,11 @@ fun NyxoraFloatingChatOverlay(
                             ) {
                                 OutlinedTextField(
                                     value = draftMessage,
-                                    onValueChange = { draftMessage = it.take(500) },
+                                    onValueChange = { if (canSendChat) draftMessage = it.take(500) },
+                                    enabled = canSendChat,
                                     placeholder = {
                                         Text(
-                                            text = "Message room…",
+                                            text = if (canSendChat) "Message room…" else "Chat disabled by host",
                                             style = MaterialTheme.typography.bodySmall
                                         )
                                     },
@@ -331,9 +357,11 @@ fun NyxoraFloatingChatOverlay(
                                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                                     keyboardActions = KeyboardActions(
                                         onSend = {
-                                            val trimmed = draftMessage.trim()
-                                            if (trimmed.isNotEmpty() && onSendMessage(trimmed)) {
-                                                draftMessage = ""
+                                            if (canSendChat) {
+                                                val trimmed = draftMessage.trim()
+                                                if (trimmed.isNotEmpty() && onSendMessage(trimmed)) {
+                                                    draftMessage = ""
+                                                }
                                             }
                                         }
                                     ),
@@ -344,17 +372,19 @@ fun NyxoraFloatingChatOverlay(
 
                                 IconButton(
                                     onClick = {
-                                        val trimmed = draftMessage.trim()
-                                        if (trimmed.isNotEmpty() && onSendMessage(trimmed)) {
-                                            draftMessage = ""
+                                        if (canSendChat) {
+                                            val trimmed = draftMessage.trim()
+                                            if (trimmed.isNotEmpty() && onSendMessage(trimmed)) {
+                                                draftMessage = ""
+                                            }
                                         }
                                     },
-                                    enabled = draftMessage.isNotBlank(),
+                                    enabled = canSendChat && draftMessage.isNotBlank(),
                                     modifier = Modifier
                                         .size(40.dp)
                                         .clip(CircleShape)
                                         .background(
-                                            if (draftMessage.isNotBlank()) {
+                                            if (canSendChat && draftMessage.isNotBlank()) {
                                                 NyxoraElectricBlue
                                             } else {
                                                 MaterialTheme.colorScheme.surfaceVariant
@@ -366,7 +396,7 @@ fun NyxoraFloatingChatOverlay(
                                     Icon(
                                         imageVector = Icons.AutoMirrored.Outlined.Send,
                                         contentDescription = null,
-                                        tint = if (draftMessage.isNotBlank()) {
+                                        tint = if (canSendChat && draftMessage.isNotBlank()) {
                                             Color.White
                                         } else {
                                             MaterialTheme.colorScheme.onSurfaceVariant
