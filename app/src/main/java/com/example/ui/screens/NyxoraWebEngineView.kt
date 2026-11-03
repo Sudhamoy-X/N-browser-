@@ -1264,11 +1264,13 @@ fun NyxoraWebEngineView(
                         .fillMaxSize()
                         .testTag("nyxora_webview_instance"),
                     factory = { ctx ->
-                        FrameLayout(ctx).apply {
+                        WebViewHostFrameLayout(ctx).apply {
                             layoutParams = ViewGroup.LayoutParams(
                                 ViewGroup.LayoutParams.MATCH_PARENT,
                                 ViewGroup.LayoutParams.MATCH_PARENT
                             )
+                            setPadding(0, 0, 0, 0)
+                            setBackgroundColor(android.graphics.Color.parseColor("#0A0D14"))
                         }
                     },
                     update = { hostContainer ->
@@ -2023,6 +2025,30 @@ private class FullscreenVideoHostLayout(
     }
 }
 
+private class WebViewHostFrameLayout(context: Context) : FrameLayout(context) {
+    override fun onApplyWindowInsets(insets: android.view.WindowInsets): android.view.WindowInsets {
+        setPadding(0, 0, 0, 0)
+        return insets
+    }
+
+    override fun dispatchApplyWindowInsets(insets: android.view.WindowInsets): android.view.WindowInsets {
+        setPadding(0, 0, 0, 0)
+        val zeroedInsets = WindowInsetsCompat.Builder(WindowInsetsCompat.toWindowInsetsCompat(insets))
+            .setInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
+                androidx.core.graphics.Insets.NONE
+            )
+            .build()
+            .toWindowInsets()
+        if (zeroedInsets != null) {
+            for (i in 0 until childCount) {
+                getChildAt(i)?.dispatchApplyWindowInsets(zeroedInsets)
+            }
+        }
+        return insets
+    }
+}
+
 @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
 private fun createConfiguredTabWebView(
     ctx: Context,
@@ -2060,6 +2086,18 @@ private fun createConfiguredTabWebView(
     controllerHandle: WebViewControllerHandle
 ): WebView {
     return object : WebView(ctx) {
+        override fun onApplyWindowInsets(insets: android.view.WindowInsets): android.view.WindowInsets {
+            setPadding(0, 0, 0, 0)
+            val zeroed = WindowInsetsCompat.Builder(WindowInsetsCompat.toWindowInsetsCompat(insets))
+                .setInsets(
+                    WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
+                    androidx.core.graphics.Insets.NONE
+                )
+                .build()
+                .toWindowInsets()
+            return super.onApplyWindowInsets(zeroed ?: insets)
+        }
+
         override fun onScrollChanged(l: Int, t: Int, oldl: Int, oldt: Int) {
             super.onScrollChanged(l, t, oldl, oldt)
             val deltaY = t - oldt
@@ -2079,10 +2117,11 @@ private fun createConfiguredTabWebView(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         )
-        setBackgroundColor(android.graphics.Color.parseColor("#101216"))
+        setPadding(0, 0, 0, 0)
+        setBackgroundColor(android.graphics.Color.parseColor("#0A0D14"))
         isVerticalScrollBarEnabled = true
         scrollBarStyle = View.SCROLLBARS_INSIDE_OVERLAY
-        overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+        overScrollMode = View.OVER_SCROLL_NEVER
         if (forceSoftwareLayer) {
             setLayerType(View.LAYER_TYPE_SOFTWARE, null)
         }

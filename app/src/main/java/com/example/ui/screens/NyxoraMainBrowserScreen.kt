@@ -24,6 +24,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -570,7 +572,7 @@ fun NyxoraMainBrowserScreen(
             activeTab.isHomePage -> Color(0xFF060E1B)
             else -> MaterialTheme.colorScheme.background
         },
-        contentWindowInsets = if (isFullscreenVideo) WindowInsets(0, 0, 0, 0) else WindowInsets.systemBars,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         snackbarHost = {
             if (!isFullscreenVideo) {
                 SnackbarHost(
@@ -578,7 +580,6 @@ fun NyxoraMainBrowserScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal))
-                        .displayCutoutPadding()
                 ) { snackbarData ->
                     NyxoraNotificationBanner(
                         snackbarData = snackbarData,
@@ -710,12 +711,9 @@ fun NyxoraMainBrowserScreen(
         }
     ) { innerPadding ->
         // 2. Central Container for the Browser View (with Gentle Momentum Scrolling Physics & Horizontal Edge-Swipe Navigation)
-        var verticalMomentumOverscrollPx by remember { mutableFloatStateOf(0f) }
         val browserMomentumConnection = rememberNyxoraBrowserMomentumConnection(
             reducedMotion = settings.reducedMotion,
-            onOverscrollOffsetChanged = { offsetPx ->
-                verticalMomentumOverscrollPx = offsetPx
-            }
+            onOverscrollOffsetChanged = { /* Keep container flush with top and bottom bars */ }
         )
         val centralContentPadding = when {
             isFullscreenVideo -> PaddingValues(0.dp)
@@ -729,14 +727,10 @@ fun NyxoraMainBrowserScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(centralContentPadding)
+                .consumeWindowInsets(centralContentPadding)
+                .consumeWindowInsets(WindowInsets.systemBars)
+                .consumeWindowInsets(WindowInsets.displayCutout)
                 .nestedScroll(browserMomentumConnection)
-                .graphicsLayer {
-                    translationY = if (!isFullscreenVideo && abs(verticalMomentumOverscrollPx) > 0.5f) {
-                        verticalMomentumOverscrollPx
-                    } else {
-                        0f
-                    }
-                }
                 .pointerInput(edgeActivationWidthPx, edgeCommitThresholdPx) {
                     val slopPx = viewConfiguration.touchSlop.coerceAtMost(14f)
                     awaitEachGesture {

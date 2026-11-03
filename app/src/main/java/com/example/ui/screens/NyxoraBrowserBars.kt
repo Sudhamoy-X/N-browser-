@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
@@ -194,9 +195,9 @@ fun NyxoraTopAddressBar(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .statusBarsPadding()
-                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal))
-                .displayCutoutPadding()
+                .windowInsetsPadding(
+                    WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
+                )
         ) {
             val verticalPad = if (settings.compactBottomToolbar) 4.dp else 6.dp
             Row(
@@ -504,144 +505,133 @@ fun NyxoraBottomTabManagementBar(
         modifier = Modifier
             .fillMaxWidth()
             .testTag("nyxora_bottom_tab_bar"),
-        color = if (activeTab.isHomePage) {
-            Color(0xFF071222)
-        } else {
-            MaterialTheme.colorScheme.background
-        },
+        color = Color(0xFF071222),
         tonalElevation = 0.dp,
         shadowElevation = 0.dp
     ) {
-        Column(
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .navigationBarsPadding()
+                .windowInsetsPadding(WindowInsets.navigationBars.only(WindowInsetsSides.Bottom))
                 .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal))
-                .displayCutoutPadding()
+                .height(if (compactMode) 48.dp else 52.dp)
+                .padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceEvenly
         ) {
-            HorizontalDivider(
-                thickness = 0.75.dp,
-                color = if (activeTab.isHomePage) {
-                    Color(0xFF60A5FA).copy(alpha = 0.28f)
-                } else {
-                    MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)
-                }
-            )
-
-            Row(
+            // 1. Back: Simple left chevron
+            IconButton(
+                onClick = onBack,
+                enabled = canGoBack,
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .height(if (compactMode) 46.dp else 50.dp)
-                    .padding(horizontal = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceEvenly
+                    .minimumInteractiveComponentSize()
+                    .size(48.dp)
+                    .testTag("toolbar_back_button")
             ) {
-                // 1. Back: Simple left chevron
-                IconButton(
-                    onClick = onBack,
-                    enabled = canGoBack,
+                Icon(
+                    imageVector = chevronLeftIcon,
+                    contentDescription = stringResource(R.string.nav_back),
+                    tint = if (canGoBack) enabledIconTint else disabledIconTint,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            // 2. Forward: Simple right chevron
+            IconButton(
+                onClick = onForward,
+                enabled = canGoForward,
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .size(48.dp)
+                    .testTag("toolbar_forward_button")
+            ) {
+                Icon(
+                    imageVector = chevronRightIcon,
+                    contentDescription = stringResource(R.string.nav_forward),
+                    tint = if (canGoForward) enabledIconTint else disabledIconTint,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            // 3. Home: Minimal outline home
+            IconButton(
+                onClick = onHome,
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .size(48.dp)
+                    .testTag("toolbar_home_or_forward_button")
+            ) {
+                Icon(
+                    imageVector = outlineHomeIcon,
+                    contentDescription = stringResource(R.string.nav_home),
+                    tint = enabledIconTint,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            // 4. Tabs: Thin rounded-square outline with the tab count centered inside
+            Box(
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .size(48.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable(onClick = onOpenTabSwitcher)
+                    .semantics { contentDescription = tabsDescription }
+                    .testTag("toolbar_tabs_button"),
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
                     modifier = Modifier
-                        .minimumInteractiveComponentSize()
-                        .testTag("toolbar_back_button")
+                        .size(18.dp)
+                        .border(
+                            width = 1.25.dp,
+                            color = enabledIconTint,
+                            shape = RoundedCornerShape(5.dp)
+                        )
+                        .testTag("toolbar_tabs_counter_box"),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Icon(
-                        imageVector = chevronLeftIcon,
-                        contentDescription = stringResource(R.string.nav_back),
-                        tint = if (canGoBack) enabledIconTint else disabledIconTint,
-                        modifier = Modifier.size(20.dp)
+                    Text(
+                        text = visibleModeTabsCount.coerceAtMost(99).toString(),
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontSize = 10.sp,
+                            lineHeight = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            platformStyle = androidx.compose.ui.text.PlatformTextStyle(
+                                includeFontPadding = false
+                            )
+                        ),
+                        color = enabledIconTint,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1
                     )
                 }
+            }
 
-                // 2. Forward: Simple right chevron
-                IconButton(
-                    onClick = onForward,
-                    enabled = canGoForward,
-                    modifier = Modifier
-                        .minimumInteractiveComponentSize()
-                        .testTag("toolbar_forward_button")
-                ) {
+            // 5. Menu: Three thin horizontal lines + small update indicator dot when a newer APK release is available
+            IconButton(
+                onClick = { onToggleOverflowMenu(!showOverflowMenu) },
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .size(48.dp)
+                    .testTag("toolbar_overflow_menu_button")
+            ) {
+                Box(contentAlignment = Alignment.Center) {
                     Icon(
-                        imageVector = chevronRightIcon,
-                        contentDescription = stringResource(R.string.nav_forward),
-                        tint = if (canGoForward) enabledIconTint else disabledIconTint,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-
-                // 3. Home: Minimal outline home
-                IconButton(
-                    onClick = onHome,
-                    modifier = Modifier
-                        .minimumInteractiveComponentSize()
-                        .testTag("toolbar_home_or_forward_button")
-                ) {
-                    Icon(
-                        imageVector = outlineHomeIcon,
-                        contentDescription = stringResource(R.string.nav_home),
+                        imageVector = threeLineMenuIcon,
+                        contentDescription = stringResource(R.string.nav_menu),
                         tint = enabledIconTint,
                         modifier = Modifier.size(20.dp)
                     )
-                }
-
-                // 4. Tabs: Thin rounded-square outline with the tab count centered inside
-                Box(
-                    modifier = Modifier
-                        .minimumInteractiveComponentSize()
-                        .size(48.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .clickable(onClick = onOpenTabSwitcher)
-                        .semantics { contentDescription = tabsDescription }
-                        .testTag("toolbar_tabs_button"),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(19.dp)
-                            .border(
-                                width = 1.2.dp,
-                                color = enabledIconTint,
-                                shape = RoundedCornerShape(5.dp)
-                            )
-                            .testTag("toolbar_tabs_counter_box"),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = visibleModeTabsCount.coerceAtMost(99).toString(),
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                fontSize = 10.sp,
-                                lineHeight = 10.sp,
-                                fontWeight = FontWeight.Medium
-                            ),
-                            color = enabledIconTint,
-                            textAlign = TextAlign.Center
+                    if (hasUpdateAvailable) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .size(7.dp)
+                                .clip(RoundedCornerShape(50))
+                                .background(NyxoraElectricBlue)
+                                .testTag("toolbar_update_indicator_dot")
                         )
-                    }
-                }
-
-                // 5. Menu: Three thin horizontal lines + small update indicator dot when a newer APK release is available
-                IconButton(
-                    onClick = { onToggleOverflowMenu(!showOverflowMenu) },
-                    modifier = Modifier
-                        .minimumInteractiveComponentSize()
-                        .testTag("toolbar_overflow_menu_button")
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            imageVector = threeLineMenuIcon,
-                            contentDescription = stringResource(R.string.nav_menu),
-                            tint = enabledIconTint,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        if (hasUpdateAvailable) {
-                            Box(
-                                modifier = Modifier
-                                    .align(Alignment.TopEnd)
-                                    .size(7.dp)
-                                    .clip(RoundedCornerShape(50))
-                                    .background(NyxoraElectricBlue)
-                                    .testTag("toolbar_update_indicator_dot")
-                            )
-                        }
                     }
                 }
             }
@@ -830,7 +820,6 @@ fun NyxoraBottomMenuSheet(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .navigationBarsPadding()
                             .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal))
                             .padding(horizontal = 16.dp, vertical = 14.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,

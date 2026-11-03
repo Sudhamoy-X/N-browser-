@@ -3136,6 +3136,88 @@ class ExampleRobolectricTest {
         composeTestRule.waitForIdle()
     }
 
+    @Test
+    fun `bottom navigation bar connects cleanly to homepage and WebView without blank gap and preserves five control alignment`() {
+        composeTestRule.mainClock.advanceTimeBy(2100L)
+        composeTestRule.waitForIdle()
+
+        val vm = checkNotNull(composeTestRule.activity.activeBrowserViewModel)
+        vm.switchBrowsingMode(false)
+        vm.closeAllTabs(inPrivateMode = false)
+        composeTestRule.waitForIdle()
+
+        // 1. Verify Homepage bottom connection has zero blank gap
+        val homeCentralBounds = composeTestRule
+            .onNodeWithTag("nyxora_central_browser_container")
+            .fetchSemanticsNode()
+            .boundsInRoot
+        val homeBottomBarBounds = composeTestRule
+            .onNodeWithTag("nyxora_bottom_tab_bar")
+            .fetchSemanticsNode()
+            .boundsInRoot
+        assertTrue(
+            "Central container bottom (${homeCentralBounds.bottom}) must connect flush to bottom navigation bar top (${homeBottomBarBounds.top})",
+            kotlin.math.abs(homeCentralBounds.bottom - homeBottomBarBounds.top) <= 1.5f
+        )
+
+        // 2. Navigate to a web page and verify WebView bottom edge connects flush to bottom navigation bar
+        vm.navigateInActiveTab("https://example.org", isUrlInput = true)
+        composeTestRule.waitForIdle()
+
+        val webCentralBounds = composeTestRule
+            .onNodeWithTag("nyxora_central_browser_container")
+            .fetchSemanticsNode()
+            .boundsInRoot
+        val webEngineBounds = composeTestRule
+            .onNodeWithTag("nyxora_web_engine_container")
+            .fetchSemanticsNode()
+            .boundsInRoot
+        val webViewBounds = composeTestRule
+            .onNodeWithTag("nyxora_webview_instance")
+            .fetchSemanticsNode()
+            .boundsInRoot
+        val webBottomBarBounds = composeTestRule
+            .onNodeWithTag("nyxora_bottom_tab_bar")
+            .fetchSemanticsNode()
+            .boundsInRoot
+
+        assertTrue(
+            "Web central container bottom (${webCentralBounds.bottom}) must connect flush to bottom bar top (${webBottomBarBounds.top})",
+            kotlin.math.abs(webCentralBounds.bottom - webBottomBarBounds.top) <= 1.5f
+        )
+        assertTrue(
+            "Web engine container bottom (${webEngineBounds.bottom}) must connect flush to bottom bar top (${webBottomBarBounds.top})",
+            kotlin.math.abs(webEngineBounds.bottom - webBottomBarBounds.top) <= 1.5f
+        )
+        assertTrue(
+            "WebView instance bottom (${webViewBounds.bottom}) must connect flush to bottom bar top (${webBottomBarBounds.top})",
+            kotlin.math.abs(webViewBounds.bottom - webBottomBarBounds.top) <= 1.5f
+        )
+
+        // 3. Verify exact 5-control order (1. Back, 2. Forward, 3. Home, 4. Tab Counter, 5. Menu) and vertical alignment
+        val backBounds = composeTestRule.onNodeWithTag("toolbar_back_button").fetchSemanticsNode().boundsInRoot
+        val forwardBounds = composeTestRule.onNodeWithTag("toolbar_forward_button").fetchSemanticsNode().boundsInRoot
+        val homeBounds = composeTestRule.onNodeWithTag("toolbar_home_or_forward_button").fetchSemanticsNode().boundsInRoot
+        val tabsBounds = composeTestRule.onNodeWithTag("toolbar_tabs_button").fetchSemanticsNode().boundsInRoot
+        val tabsCounterBoxBounds = composeTestRule
+            .onNodeWithTag("toolbar_tabs_counter_box", useUnmergedTree = true)
+            .fetchSemanticsNode()
+            .boundsInRoot
+        val menuBounds = composeTestRule.onNodeWithTag("toolbar_overflow_menu_button").fetchSemanticsNode().boundsInRoot
+
+        assertTrue("1. Back must precede 2. Forward", backBounds.center.x < forwardBounds.center.x)
+        assertTrue("2. Forward must precede 3. Home", forwardBounds.center.x < homeBounds.center.x)
+        assertTrue("3. Home must precede 4. Tab Counter", homeBounds.center.x < tabsBounds.center.x)
+        assertTrue("4. Tab Counter must precede 5. Menu", tabsBounds.center.x < menuBounds.center.x)
+
+        val refCenterY = homeBounds.center.y
+        assertTrue("Back button must be vertically centered", kotlin.math.abs(backBounds.center.y - refCenterY) <= 1.5f)
+        assertTrue("Forward button must be vertically centered", kotlin.math.abs(forwardBounds.center.y - refCenterY) <= 1.5f)
+        assertTrue("Tabs button must be vertically centered", kotlin.math.abs(tabsBounds.center.y - refCenterY) <= 1.5f)
+        assertTrue("Tab counter box must be vertically centered", kotlin.math.abs(tabsCounterBoxBounds.center.y - refCenterY) <= 1.5f)
+        assertTrue("Menu button must be vertically centered", kotlin.math.abs(menuBounds.center.y - refCenterY) <= 1.5f)
+    }
+
     private fun findFirstWebView(root: View?): WebView? {
         if (root == null) return null
         if (root is WebView) return root
