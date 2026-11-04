@@ -615,6 +615,14 @@ object UrlAndSearchHandler {
         return lower.startsWith("https://")
     }
 
+    fun isLikelyDirectUrl(rawInput: String): Boolean {
+        val trimmed = rawInput.trim()
+        if (trimmed.isEmpty()) return false
+        val normalized = normalizeUserInput(rawInput = trimmed)
+        return normalized.classification == InputClassification.DIRECT_URL ||
+            normalized.classification == InputClassification.INTERNAL_NYXORA
+    }
+
     fun isRiskyDownloadFile(fileNameOrUrl: String, mimeType: String?): Boolean {
         val lower = fileNameOrUrl.lowercase().substringBefore("?").substringBefore("#")
         val riskyExtensions = listOf(
@@ -628,6 +636,8 @@ object UrlAndSearchHandler {
             lowerMime == "application/x-sh"
     }
 }
+
+typealias BrowserUrlInputEngine = UrlAndSearchHandler
 
 /**
  * Shared high-performance browser network layer providing:

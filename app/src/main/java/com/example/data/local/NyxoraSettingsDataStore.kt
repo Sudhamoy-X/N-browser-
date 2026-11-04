@@ -26,6 +26,11 @@ enum class SearchEngine(val label: String, val searchUrlTemplate: String, val su
         "https://www.google.com/search?q=%s",
         "https://suggestqueries.google.com/complete/search?client=firefox&q=%s"
     ),
+    BING(
+        "Bing",
+        "https://www.bing.com/search?q=%s",
+        "https://api.bing.com/osjson.aspx?query=%s"
+    ),
     DUCKDUCKGO(
         "DuckDuckGo",
         "https://duckduckgo.com/?q=%s",
@@ -46,6 +51,13 @@ enum class SearchEngine(val label: String, val searchUrlTemplate: String, val su
         "https://www.ecosia.org/search?q=%s",
         "https://ac.ecosia.org/autocomplete?q=%s&type=list"
     )
+}
+
+object UniversalTextScalePresets {
+    const val DEFAULT_SCALE = 100
+    val PRESETS: List<Int> = listOf(75, 85, 90, 100, 110, 115, 120, 125, 130, 150, 175, 200)
+
+    fun normalizeScale(value: Int): Int = value.coerceIn(50, 250)
 }
 
 enum class FullscreenOrientationMode(val label: String) {
@@ -200,6 +212,9 @@ data class NyxoraSettingsState(
     // Search (Google is the default search engine; other engines stay selectable in Settings)
     val searchEngine: SearchEngine = SearchEngine.GOOGLE,
     val searchSuggestionsEnabled: Boolean = true,
+    val searchSuggestionProvider: String = "FOLLOW_DEFAULT",
+    val privateModeSearchSuggestionsEnabled: Boolean = false,
+    val recentSearchQueriesJson: String = "[]",
     // Optional Account & Sync (OFF by default — never required or prompted at launch)
     val cloudSyncEnabled: Boolean = false,
     // Site Content & Permissions Defaults
@@ -269,6 +284,20 @@ data class NyxoraSettingsState(
 ) {
     val parsedUserScripts: List<UserScriptItem>
         get() = UserScriptStorage.parseScripts(userScriptsJson)
+
+    val resolvedSuggestionEngine: SearchEngine
+        get() = if (searchSuggestionProvider.isBlank() || searchSuggestionProvider == "FOLLOW_DEFAULT") {
+            searchEngine
+        } else {
+            runCatching { SearchEngine.valueOf(searchSuggestionProvider) }.getOrDefault(searchEngine)
+        }
+
+    val suggestionProviderLabel: String
+        get() = if (searchSuggestionProvider.isBlank() || searchSuggestionProvider == "FOLLOW_DEFAULT") {
+            "Follow Default (${searchEngine.label})"
+        } else {
+            resolvedSuggestionEngine.label
+        }
 }
 
 class NyxoraSettingsDataStore(private val context: Context) {
@@ -303,6 +332,9 @@ class NyxoraSettingsDataStore(private val context: Context) {
 
         val SEARCH_ENGINE = stringPreferencesKey("search_engine")
         val SEARCH_SUGGESTIONS = booleanPreferencesKey("search_suggestions")
+        val SEARCH_SUGGESTION_PROVIDER = stringPreferencesKey("search_suggestion_provider")
+        val PRIVATE_MODE_SEARCH_SUGGESTIONS = booleanPreferencesKey("private_mode_search_suggestions")
+        val RECENT_SEARCH_QUERIES_JSON = stringPreferencesKey("recent_search_queries_json")
 
         val CLOUD_SYNC_ENABLED = booleanPreferencesKey("cloud_sync_enabled")
 
@@ -442,6 +474,9 @@ class NyxoraSettingsDataStore(private val context: Context) {
             customUserAgent = prefs[Keys.CUSTOM_USER_AGENT] ?: "",
             searchEngine = runCatching { SearchEngine.valueOf(prefs[Keys.SEARCH_ENGINE] ?: SearchEngine.GOOGLE.name) }.getOrDefault(SearchEngine.GOOGLE),
             searchSuggestionsEnabled = prefs[Keys.SEARCH_SUGGESTIONS] ?: true,
+            searchSuggestionProvider = (prefs[Keys.SEARCH_SUGGESTION_PROVIDER] ?: "FOLLOW_DEFAULT").ifBlank { "FOLLOW_DEFAULT" },
+            privateModeSearchSuggestionsEnabled = prefs[Keys.PRIVATE_MODE_SEARCH_SUGGESTIONS] ?: false,
+            recentSearchQueriesJson = prefs[Keys.RECENT_SEARCH_QUERIES_JSON] ?: "[]",
             cloudSyncEnabled = prefs[Keys.CLOUD_SYNC_ENABLED] ?: false,
             javascriptEnabled = prefs[Keys.JAVASCRIPT_ENABLED] ?: true,
             cookiesEnabled = prefs[Keys.COOKIES_ENABLED] ?: true,
@@ -536,6 +571,9 @@ class NyxoraSettingsDataStore(private val context: Context) {
             prefs[Keys.CUSTOM_USER_AGENT] = updated.customUserAgent.trim()
             prefs[Keys.SEARCH_ENGINE] = updated.searchEngine.name
             prefs[Keys.SEARCH_SUGGESTIONS] = updated.searchSuggestionsEnabled
+            prefs[Keys.SEARCH_SUGGESTION_PROVIDER] = updated.searchSuggestionProvider.ifBlank { "FOLLOW_DEFAULT" }
+            prefs[Keys.PRIVATE_MODE_SEARCH_SUGGESTIONS] = updated.privateModeSearchSuggestionsEnabled
+            prefs[Keys.RECENT_SEARCH_QUERIES_JSON] = updated.recentSearchQueriesJson.ifBlank { "[]" }
             prefs[Keys.CLOUD_SYNC_ENABLED] = updated.cloudSyncEnabled
             prefs[Keys.JAVASCRIPT_ENABLED] = updated.javascriptEnabled
             prefs[Keys.COOKIES_ENABLED] = updated.cookiesEnabled

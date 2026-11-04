@@ -95,11 +95,18 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import com.example.R
 import com.example.data.local.NyxoraSettingsState
 import com.example.data.model.BookmarkItem
 import com.example.data.model.HistoryItem
 import com.example.domain.browser.FaviconCacheManager
+import com.example.domain.browser.SearchSuggestionItem
+import com.example.domain.browser.UrlAndSearchHandler
 import com.example.ui.components.NyxoraCreatorSignature
 import com.example.ui.components.NyxoraHomeBrandLogo
 import com.example.ui.components.rememberNyxoraGentleMomentumFlingBehavior
@@ -216,7 +223,14 @@ fun NyxoraHomePage(
     onDeleteBookmark: (String) -> Unit,
     onMoveShortcut: (String, Boolean) -> Unit,
     onOpenBookmarks: () -> Unit,
-    onOpenHistory: () -> Unit = {}
+    onOpenHistory: () -> Unit = {},
+    searchSuggestions: List<SearchSuggestionItem> = emptyList(),
+    isFetchingSuggestions: Boolean = false,
+    hasCompletedSuggestionLookup: Boolean = false,
+    selectedSuggestionIndex: Int = -1,
+    onSearchQueryChanged: (String, Boolean) -> Unit = { _, _ -> },
+    onMoveSuggestionSelection: (Int) -> SearchSuggestionItem? = { null },
+    onClearSearchSuggestions: () -> Unit = {}
 ) {
     val bookmarks by bookmarksFlow.collectAsStateWithLifecycle()
     val userShortcuts = remember(bookmarks) {
@@ -378,24 +392,86 @@ fun NyxoraHomePage(
                 )
             }
 
-            // 2. Pill-shaped Glass Search Bar ("Search Google or enter address")
+            // 2. Pill-shaped Glass Search Bar ("Search Google or enter address") + Smart Suggestions Dropdown
             item {
-                ReferenceHomeSearchBar(
-                    searchQuery = searchQuery,
-                    onQueryChange = { searchQuery = it },
-                    searchFocused = searchFocused,
-                    onFocusChange = { searchFocused = it },
-                    searchEngineLabel = settings.searchEngine.label,
-                    barHeight = searchBarHeight,
-                    onSubmit = {
-                        val target = searchQuery.trim()
-                        if (target.isNotEmpty()) {
-                            focusManager.clearFocus()
-                            onNavigateToUrl(target)
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    ReferenceHomeSearchBar(
+                        searchQuery = searchQuery,
+                        onQueryChange = { newText ->
+                            searchQuery = newText
+                            searchFocused = true
+                            onSearchQueryChanged(newText, true)
+                        },
+                        searchFocused = searchFocused,
+                        onFocusChange = { focused ->
+                            searchFocused = focused
+                            if (focused && searchQuery.isNotBlank()) {
+                                onSearchQueryChanged(searchQuery, true)
+                            } else if (!focused) {
+                                onClearSearchSuggestions()
+                            }
+                        },
+                        searchEngineLabel = settings.searchEngine.label,
+                        barHeight = searchBarHeight,
+                        onClear = {
                             searchQuery = ""
+                            onClearSearchSuggestions()
+                        },
+                        onMoveSuggestionSelection = { delta ->
+                            onMoveSuggestionSelection(delta)?.let { selected ->
+                                searchQuery = selected.queryOrUrl
+                            }
+                        },
+                        onSubmit = {
+                            val selected = if (selectedSuggestionIndex in searchSuggestions.indices) {
+                                searchSuggestions[selectedSuggestionIndex]
+                            } else {
+                                null
+                            }
+                            val target = (selected?.queryOrUrl ?: searchQuery).trim()
+                            if (target.isNotEmpty()) {
+                                onClearSearchSuggestions()
+                                focusManager.clearFocus()
+                                onNavigateToUrl(target)
+                                searchQuery = ""
+                            }
                         }
+                    )
+
+                    if (searchFocused && searchQuery.isNotBlank() && settings.searchSuggestionsEnabled) {
+                        NyxoraSmartSuggestionsDropdown(
+                            query = searchQuery,
+                            suggestions = searchSuggestions,
+                            isFetchingSuggestions = isFetchingSuggestions,
+                            hasCompletedLookup = hasCompletedSuggestionLookup,
+                            selectedIndex = selectedSuggestionIndex,
+                            providerLabel = settings.resolvedSuggestionEngine.label,
+                            onSelectSuggestion = { suggestion ->
+                                onClearSearchSuggestions()
+                                focusManager.clearFocus()
+                                searchQuery = ""
+                                onNavigateToUrl(suggestion.queryOrUrl)
+                            },
+                            onFillSuggestionQuery = { suggestion ->
+                                searchQuery = suggestion.queryOrUrl
+                                onSearchQueryChanged(suggestion.queryOrUrl, true)
+                            },
+                            onSubmitCurrentQuery = {
+                                val target = searchQuery.trim()
+                                if (target.isNotEmpty()) {
+                                    onClearSearchSuggestions()
+                                    focusManager.clearFocus()
+                                    onNavigateToUrl(target)
+                                    searchQuery = ""
+                                }
+                            },
+                            dropdownTestTag = "home_search_suggestions_dropdown"
+                        )
                     }
-                )
+                }
             }
 
             // 3. 2x4 Rounded Circular Website Shortcuts Grid
@@ -639,6 +715,8 @@ private fun ReferenceHomeSearchBar(
     onFocusChange: (Boolean) -> Unit,
     searchEngineLabel: String,
     barHeight: Dp = 48.dp,
+    onClear: () -> Unit = { onQueryChange("") },
+    onMoveSuggestionSelection: (Int) -> Unit = {},
     onSubmit: () -> Unit
 ) {
     val searchBarBrush = Brush.horizontalGradient(
@@ -652,6 +730,9 @@ private fun ReferenceHomeSearchBar(
         "Search Google or enter address"
     } else {
         "Search $searchEngineLabel or enter address"
+    }
+    val isLikelyUrl = remember(searchQuery) {
+        searchQuery.isNotBlank() && UrlAndSearchHandler.isLikelyDirectUrl(searchQuery)
     }
 
     Surface(
@@ -686,8 +767,8 @@ private fun ReferenceHomeSearchBar(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
-                imageVector = Icons.Default.Search,
-                contentDescription = "Search",
+                imageVector = if (isLikelyUrl) Icons.Default.Public else Icons.Default.Search,
+                contentDescription = if (isLikelyUrl) "Direct URL" else "Search",
                 tint = Color(0xFFDCEAFE),
                 modifier = Modifier.size(20.dp)
             )
@@ -730,12 +811,33 @@ private fun ReferenceHomeSearchBar(
                     modifier = Modifier
                         .fillMaxWidth()
                         .onFocusChanged { onFocusChange(it.isFocused) }
+                        .onPreviewKeyEvent { keyEvent ->
+                            if (keyEvent.type == KeyEventType.KeyDown && searchFocused) {
+                                when (keyEvent.key) {
+                                    Key.DirectionDown -> {
+                                        onMoveSuggestionSelection(1)
+                                        true
+                                    }
+                                    Key.DirectionUp -> {
+                                        onMoveSuggestionSelection(-1)
+                                        true
+                                    }
+                                    Key.Enter, Key.NumPadEnter -> {
+                                        onSubmit()
+                                        true
+                                    }
+                                    else -> false
+                                }
+                            } else {
+                                false
+                            }
+                        }
                         .testTag("home_search_box_input")
                 )
             }
             if (searchQuery.isNotEmpty()) {
                 IconButton(
-                    onClick = { onQueryChange("") },
+                    onClick = onClear,
                     modifier = Modifier
                         .size(32.dp)
                         .testTag("home_search_clear_button")

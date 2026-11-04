@@ -31,6 +31,8 @@ import com.example.data.model.HistoryItem
 import com.example.data.model.NyxoraBackupPayload
 import com.example.data.model.SiteSettingItem
 import com.example.data.model.SyncedTabItem
+import com.example.data.local.SearchEngine
+import com.example.data.local.UniversalTextScalePresets
 import com.example.domain.browser.ContentBlockingEngine
 import com.example.domain.browser.DownloadEngine
 import com.example.domain.browser.EncryptedBackupManager
@@ -38,9 +40,11 @@ import com.example.domain.browser.FilterListStatusItem
 import com.example.domain.browser.InputClassification
 import com.example.domain.browser.NyxoraShieldEngine
 import com.example.domain.browser.ReaderArticle
+import com.example.domain.browser.SearchSuggestionItem
 import com.example.domain.browser.ShieldBlockOutcome
 import com.example.domain.browser.ShieldFilterListId
 import com.example.domain.browser.ShieldProtectionConfig
+import com.example.domain.browser.SmartSearchSuggestionEngine
 import com.example.domain.browser.UrlAndSearchHandler
 import com.example.domain.connect.IncomingRemoteSyncCommand
 import com.example.domain.connect.NyxoraConnectSecurity
@@ -54,6 +58,8 @@ import com.example.domain.update.NyxoraApkUpdateManager
 import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -348,6 +354,30 @@ class NyxoraBrowserViewModel(
     private val _pendingSitePermissionPrompt = MutableStateFlow<PendingSitePermissionPrompt?>(null)
     val pendingSitePermissionPrompt: StateFlow<PendingSitePermissionPrompt?> = _pendingSitePermissionPrompt.asStateFlow()
 
+    // --- SMART SEARCH SUGGESTIONS STATE ---
+    var suggestionHttpFetcher: suspend (String) -> String? = { url ->
+        SmartSearchSuggestionEngine.defaultHttpFetcher(url)
+    }
+
+    var suggestionDebounceMs: Long = SmartSearchSuggestionEngine.DEFAULT_DEBOUNCE_MS
+
+    private var activeSuggestionJob: Job? = null
+
+    private val _searchSuggestions = MutableStateFlow<List<SearchSuggestionItem>>(emptyList())
+    val searchSuggestions: StateFlow<List<SearchSuggestionItem>> = _searchSuggestions.asStateFlow()
+
+    private val _isFetchingSuggestions = MutableStateFlow(false)
+    val isFetchingSuggestions: StateFlow<Boolean> = _isFetchingSuggestions.asStateFlow()
+
+    private val _hasCompletedSuggestionLookup = MutableStateFlow(false)
+    val hasCompletedSuggestionLookup: StateFlow<Boolean> = _hasCompletedSuggestionLookup.asStateFlow()
+
+    private val _selectedSuggestionIndex = MutableStateFlow(-1)
+    val selectedSuggestionIndex: StateFlow<Int> = _selectedSuggestionIndex.asStateFlow()
+
+    private val _inMemorySearchHistory = MutableStateFlow<List<String>>(emptyList())
+    val recentSearchQueries: StateFlow<List<String>> = _inMemorySearchHistory.asStateFlow()
+
     private val _multiTabState = MutableStateFlow(MultiTabState())
     val multiTabState: StateFlow<MultiTabState> = _multiTabState.asStateFlow()
 
@@ -406,10 +436,16 @@ class NyxoraBrowserViewModel(
             }
         }
 
-        // Keep NyxoraShieldEngine synchronized with settings and per-site whitelist overrides
+        // Keep NyxoraShieldEngine and persisted recent search queries synchronized with settings
         viewModelScope.launch(Dispatchers.Default) {
             combine(settings, siteSettings) { s, sites -> s to sites }.collect { (s, sites) ->
                 syncShieldEngineConfig(s, sites)
+                val persistedQueries = SmartSearchSuggestionEngine.parseRecentSearchQueries(s.recentSearchQueriesJson)
+                if (persistedQueries.isNotEmpty() || _inMemorySearchHistory.value.isEmpty()) {
+                    _inMemorySearchHistory.value = (persistedQueries + _inMemorySearchHistory.value)
+                        .distinctBy { it.lowercase() }
+                        .take(20)
+                }
             }
         }
 
@@ -521,9 +557,165 @@ class NyxoraBrowserViewModel(
         return result
     }
 
+    // --- SMART SEARCH SUGGESTIONS & KEYBOARD NAVIGATION ---
+
+    /**
+     * Updates live search suggestions as the user types in the Address Bar or Homepage Search Bar.
+     * Cancels any outdated suggestion request immediately, returns local suggestions synchronously,
+     * and debounces remote provider lookups on a background coroutine.
+     */
+    fun onSearchQueryChanged(rawQuery: String, isFocused: Boolean = true) {
+        activeSuggestionJob?.cancel()
+        activeSuggestionJob = null
+        _selectedSuggestionIndex.value = -1
+
+        val currentSettings = settings.value
+        val trimmed = rawQuery.trim()
+        if (!isFocused || trimmed.isEmpty() || !currentSettings.searchSuggestionsEnabled) {
+            _searchSuggestions.value = emptyList()
+            _isFetchingSuggestions.value = false
+            _hasCompletedSuggestionLookup.value = false
+            return
+        }
+
+        val privateActive = _isPrivateMode.value || activeTab.value.isPrivate
+        val providerEngine = currentSettings.resolvedSuggestionEngine
+        val combinedRecentSearches = (
+            _inMemorySearchHistory.value +
+                SmartSearchSuggestionEngine.parseRecentSearchQueries(currentSettings.recentSearchQueriesJson)
+            ).distinctBy { it.lowercase() }
+
+        val localMatches = SmartSearchSuggestionEngine.buildLocalSuggestions(
+            rawQuery = trimmed,
+            bookmarks = bookmarks.value,
+            history = history.value,
+            recentSearchQueries = combinedRecentSearches,
+            isPrivateMode = privateActive,
+            searchEngine = providerEngine
+        )
+
+        val canFetchRemote = SmartSearchSuggestionEngine.shouldFetchRemoteSuggestions(
+            query = trimmed,
+            suggestionsEnabled = currentSettings.searchSuggestionsEnabled,
+            isPrivateMode = privateActive,
+            privateModeSuggestionsEnabled = currentSettings.privateModeSearchSuggestionsEnabled
+        )
+
+        if (!canFetchRemote) {
+            _searchSuggestions.value = localMatches
+            _isFetchingSuggestions.value = false
+            _hasCompletedSuggestionLookup.value = true
+            return
+        }
+
+        val cachedRemote = SmartSearchSuggestionEngine.getCachedRemoteSuggestions(providerEngine, trimmed)
+        if (cachedRemote != null) {
+            _searchSuggestions.value = SmartSearchSuggestionEngine.mergeLocalAndRemoteSuggestions(
+                localSuggestions = localMatches,
+                remotePhrases = cachedRemote,
+                engine = providerEngine
+            )
+            _isFetchingSuggestions.value = false
+            _hasCompletedSuggestionLookup.value = true
+            return
+        }
+
+        _searchSuggestions.value = localMatches
+        _isFetchingSuggestions.value = true
+        _hasCompletedSuggestionLookup.value = false
+
+        activeSuggestionJob = viewModelScope.launch {
+            try {
+                if (suggestionDebounceMs > 0L) {
+                    delay(suggestionDebounceMs)
+                }
+                val remotePhrases = SmartSearchSuggestionEngine.fetchRemoteSuggestions(
+                    rawQuery = trimmed,
+                    engine = providerEngine,
+                    suggestionsEnabled = settings.value.searchSuggestionsEnabled,
+                    isPrivateMode = _isPrivateMode.value || activeTab.value.isPrivate,
+                    privateModeSuggestionsEnabled = settings.value.privateModeSearchSuggestionsEnabled,
+                    fetcher = suggestionHttpFetcher
+                )
+                val latestLocal = SmartSearchSuggestionEngine.buildLocalSuggestions(
+                    rawQuery = trimmed,
+                    bookmarks = bookmarks.value,
+                    history = history.value,
+                    recentSearchQueries = (
+                        _inMemorySearchHistory.value +
+                            SmartSearchSuggestionEngine.parseRecentSearchQueries(settings.value.recentSearchQueriesJson)
+                        ).distinctBy { it.lowercase() },
+                    isPrivateMode = _isPrivateMode.value || activeTab.value.isPrivate,
+                    searchEngine = providerEngine
+                )
+                _searchSuggestions.value = SmartSearchSuggestionEngine.mergeLocalAndRemoteSuggestions(
+                    localSuggestions = latestLocal,
+                    remotePhrases = remotePhrases,
+                    engine = providerEngine
+                )
+            } finally {
+                _isFetchingSuggestions.value = false
+                _hasCompletedSuggestionLookup.value = true
+            }
+        }
+    }
+
+    fun clearSearchSuggestions() {
+        activeSuggestionJob?.cancel()
+        activeSuggestionJob = null
+        _searchSuggestions.value = emptyList()
+        _isFetchingSuggestions.value = false
+        _hasCompletedSuggestionLookup.value = false
+        _selectedSuggestionIndex.value = -1
+    }
+
+    fun moveSuggestionSelection(delta: Int): SearchSuggestionItem? {
+        val currentList = _searchSuggestions.value
+        if (currentList.isEmpty()) {
+            _selectedSuggestionIndex.value = -1
+            return null
+        }
+        val currentIdx = _selectedSuggestionIndex.value
+        val nextIdx = when {
+            currentIdx < 0 && delta > 0 -> 0
+            currentIdx < 0 && delta < 0 -> currentList.lastIndex
+            else -> (currentIdx + delta).mod(currentList.size)
+        }
+        _selectedSuggestionIndex.value = nextIdx
+        return currentList.getOrNull(nextIdx)
+    }
+
+    fun getSelectedSuggestionOrNull(): SearchSuggestionItem? {
+        val idx = _selectedSuggestionIndex.value
+        val list = _searchSuggestions.value
+        return if (idx in list.indices) list[idx] else null
+    }
+
+    fun recordSubmittedSearchQuery(rawQuery: String) {
+        val privateActive = _isPrivateMode.value || activeTab.value.isPrivate
+        if (privateActive) return
+        val clean = rawQuery.trim()
+        if (clean.isEmpty() || SmartSearchSuggestionEngine.containsSensitiveParametersOrCredentials(clean)) return
+        _inMemorySearchHistory.update { existing ->
+            (listOf(clean) + existing.filterNot { it.equals(clean, ignoreCase = true) }).take(20)
+        }
+        viewModelScope.launch {
+            settingsDataStore.updateSettings { s ->
+                s.copy(
+                    recentSearchQueriesJson = SmartSearchSuggestionEngine.recordSearchQuery(
+                        existingJson = s.recentSearchQueriesJson,
+                        rawQuery = clean,
+                        isPrivateMode = false
+                    )
+                )
+            }
+        }
+    }
+
     // --- NAVIGATION & ADDRESS BAR ---
 
     fun navigateInActiveTab(rawInput: String, isUrlInput: Boolean = false) {
+        clearSearchSuggestions()
         val trimmedInput = rawInput.trim()
         if (NyxoraConnectSecurity.isNyxoraConnectInvitationUrl(trimmedInput)) {
             _activeOverlay.value = OverlaySheet.NYXORA_CONNECT
@@ -554,6 +746,12 @@ class NyxoraBrowserViewModel(
             InputClassification.DIRECT_URL,
             InputClassification.SEARCH_QUERY -> {
                 val currentActive = activeTab.value
+                if (target.classification == InputClassification.SEARCH_QUERY &&
+                    !currentActive.isPrivate &&
+                    !_isPrivateMode.value
+                ) {
+                    recordSubmittedSearchQuery(trimmedInput)
+                }
                 val siteOverride = getSiteSettingForHost(target.host)
                 val effectiveDesktop = siteOverride?.desktopMode ?: currentActive.desktopMode
                 val effectiveZoom = siteOverride?.textZoom ?: currentSettings.globalTextZoom
@@ -707,13 +905,21 @@ class NyxoraBrowserViewModel(
 
     fun onWebPageStarted(tabId: String, url: String) {
         hasInitializedWebViewEngine = true
+        val isHome = url.equals("nyxora://home", ignoreCase = true)
         updateTab(tabId) { tab ->
             if (tab.isPrivate) {
                 hasOpenedPrivateWebPage = true
             }
+            val nextProgress = when {
+                isHome -> 0
+                // Preserve monotonic progress across HTTP/HTTPS redirects during the same navigation
+                tab.isLoading && tab.progress in 10..85 -> maxOf(tab.progress, 12)
+                else -> 10
+            }
             tab.copy(
                 url = url,
-                isLoading = true,
+                isLoading = !isHome,
+                progress = nextProgress,
                 pageErrorDescription = null,
                 lastActiveAtMillis = System.currentTimeMillis()
             )
@@ -737,7 +943,7 @@ class NyxoraBrowserViewModel(
                 url = url,
                 title = if (isHome) "Home" else cleanTitle,
                 isLoading = false,
-                progress = 100,
+                progress = if (isHome) 0 else 100,
                 pendingHttpFallbackUrl = null,
                 canGoBack = canGoBack || tab.backStack.isNotEmpty() || !isHome || !tab.parentTabId.isNullOrBlank(),
                 canGoForward = canGoForward || tab.forwardStack.isNotEmpty()
@@ -796,15 +1002,44 @@ class NyxoraBrowserViewModel(
         val coerced = progress.coerceIn(0, 100)
         val existing = _normalTabs.value.firstOrNull { it.id == tabId }
             ?: _privateTabs.value.firstOrNull { it.id == tabId }
-        val nextLoading = coerced in 1..99 && existing?.pageErrorDescription == null
-        if (existing != null && existing.progress == coerced && existing.isLoading == nextLoading) {
+        if (existing != null && (existing.isHomePage || existing.pageErrorDescription != null || existing.hasCertificateError)) {
+            if (existing.isLoading || existing.progress != 0) {
+                updateTab(tabId) { it.copy(isLoading = false, progress = 0) }
+            }
+            return
+        }
+        val nextProgress = when {
+            coerced == 0 -> 0
+            coerced >= 100 -> 100
+            existing != null && existing.isLoading && existing.progress in 1..99 -> {
+                maxOf(existing.progress, coerced.coerceAtLeast(8))
+            }
+            else -> coerced.coerceAtLeast(8)
+        }
+        val nextLoading = nextProgress in 1..99 && existing?.pageErrorDescription == null
+        if (existing != null && existing.progress == nextProgress && existing.isLoading == nextLoading) {
             return
         }
         updateTab(tabId) { tab ->
-            tab.copy(
-                progress = coerced,
-                isLoading = coerced in 1..99 && tab.pageErrorDescription == null
-            )
+            if (tab.isHomePage || tab.pageErrorDescription != null || tab.hasCertificateError) {
+                tab.copy(isLoading = false, progress = 0)
+            } else {
+                val monotonic = if (nextProgress in 1..99 && tab.isLoading && tab.progress in 1..99) {
+                    maxOf(tab.progress, nextProgress)
+                } else {
+                    nextProgress
+                }
+                tab.copy(
+                    progress = monotonic,
+                    isLoading = monotonic in 1..99
+                )
+            }
+        }
+    }
+
+    fun stopLoadingTab(tabId: String = activeTab.value.id) {
+        updateTab(tabId) { tab ->
+            tab.copy(isLoading = false, progress = 0)
         }
     }
 
@@ -1599,6 +1834,9 @@ class NyxoraBrowserViewModel(
         viewModelScope.launch {
             if (clearHistory) {
                 historyDao.clearAllHistory()
+                _inMemorySearchHistory.value = emptyList()
+                SmartSearchSuggestionEngine.clearMemoryCache()
+                settingsDataStore.updateSettings { it.copy(recentSearchQueriesJson = "[]") }
             }
             if (clearCookiesAndStorage && hasInitializedWebViewEngine) {
                 runCatching {
@@ -1709,7 +1947,7 @@ class NyxoraBrowserViewModel(
     }
 
     fun updateTextZoomForActiveTab(newZoom: Int) {
-        val clamped = newZoom.coerceIn(50, 250)
+        val clamped = UniversalTextScalePresets.normalizeScale(newZoom)
         val current = activeTab.value
         updateTab(current.id) { it.copy(textZoom = clamped) }
         val host = normalizeSiteHostKey(current.host)
@@ -1717,6 +1955,30 @@ class NyxoraBrowserViewModel(
             val existing = getSiteSettingForHost(host) ?: SiteSettingItem(userId = currentUserId, host = host)
             saveSiteSetting(existing.copy(textZoom = clamped))
         }
+    }
+
+    fun setGlobalTextScale(scalePercent: Int) {
+        val clamped = UniversalTextScalePresets.normalizeScale(scalePercent)
+        updateSettings { it.copy(globalTextZoom = clamped) }
+    }
+
+    fun resetGlobalTextScaleTo100(clearSiteZoomOverrides: Boolean = true) {
+        if (clearSiteZoomOverrides) {
+            localSiteSettingCache.replaceAll { _, site -> site.copy(textZoom = 100) }
+            _normalTabs.update { list -> list.map { it.copy(textZoom = 100) } }
+            _privateTabs.update { list -> list.map { it.copy(textZoom = 100) } }
+            syncMultiTabState()
+            viewModelScope.launch {
+                val allSites = siteSettingDao.getAllSiteSettings()
+                for (site in allSites) {
+                    if (site.textZoom != 100) {
+                        siteSettingDao.upsertSiteSetting(site.copy(textZoom = 100))
+                    }
+                }
+            }
+        }
+        updateSettings { it.copy(globalTextZoom = 100) }
+        emitToast("Website text scale reset to 100%")
     }
 
     fun getSiteSettingForHost(host: String): SiteSettingItem? {
@@ -1732,9 +1994,23 @@ class NyxoraBrowserViewModel(
         val normalized = setting.copy(
             id = setting.id.ifBlank { cleanHost },
             userId = currentUserId,
-            host = cleanHost
+            host = cleanHost,
+            textZoom = UniversalTextScalePresets.normalizeScale(setting.textZoom)
         )
         localSiteSettingCache[cleanHost] = normalized
+        val updateMatchingTabs: (BrowserTab) -> BrowserTab = { tab ->
+            if (normalizeSiteHostKey(tab.host) == cleanHost) {
+                tab.copy(
+                    textZoom = normalized.textZoom,
+                    desktopMode = normalized.desktopMode
+                )
+            } else {
+                tab
+            }
+        }
+        _normalTabs.update { list -> list.map(updateMatchingTabs) }
+        _privateTabs.update { list -> list.map(updateMatchingTabs) }
+        syncMultiTabState()
         syncShieldEngineConfig(settings.value, siteSettings.value)
         viewModelScope.launch {
             siteSettingDao.upsertSiteSetting(normalized)

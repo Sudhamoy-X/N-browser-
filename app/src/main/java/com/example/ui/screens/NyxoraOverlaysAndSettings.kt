@@ -90,6 +90,7 @@ import com.example.data.local.FullscreenOrientationMode
 import com.example.data.local.NyxoraSettingsState
 import com.example.data.local.SearchEngine
 import com.example.data.local.ThemeMode
+import com.example.data.local.UniversalTextScalePresets
 import com.example.data.local.UserAgentMode
 import com.example.data.local.VideoAspectMode
 import com.example.data.model.BookmarkItem
@@ -850,11 +851,46 @@ fun NyxoraSiteSettingsSheet(
                     checked = currentSetting.allowRedirects,
                     onCheckedChange = { onSaveSiteSetting(currentSetting.copy(allowRedirects = it)) }
                 )
-                Column {
-                    Text(
-                        text = "Site Text Size ($selectedHost): ${currentSetting.textZoom}%",
-                        style = MaterialTheme.typography.bodyLarge
-                    )
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Site Text Size ($selectedHost): ${currentSetting.textZoom}%",
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                        TextButton(
+                            onClick = {
+                                onSaveSiteSetting(
+                                    currentSetting.copy(textZoom = UniversalTextScalePresets.DEFAULT_SCALE)
+                                )
+                            },
+                            enabled = currentSetting.textZoom != UniversalTextScalePresets.DEFAULT_SCALE,
+                            modifier = Modifier.testTag("site_settings_reset_text_scale_button")
+                        ) {
+                            Text("Reset to 100%")
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        for (preset in UniversalTextScalePresets.PRESETS) {
+                            FilterChip(
+                                selected = currentSetting.textZoom == preset,
+                                onClick = {
+                                    onSaveSiteSetting(currentSetting.copy(textZoom = preset))
+                                },
+                                label = { Text("${preset}%") },
+                                modifier = Modifier.testTag("site_settings_text_scale_chip_$preset")
+                            )
+                        }
+                    }
                     Slider(
                         value = currentSetting.textZoom.toFloat(),
                         onValueChange = {
@@ -1064,7 +1100,7 @@ enum class SettingsCategory(val title: String, val subtitle: String) {
     ),
     ABOUT(
         title = "About",
-        subtitle = "NYXORA Browser 2.5, Version & Build Info, Check for Updates, Legal, Credits"
+        subtitle = "NYXORA Browser 3.0, Version & Build Info, Check for Updates, Legal, Credits"
     ),
     // Kept for backward source compatibility
     DOWNLOADS(
@@ -1421,6 +1457,44 @@ fun NyxoraSettingsScreen(
                         testTag = "setting_search_suggestions_toggle"
                     )
 
+                    if (settings.searchSuggestionsEnabled) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("settings_suggestion_provider_section"),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = "Search Suggestion Provider: ${settings.suggestionProviderLabel}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Row(
+                                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                FilterChip(
+                                    selected = settings.searchSuggestionProvider.equals("FOLLOW_DEFAULT", ignoreCase = true),
+                                    onClick = {
+                                        onUpdateSettings { it.copy(searchSuggestionProvider = "FOLLOW_DEFAULT") }
+                                    },
+                                    label = { Text("Follow Default") },
+                                    modifier = Modifier.testTag("settings_suggestion_provider_chip_follow_default")
+                                )
+                                for (engine in SearchEngine.entries) {
+                                    FilterChip(
+                                        selected = settings.searchSuggestionProvider.equals(engine.name, ignoreCase = true),
+                                        onClick = {
+                                            onUpdateSettings { it.copy(searchSuggestionProvider = engine.name) }
+                                        },
+                                        label = { Text(engine.label) },
+                                        modifier = Modifier.testTag("settings_suggestion_provider_chip_${engine.name.lowercase()}")
+                                    )
+                                }
+                            }
+                        }
+                    }
+
                     SoulSettingsSubtleDivider()
 
                     // 4. User Agent (Default / Desktop / Mobile / Custom)
@@ -1530,11 +1604,49 @@ fun NyxoraSettingsScreen(
                         onClick = { showLanguageSelector = true }
                     )
 
-                    Column(modifier = Modifier.testTag("settings_general_font_section")) {
-                        Text(
-                            text = "Font Size & Text Scaling: ${settings.globalTextZoom}%",
-                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium)
-                        )
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("settings_general_font_section"),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Default Website Text Scale: ${settings.globalTextZoom}%",
+                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium)
+                            )
+                            TextButton(
+                                onClick = {
+                                    onUpdateSettings {
+                                        it.copy(globalTextZoom = UniversalTextScalePresets.DEFAULT_SCALE)
+                                    }
+                                    onToast("Website text scale reset to 100%")
+                                },
+                                enabled = settings.globalTextZoom != UniversalTextScalePresets.DEFAULT_SCALE,
+                                modifier = Modifier.testTag("settings_reset_text_scale_button")
+                            ) {
+                                Text("Reset to 100%")
+                            }
+                        }
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            for (preset in UniversalTextScalePresets.PRESETS) {
+                                FilterChip(
+                                    selected = settings.globalTextZoom == preset,
+                                    onClick = {
+                                        onUpdateSettings { it.copy(globalTextZoom = preset) }
+                                    },
+                                    label = { Text("${preset}%") },
+                                    modifier = Modifier.testTag("settings_text_scale_chip_$preset")
+                                )
+                            }
+                        }
                         Slider(
                             value = settings.globalTextZoom.toFloat(),
                             onValueChange = { v ->
@@ -2211,6 +2323,15 @@ fun NyxoraSettingsScreen(
                         onCheckedChange = { v -> onUpdateSettings { it.copy(incognitoBlockScreenshots = v) } },
                         testTag = "setting_incognito_screenshots_toggle"
                     )
+                    SettingToggleItem(
+                        title = "Private Mode Live Search Suggestions",
+                        subtitle = "Allow live search suggestions in Private Mode (queries are never saved to history; OFF by default for privacy)",
+                        checked = settings.privateModeSearchSuggestionsEnabled,
+                        onCheckedChange = { v ->
+                            onUpdateSettings { it.copy(privateModeSearchSuggestionsEnabled = v) }
+                        },
+                        testTag = "setting_private_search_suggestions_toggle"
+                    )
                     OutlinedButton(
                         onClick = { showPinDialog = true },
                         modifier = Modifier.testTag("setting_private_pin_lock_button")
@@ -2371,6 +2492,62 @@ fun NyxoraSettingsScreen(
                         onCheckedChange = { v -> onUpdateSettings { it.copy(showBlockedMessages = v) } },
                         testTag = "setting_show_blocked_messages_toggle"
                     )
+
+                    SoulSettingsSubtleDivider()
+
+                    // Universal Website Text Scaling (Global & Per-Site)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("settings_advanced_text_scaling_section"),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        SoulSettingsSectionHeader("Universal Website Text Scaling")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Global Website Text Scale: ${settings.globalTextZoom}%",
+                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium)
+                            )
+                            TextButton(
+                                onClick = {
+                                    onUpdateSettings {
+                                        it.copy(globalTextZoom = UniversalTextScalePresets.DEFAULT_SCALE)
+                                    }
+                                    onToast("Website text scale reset to 100%")
+                                },
+                                enabled = settings.globalTextZoom != UniversalTextScalePresets.DEFAULT_SCALE,
+                                modifier = Modifier.testTag("settings_advanced_reset_text_scale_button")
+                            ) {
+                                Text("Reset to 100%")
+                            }
+                        }
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            for (preset in UniversalTextScalePresets.PRESETS) {
+                                FilterChip(
+                                    selected = settings.globalTextZoom == preset,
+                                    onClick = {
+                                        onUpdateSettings { it.copy(globalTextZoom = preset) }
+                                    },
+                                    label = { Text("${preset}%") },
+                                    modifier = Modifier.testTag("settings_advanced_text_scale_chip_$preset")
+                                )
+                            }
+                        }
+                        ReusableSettingRow(
+                            title = "Per-Site Text Scaling",
+                            subtitle = "Configure custom text scaling for individual domains without distorting images or video",
+                            valueText = "Manage",
+                            testTag = "settings_advanced_per_site_text_scale_button",
+                            onClick = onOpenSiteSettings
+                        )
+                    }
 
                     SoulSettingsSubtleDivider()
 
@@ -2613,7 +2790,7 @@ fun NyxoraSettingsScreen(
             // F. ABOUT NYXORA
             if (selectedCategory == SettingsCategory.ABOUT ||
                 matchesSearch(
-                    "About", "NYXORA", "Sudhamoy", "Crafted", "Version", "2.5", "2.0",
+                    "About", "NYXORA", "Sudhamoy", "Crafted", "Version", "3.0", "2.5", "2.0",
                     "Update", "APK", "Release", "Share", "Engine", "WebView", "Capability",
                     "Licenses", "Privacy Policy", "Terms", "Support"
                 )
@@ -2626,7 +2803,7 @@ fun NyxoraSettingsScreen(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "NYXORA Browser 2.5",
+                                text = "NYXORA Browser 3.0",
                                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                                 modifier = Modifier.testTag("about_nyxora_title")
                             )

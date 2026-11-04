@@ -42,5 +42,131 @@ class ExampleUnitTest {
         assertTrue(overscrollNormal < 0f && abs(overscrollNormal) <= NyxoraMomentumScrollPhysics.MAX_ELASTIC_OVERSCROLL_PX)
         assertEquals(0f, overscrollReduced, 0.001f)
     }
+
+    @Test
+    fun smartSearchSuggestionEngine_generatesProviderUrlsParsesPayloadsDeduplicatesAndProtectsPrivacy() {
+        com.example.domain.browser.SmartSearchSuggestionEngine.clearMemoryCache()
+
+        // 1. Verify provider URL generation for Google, Bing, DuckDuckGo, Brave, Startpage, Ecosia
+        val googleUrl = com.example.domain.browser.SmartSearchSuggestionEngine.buildSuggestionEndpointUrl(
+            com.example.data.local.SearchEngine.GOOGLE,
+            "kotlin compose"
+        )
+        val bingUrl = com.example.domain.browser.SmartSearchSuggestionEngine.buildSuggestionEndpointUrl(
+            com.example.data.local.SearchEngine.BING,
+            "kotlin compose"
+        )
+        val ddgUrl = com.example.domain.browser.SmartSearchSuggestionEngine.buildSuggestionEndpointUrl(
+            com.example.data.local.SearchEngine.DUCKDUCKGO,
+            "kotlin compose"
+        )
+        val braveUrl = com.example.domain.browser.SmartSearchSuggestionEngine.buildSuggestionEndpointUrl(
+            com.example.data.local.SearchEngine.BRAVE,
+            "kotlin compose"
+        )
+        val startpageUrl = com.example.domain.browser.SmartSearchSuggestionEngine.buildSuggestionEndpointUrl(
+            com.example.data.local.SearchEngine.STARTPAGE,
+            "kotlin compose"
+        )
+        val ecosiaUrl = com.example.domain.browser.SmartSearchSuggestionEngine.buildSuggestionEndpointUrl(
+            com.example.data.local.SearchEngine.ECOSIA,
+            "kotlin compose"
+        )
+        assertTrue(googleUrl.startsWith("https://suggestqueries.google.com/complete/search?client=firefox&q="))
+        assertTrue(bingUrl.startsWith("https://api.bing.com/osjson.aspx?query="))
+        assertTrue(ddgUrl.startsWith("https://ac.duckduckgo.com/ac/?q="))
+        assertTrue(braveUrl.startsWith("https://search.brave.com/api/suggest?q="))
+        assertTrue(startpageUrl.startsWith("https://www.startpage.com/osuggestions?q="))
+        assertTrue(ecosiaUrl.startsWith("https://ac.ecosia.org/autocomplete?q="))
+
+        // 2. Parse OpenSearch array payload and DuckDuckGo object array payload with deduplication
+        val openSearchPayload = """["kotlin",["kotlin compose","Kotlin Compose","kotlin coroutines","kotlin flow"]]"""
+        val parsedOpenSearch = com.example.domain.browser.SmartSearchSuggestionEngine.parseRemoteSuggestionPayload(
+            rawJson = openSearchPayload
+        )
+        assertEquals(listOf("kotlin compose", "kotlin coroutines", "kotlin flow"), parsedOpenSearch)
+
+        val ddgPayload = """[{"phrase":"android browser"},{"phrase":"android compose"},{"phrase":"ANDROID BROWSER"}]"""
+        val parsedDdg = com.example.domain.browser.SmartSearchSuggestionEngine.parseRemoteSuggestionPayload(
+            rawJson = ddgPayload
+        )
+        assertEquals(listOf("android browser", "android compose"), parsedDdg)
+
+        // 3. Privacy & Security checks: private mode, disabled setting, and sensitive URL parameters
+        assertFalse(
+            "Remote suggestions must be blocked when suggestionsEnabled is false",
+            com.example.domain.browser.SmartSearchSuggestionEngine.shouldFetchRemoteSuggestions(
+                query = "weather",
+                suggestionsEnabled = false,
+                isPrivateMode = false,
+                privateModeSuggestionsEnabled = false
+            )
+        )
+        assertFalse(
+            "Remote suggestions must be blocked in Private Mode by default",
+            com.example.domain.browser.SmartSearchSuggestionEngine.shouldFetchRemoteSuggestions(
+                query = "weather",
+                suggestionsEnabled = true,
+                isPrivateMode = true,
+                privateModeSuggestionsEnabled = false
+            )
+        )
+        assertTrue(
+            "Remote suggestions may be fetched in Private Mode only when explicitly enabled",
+            com.example.domain.browser.SmartSearchSuggestionEngine.shouldFetchRemoteSuggestions(
+                query = "weather",
+                suggestionsEnabled = true,
+                isPrivateMode = true,
+                privateModeSuggestionsEnabled = true
+            )
+        )
+        assertFalse(
+            "Sensitive URLs or credentials must never be sent to remote suggestion servers",
+            com.example.domain.browser.SmartSearchSuggestionEngine.shouldFetchRemoteSuggestions(
+                query = "https://example.com/callback?access_token=secret123",
+                suggestionsEnabled = true,
+                isPrivateMode = false,
+                privateModeSuggestionsEnabled = false
+            )
+        )
+        assertTrue(
+            com.example.domain.browser.SmartSearchSuggestionEngine.containsSensitiveParametersOrCredentials(
+                "user:pass@internal.corp.local/login"
+            )
+        )
+
+        // 4. Private mode queries must NEVER be recorded in recent search history
+        val existingJson = """["kotlin flow"]"""
+        val afterPrivateSearch = com.example.domain.browser.SmartSearchSuggestionEngine.recordSearchQuery(
+            existingJson = existingJson,
+            rawQuery = "private secret search",
+            isPrivateMode = true
+        )
+        assertEquals(existingJson, afterPrivateSearch)
+
+        val afterNormalSearch = com.example.domain.browser.SmartSearchSuggestionEngine.recordSearchQuery(
+            existingJson = existingJson,
+            rawQuery = "jetpack compose",
+            isPrivateMode = false
+        )
+        assertEquals(
+            listOf("jetpack compose", "kotlin flow"),
+            com.example.domain.browser.SmartSearchSuggestionEngine.parseRecentSearchQueries(afterNormalSearch)
+        )
+    }
+
+    @Test
+    fun universalTextScalePresets_defaultsTo100AndSupportsAllRequiredPresets() {
+        assertEquals(100, com.example.data.local.UniversalTextScalePresets.DEFAULT_SCALE)
+        assertEquals(
+            listOf(75, 85, 90, 100, 110, 115, 120, 125, 130, 150, 175, 200),
+            com.example.data.local.UniversalTextScalePresets.PRESETS
+        )
+        assertEquals(100, com.example.data.local.NyxoraSettingsState().globalTextZoom)
+        assertEquals(50, com.example.data.local.UniversalTextScalePresets.normalizeScale(30))
+        assertEquals(100, com.example.data.local.UniversalTextScalePresets.normalizeScale(100))
+        assertEquals(250, com.example.data.local.UniversalTextScalePresets.normalizeScale(300))
+    }
 }
+
 

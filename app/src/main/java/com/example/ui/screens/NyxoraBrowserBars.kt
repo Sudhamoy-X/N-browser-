@@ -38,6 +38,9 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -54,6 +57,7 @@ import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.Lock
+import androidx.compose.material.icons.outlined.NorthWest
 import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
@@ -65,6 +69,7 @@ import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -96,6 +101,11 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -113,6 +123,10 @@ import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.data.local.NyxoraSettingsState
 import com.example.domain.browser.BrowserNetworkClient
+import com.example.domain.browser.SearchSuggestionItem
+import com.example.domain.browser.SmartSearchSuggestionEngine
+import com.example.domain.browser.SuggestionType
+import com.example.domain.browser.UrlAndSearchHandler
 import com.example.ui.theme.NyxoraDangerRed
 import com.example.ui.theme.NyxoraElectricBlue
 import com.example.ui.theme.NyxoraSuccessGreen
@@ -148,26 +162,52 @@ fun NyxoraTopAddressBar(
     onSelectTab: (String) -> Unit,
     onFindQueryChange: (String) -> Unit,
     onFindNext: (Boolean) -> Unit,
-    onCloseFindInPage: () -> Unit
+    onCloseFindInPage: () -> Unit,
+    onMoveSuggestionSelection: (Int) -> Unit = {}
 ) {
+    val hasErrorOrHome = activeTab.isHomePage ||
+        activeTab.pageErrorDescription != null ||
+        activeTab.hasCertificateError
+
     val showProgressBar = activeTab.isLoading &&
         activeTab.progress in 1..99 &&
-        activeTab.pageErrorDescription == null &&
-        !activeTab.hasCertificateError
+        !hasErrorOrHome
+
+    var isCompletingLoadFade by remember(activeTab.id) { mutableStateOf(false) }
+
+    LaunchedEffect(activeTab.id, activeTab.isLoading, activeTab.progress, hasErrorOrHome, settings.reducedMotion) {
+        if (hasErrorOrHome || (activeTab.progress == 0 && !activeTab.isLoading)) {
+            isCompletingLoadFade = false
+        } else if (activeTab.isLoading && activeTab.progress in 1..99) {
+            isCompletingLoadFade = true
+        } else if (!activeTab.isLoading && activeTab.progress == 100 && isCompletingLoadFade) {
+            if (!settings.reducedMotion) {
+                delay(180L)
+            }
+            isCompletingLoadFade = false
+        }
+    }
+
+    val targetProgressFraction = when {
+        hasErrorOrHome -> 0f
+        showProgressBar -> (activeTab.progress.coerceIn(8, 99) / 100f)
+        isCompletingLoadFade && activeTab.progress == 100 -> 1f
+        else -> 0f
+    }
 
     val animatedProgressScale by animateFloatAsState(
-        targetValue = if (showProgressBar) (activeTab.progress.coerceIn(0, 100) / 100f) else 0f,
+        targetValue = targetProgressFraction,
         animationSpec = tween(
-            durationMillis = if (settings.reducedMotion) 0 else 150,
+            durationMillis = if (settings.reducedMotion) 0 else 160,
             easing = FastOutSlowInEasing
         ),
         label = "nyxora_top_progress_scale"
     )
 
     val animatedProgressAlpha by animateFloatAsState(
-        targetValue = if (showProgressBar) 1f else 0f,
+        targetValue = if (showProgressBar || isCompletingLoadFade) 1f else 0f,
         animationSpec = tween(
-            durationMillis = if (settings.reducedMotion) 0 else 140,
+            durationMillis = if (settings.reducedMotion) 0 else 160,
             easing = FastOutSlowInEasing
         ),
         label = "nyxora_top_progress_alpha"
@@ -247,6 +287,9 @@ fun NyxoraTopAddressBar(
                         .padding(horizontal = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    val isLikelyDirectUrlWhileEditing = remember(isEditingAddress, addressInput) {
+                        isEditingAddress && addressInput.isNotBlank() && UrlAndSearchHandler.isLikelyDirectUrl(addressInput)
+                    }
                     when {
                         isPrivateMode -> {
                             Icon(
@@ -257,7 +300,16 @@ fun NyxoraTopAddressBar(
                             )
                             Spacer(modifier = Modifier.width(10.dp))
                         }
-                        activeTab.isHomePage -> {
+                        isEditingAddress && isLikelyDirectUrlWhileEditing -> {
+                            Icon(
+                                imageVector = Icons.Outlined.Public,
+                                contentDescription = "Direct URL",
+                                tint = NyxoraElectricBlue,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                        }
+                        isEditingAddress || activeTab.isHomePage -> {
                             Icon(
                                 imageVector = Icons.Outlined.Search,
                                 contentDescription = stringResource(R.string.search_or_enter_address),
@@ -304,11 +356,36 @@ fun NyxoraTopAddressBar(
                         ),
                         cursorBrush = SolidColor(NyxoraElectricBlue),
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-                        keyboardActions = KeyboardActions(onGo = { onSubmitAddress() }),
+                        keyboardActions = KeyboardActions(
+                            onGo = { onSubmitAddress() },
+                            onSearch = { onSubmitAddress() },
+                            onDone = { onSubmitAddress() }
+                        ),
                         modifier = Modifier
                             .weight(1f)
                             .focusRequester(addressFocusRequester)
                             .onFocusChanged { state -> onEditingChanged(state.isFocused) }
+                            .onPreviewKeyEvent { keyEvent ->
+                                if (keyEvent.type == KeyEventType.KeyDown && isEditingAddress) {
+                                    when (keyEvent.key) {
+                                        Key.DirectionDown -> {
+                                            onMoveSuggestionSelection(1)
+                                            true
+                                        }
+                                        Key.DirectionUp -> {
+                                            onMoveSuggestionSelection(-1)
+                                            true
+                                        }
+                                        Key.Enter, Key.NumPadEnter -> {
+                                            onSubmitAddress()
+                                            true
+                                        }
+                                        else -> false
+                                    }
+                                } else {
+                                    false
+                                }
+                            }
                             .testTag("main_address_bar_input"),
                         decorationBox = { innerTextField ->
                             if (displayedText.isEmpty()) {
@@ -364,7 +441,7 @@ fun NyxoraTopAddressBar(
                 }
             }
 
-            // Thin progress bar in the top bar driven by real progress
+            // Thin progress bar in the top bar driven by real WebView progress
             if (showProgressBar || animatedProgressAlpha > 0.01f) {
                 Box(
                     modifier = Modifier
@@ -1241,3 +1318,194 @@ internal fun NyxoraSecurityAndPermissionDialogs(
         )
     }
 }
+
+/**
+ * Unified, engine-aware Smart Search Suggestions Dropdown used below both the Top Address Bar
+ * and the single Homepage Search Bar.
+ */
+@Composable
+fun NyxoraSmartSuggestionsDropdown(
+    query: String,
+    suggestions: List<SearchSuggestionItem>,
+    isFetchingSuggestions: Boolean,
+    hasCompletedLookup: Boolean,
+    selectedIndex: Int,
+    providerLabel: String,
+    onSelectSuggestion: (SearchSuggestionItem) -> Unit,
+    onFillSuggestionQuery: (SearchSuggestionItem) -> Unit,
+    onSubmitCurrentQuery: () -> Unit,
+    modifier: Modifier = Modifier,
+    dropdownTestTag: String = "search_suggestions_dropdown"
+) {
+    val cleanQuery = query.trim()
+    if (cleanQuery.isEmpty()) return
+    val showEmptyState = suggestions.isEmpty() && !isFetchingSuggestions && hasCompletedLookup
+
+    if (suggestions.isEmpty() && !isFetchingSuggestions && !showEmptyState) return
+
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .widthIn(max = 600.dp)
+            .testTag(dropdownTestTag),
+        shape = RoundedCornerShape(14.dp),
+        color = Color(0xFF0A0F1A).copy(alpha = 0.98f),
+        tonalElevation = 6.dp,
+        shadowElevation = 10.dp,
+        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF1E293B))
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            if (isFetchingSuggestions) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 8.dp)
+                        .testTag("search_suggestions_loading_indicator"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(14.dp),
+                        strokeWidth = 1.8.dp,
+                        color = NyxoraElectricBlue
+                    )
+                    Text(
+                        text = "Fetching $providerLabel suggestions…",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFF94A3B8),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (suggestions.isNotEmpty()) {
+                    HorizontalDivider(color = Color(0xFF1E293B), thickness = 0.6.dp)
+                }
+            }
+
+            if (suggestions.isNotEmpty()) {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 310.dp)
+                        .padding(vertical = 4.dp)
+                        .testTag("search_suggestions_dropdown_list")
+                ) {
+                    itemsIndexed(
+                        items = suggestions,
+                        key = { _, item -> item.id }
+                    ) { index, item ->
+                        val isSelected = index == selectedIndex
+                        val highlightedTitle = remember(item.title, cleanQuery) {
+                            SmartSearchSuggestionEngine.buildHighlightedSuggestionAnnotatedString(
+                                fullText = item.title,
+                                query = cleanQuery,
+                                highlightColor = NyxoraElectricBlue
+                            )
+                        }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(
+                                    if (isSelected) Color(0xFF1E293B).copy(alpha = 0.85f) else Color.Transparent
+                                )
+                                .clickable { onSelectSuggestion(item) }
+                                .padding(start = 14.dp, end = 6.dp, top = 8.dp, bottom = 8.dp)
+                                .testTag("search_suggestion_row_$index"),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            val iconVector = when (item.type) {
+                                SuggestionType.DIRECT_URL -> Icons.Outlined.Public
+                                SuggestionType.BOOKMARK -> Icons.Default.Bookmark
+                                SuggestionType.HISTORY -> Icons.Outlined.History
+                                SuggestionType.SEARCH_HISTORY -> Icons.Outlined.History
+                                SuggestionType.REMOTE_SUGGESTION -> Icons.Outlined.Search
+                            }
+                            val iconTint = when (item.type) {
+                                SuggestionType.DIRECT_URL,
+                                SuggestionType.BOOKMARK -> NyxoraElectricBlue
+                                SuggestionType.SEARCH_HISTORY -> Color(0xFF60A5FA)
+                                SuggestionType.REMOTE_SUGGESTION -> Color(0xFF93C5FD)
+                                SuggestionType.HISTORY -> Color(0xFF94A3B8)
+                            }
+                            Icon(
+                                imageVector = iconVector,
+                                contentDescription = item.type.name,
+                                tint = iconTint,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = highlightedTitle,
+                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                        fontWeight = FontWeight.Medium,
+                                        color = Color(0xFFF1F5F9)
+                                    ),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = item.subtitle,
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        fontFamily = if (item.isDirectNavigation) FontFamily.Monospace else FontFamily.Default,
+                                        fontSize = 11.5.sp
+                                    ),
+                                    color = Color(0xFF94A3B8),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            IconButton(
+                                onClick = { onFillSuggestionQuery(item) },
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .testTag("search_suggestion_fill_$index")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.NorthWest,
+                                    contentDescription = "Fill query ${item.title}",
+                                    tint = Color(0xFF64748B),
+                                    modifier = Modifier.size(15.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            } else if (showEmptyState) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSubmitCurrentQuery() }
+                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                        .testTag("search_suggestions_empty_state"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Search,
+                        contentDescription = null,
+                        tint = Color(0xFF94A3B8),
+                        modifier = Modifier.size(17.dp)
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "No suggestions available for \"$cleanQuery\"",
+                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
+                            color = Color(0xFFE2E8F0),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = "Tap or press Enter to search $providerLabel",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF94A3B8),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+

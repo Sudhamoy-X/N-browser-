@@ -202,7 +202,9 @@ internal fun computeVideoZoomAndClampedPan(
 
 internal data class AppliedTabWebConfig(
     val desktopMode: Boolean,
-    val reloadTriggerTick: Int
+    val reloadTriggerTick: Int,
+    val cookiesEnabled: Boolean? = null,
+    val acceptThirdPartyCookies: Boolean? = null
 )
 
 class WebViewControllerHandle {
@@ -224,6 +226,24 @@ class WebViewControllerHandle {
     fun getActivePoolCount(): Int = webViewPool.size
 
     fun hasPooledWebView(tabId: String): Boolean = webViewPool.containsKey(tabId)
+
+    fun syncTextZoomAcrossPool(
+        globalTextZoom: Int,
+        siteSettingsByHost: Map<String, SiteSettingItem> = emptyMap()
+    ) {
+        val safeGlobal = globalTextZoom.coerceIn(50, 250)
+        for ((_, pooledView) in webViewPool) {
+            runCatching {
+                val loadedUrl = pooledView.url ?: (pooledView.tag as? String) ?: ""
+                val host = UrlAndSearchHandler.extractHost(loadedUrl)
+                val siteOverride = lookupSiteSettingFromMap(siteSettingsByHost, host)
+                val targetZoom = (siteOverride?.textZoom ?: safeGlobal).coerceIn(50, 250)
+                if (pooledView.settings.textZoom != targetZoom) {
+                    pooledView.settings.textZoom = targetZoom
+                }
+            }
+        }
+    }
 
     internal fun destroyWebViewSafely(wv: WebView?, reason: String = "evicted") {
         if (wv == null) return
@@ -1164,6 +1184,14 @@ fun NyxoraWebEngineView(
         }
     }
 
+    // Immediately propagate global or per-site text scale updates across all pooled WebViews
+    LaunchedEffect(settings.globalTextZoom, siteSettingsByHost, tab.textZoom) {
+        controllerHandle.syncTextZoomAcrossPool(
+            globalTextZoom = settings.globalTextZoom,
+            siteSettingsByHost = siteSettingsByHost
+        )
+    }
+
     // Clear pull-to-refresh spinner when page finishes loading or errors
     LaunchedEffect(tab.isLoading, tab.progress, tab.pageErrorDescription) {
         if (!tab.isLoading || tab.progress >= 100 || tab.pageErrorDescription != null) {
@@ -1429,13 +1457,28 @@ fun NyxoraWebEngineView(
                         val prevApplied = appliedTabConfigMap[tabId]
                         val desktopChanged = prevApplied != null && prevApplied.desktopMode != activeTabSnapshot.desktopMode
                         val reloadRequested = prevApplied != null && prevApplied.reloadTriggerTick != activeTabSnapshot.reloadTriggerTick
+                        val activeSiteOverride = lookupSiteSettingFromMap(
+                            currentSiteSettingsByHost,
+                            UrlAndSearchHandler.extractHost(activeTabSnapshot.url)
+                        )
+                        val desiredThirdPartyCookies = currentSettings.cookiesEnabled &&
+                            !currentSettings.blockThirdPartyCookies &&
+                            !activeTabSnapshot.isPrivate
+
+                        // Apply dynamic per-tab & global settings (including Desktop Mode User-Agent, viewport & textZoom)
+                        val uaChanged = applyDynamicWebSettings(
+                            webView = targetWebView,
+                            tab = activeTabSnapshot,
+                            settings = currentSettings,
+                            siteOverride = activeSiteOverride,
+                            previousAppliedConfig = prevApplied
+                        )
                         appliedTabConfigMap[tabId] = AppliedTabWebConfig(
                             desktopMode = activeTabSnapshot.desktopMode,
-                            reloadTriggerTick = activeTabSnapshot.reloadTriggerTick
+                            reloadTriggerTick = activeTabSnapshot.reloadTriggerTick,
+                            cookiesEnabled = currentSettings.cookiesEnabled,
+                            acceptThirdPartyCookies = desiredThirdPartyCookies
                         )
-
-                        // Apply dynamic per-tab & global settings (including Desktop Mode User-Agent & viewport)
-                        val uaChanged = applyDynamicWebSettings(targetWebView, activeTabSnapshot, currentSettings)
 
                         val currentLoadedUrl = targetWebView.url
                         val desiredUrl = activeTabSnapshot.url
@@ -2268,6 +2311,7 @@ private fun createConfiguredTabWebView(
             displayZoomControls = false
             loadWithOverviewMode = true
             useWideViewPort = true
+            textZoom = currentTabProvider().textZoom.coerceIn(50, 250)
             setSupportMultipleWindows(true)
             javaScriptCanOpenWindowsAutomatically = false
             mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
@@ -2440,6 +2484,10 @@ private fun createConfiguredTabWebView(
                 val pageHost = UrlAndSearchHandler.extractHost(safeUrl)
                 val siteOverride = lookupSiteSettingFromMap(currentSiteSettingsMapProvider(), pageHost)
                 val settingsSnap = currentSettingsProvider()
+                val effectiveTextZoom = (siteOverride?.textZoom ?: currentTabProvider().textZoom).coerceIn(50, 250)
+                if (view != null && view.settings.textZoom != effectiveTextZoom) {
+                    view.settings.textZoom = effectiveTextZoom
+                }
                 val adBlockActive = settingsSnap.adBlockingEnabled && (siteOverride?.allowAds != true)
                 val cosmeticJs = ContentBlockingEngine.buildCosmeticAndDarkModeScript(
                     hideCookieBanners = settingsSnap.hideCookieConsentBanners,
@@ -2502,6 +2550,10 @@ private fun createConfiguredTabWebView(
                 val pageHost = UrlAndSearchHandler.extractHost(safeUrl)
                 val siteOverride = lookupSiteSettingFromMap(currentSiteSettingsMapProvider(), pageHost)
                 val settingsSnap = currentSettingsProvider()
+                val effectiveTextZoom = (siteOverride?.textZoom ?: currentTabProvider().textZoom).coerceIn(50, 250)
+                if (view != null && view.settings.textZoom != effectiveTextZoom) {
+                    view.settings.textZoom = effectiveTextZoom
+                }
                 val adBlockActive = settingsSnap.adBlockingEnabled && (siteOverride?.allowAds != true)
                 val cosmeticJs = ContentBlockingEngine.buildCosmeticAndDarkModeScript(
                     hideCookieBanners = settingsSnap.hideCookieConsentBanners,
@@ -2931,7 +2983,9 @@ private fun injectMatchingUserScripts(
 internal fun applyDynamicWebSettings(
     webView: WebView,
     tab: BrowserTab,
-    settings: NyxoraSettingsState
+    settings: NyxoraSettingsState,
+    siteOverride: SiteSettingItem? = null,
+    previousAppliedConfig: AppliedTabWebConfig? = null
 ): Boolean {
     if (webView.settings.javaScriptEnabled != settings.javascriptEnabled) {
         webView.settings.javaScriptEnabled = settings.javascriptEnabled
@@ -2941,11 +2995,21 @@ internal fun applyDynamicWebSettings(
     if (uaChanged) {
         webView.settings.userAgentString = targetUa
     }
-    webView.settings.useWideViewPort = true
-    webView.settings.loadWithOverviewMode = true
-    webView.settings.setSupportZoom(true)
-    webView.settings.builtInZoomControls = true
-    webView.settings.displayZoomControls = false
+    if (!webView.settings.useWideViewPort) {
+        webView.settings.useWideViewPort = true
+    }
+    if (!webView.settings.loadWithOverviewMode) {
+        webView.settings.loadWithOverviewMode = true
+    }
+    if (!webView.settings.supportZoom()) {
+        webView.settings.setSupportZoom(true)
+    }
+    if (!webView.settings.builtInZoomControls) {
+        webView.settings.builtInZoomControls = true
+    }
+    if (webView.settings.displayZoomControls) {
+        webView.settings.displayZoomControls = false
+    }
     val effectiveDesktop = tab.desktopMode || settings.userAgentMode == UserAgentMode.DESKTOP
     val desiredLayoutAlgorithm = if (effectiveDesktop) {
         WebSettings.LayoutAlgorithm.NORMAL
@@ -2955,8 +3019,9 @@ internal fun applyDynamicWebSettings(
     if (webView.settings.layoutAlgorithm != desiredLayoutAlgorithm) {
         webView.settings.layoutAlgorithm = desiredLayoutAlgorithm
     }
-    if (webView.settings.textZoom != tab.textZoom) {
-        webView.settings.textZoom = tab.textZoom
+    val effectiveTextZoom = (siteOverride?.textZoom ?: tab.textZoom).coerceIn(50, 250)
+    if (webView.settings.textZoom != effectiveTextZoom) {
+        webView.settings.textZoom = effectiveTextZoom
     }
     if (webView.settings.blockNetworkImage != settings.dataSaverBlockImages) {
         webView.settings.blockNetworkImage = settings.dataSaverBlockImages
@@ -2978,12 +3043,16 @@ internal fun applyDynamicWebSettings(
     if (webView.settings.allowFileAccess != allowFile) {
         webView.settings.allowFileAccess = allowFile
     }
-    runCatching {
-        CookieManager.getInstance().setAcceptCookie(settings.cookiesEnabled)
-        CookieManager.getInstance().setAcceptThirdPartyCookies(
-            webView,
-            settings.cookiesEnabled && !settings.blockThirdPartyCookies && !tab.isPrivate
-        )
+    val desiredThirdPartyCookies = settings.cookiesEnabled && !settings.blockThirdPartyCookies && !tab.isPrivate
+    val cookieConfigChanged = previousAppliedConfig == null ||
+        previousAppliedConfig.cookiesEnabled != settings.cookiesEnabled ||
+        previousAppliedConfig.acceptThirdPartyCookies != desiredThirdPartyCookies
+    if (cookieConfigChanged) {
+        runCatching {
+            val cm = CookieManager.getInstance()
+            cm.setAcceptCookie(settings.cookiesEnabled)
+            cm.setAcceptThirdPartyCookies(webView, desiredThirdPartyCookies)
+        }
     }
     return uaChanged
 }

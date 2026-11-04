@@ -642,14 +642,14 @@ class ExampleRobolectricTest {
         // Verify easy bookmark access directly below the homepage search bar
         composeTestRule.onNodeWithTag("home_bookmarks_quick_access_button").assertIsDisplayed()
 
-        // Verify Version 2.5 build metadata (supports local "2.5" / code 3 and CI monotonic "2.5.<build>" / code >= 3)
+        // Verify Version 3.0 build metadata (supports local "3.0" / code 4 and CI monotonic "3.0.<build>" / code >= 4)
         assertTrue(
-            "Expected BuildConfig.VERSION_NAME to be \"2.5\" or start with \"2.5.\", but was \"${BuildConfig.VERSION_NAME}\"",
-            BuildConfig.VERSION_NAME == "2.5" || BuildConfig.VERSION_NAME.startsWith("2.5.")
+            "Expected BuildConfig.VERSION_NAME to be \"3.0\" or start with \"3.0.\", but was \"${BuildConfig.VERSION_NAME}\"",
+            BuildConfig.VERSION_NAME == "3.0" || BuildConfig.VERSION_NAME.startsWith("3.0.")
         )
         assertTrue(
-            "Expected BuildConfig.VERSION_CODE >= 3, but was ${BuildConfig.VERSION_CODE}",
-            BuildConfig.VERSION_CODE >= 3
+            "Expected BuildConfig.VERSION_CODE >= 4, but was ${BuildConfig.VERSION_CODE}",
+            BuildConfig.VERSION_CODE >= 4
         )
 
         // 3. Open bottom menu -> Settings -> Verify 7 categories, Room Sync removed from Settings, and About NYXORA works
@@ -2525,14 +2525,14 @@ class ExampleRobolectricTest {
 
         val vm = checkNotNull(composeTestRule.activity.activeBrowserViewModel)
 
-        // 1. Verify Version 2.5 and incremented VersionCode (supports local "2.5" / code 3 and CI monotonic "2.5.<build>" / code >= 3)
+        // 1. Verify Version 3.0 and incremented VersionCode (supports local "3.0" / code 4 and CI monotonic "3.0.<build>" / code >= 4)
         assertTrue(
-            "Expected BuildConfig.VERSION_NAME to be \"2.5\" or start with \"2.5.\", but was \"${BuildConfig.VERSION_NAME}\"",
-            BuildConfig.VERSION_NAME == "2.5" || BuildConfig.VERSION_NAME.startsWith("2.5.")
+            "Expected BuildConfig.VERSION_NAME to be \"3.0\" or start with \"3.0.\", but was \"${BuildConfig.VERSION_NAME}\"",
+            BuildConfig.VERSION_NAME == "3.0" || BuildConfig.VERSION_NAME.startsWith("3.0.")
         )
         assertTrue(
-            "Expected BuildConfig.VERSION_CODE >= 3, but was ${BuildConfig.VERSION_CODE}",
-            BuildConfig.VERSION_CODE >= 3
+            "Expected BuildConfig.VERSION_CODE >= 4, but was ${BuildConfig.VERSION_CODE}",
+            BuildConfig.VERSION_CODE >= 4
         )
         assertTrue(
             "2.6 must be recognized as newer than 2.5",
@@ -2617,14 +2617,14 @@ class ExampleRobolectricTest {
         assertFalse(noApkShareText.contains("nyxora.browser"))
         assertFalse(noApkShareText.contains("file://"))
 
-        // Verify About NYXORA 2.5 title and Share NYXORA Browser button launch native share chooser
+        // Verify About NYXORA 3.0 title and Share NYXORA Browser button launch native share chooser
         vm.setOverlaySheet(com.example.ui.viewmodel.OverlaySheet.SETTINGS)
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("settings_category_about").performScrollTo().performClick()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("about_nyxora_title").performScrollTo().assertIsDisplayed()
         assertTrue(
-            composeTestRule.onAllNodesWithText("NYXORA Browser 2.5", substring = true).fetchSemanticsNodes().isNotEmpty()
+            composeTestRule.onAllNodesWithText("NYXORA Browser 3.0", substring = true).fetchSemanticsNodes().isNotEmpty()
         )
         shadowOf(composeTestRule.activity.application).clearNextStartedActivities()
         composeTestRule.onNodeWithTag("about_share_app_button").performScrollTo().performClick()
@@ -3371,6 +3371,128 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("about_nyxora_creator_credit").performScrollTo().assertIsDisplayed()
     }
 
+    @Test
+    fun `nyxora browser 3_0 verifies smart search suggestions smooth page loading progress and universal text scaling`() {
+        composeTestRule.mainClock.advanceTimeBy(350L)
+        composeTestRule.waitForIdle()
+
+        val vm = checkNotNull(composeTestRule.activity.activeBrowserViewModel)
+        com.example.domain.browser.SmartSearchSuggestionEngine.clearMemoryCache()
+        vm.suggestionDebounceMs = 10L
+
+        var remoteFetchCalls = 0
+        var lastFetchedUrl = ""
+        vm.suggestionHttpFetcher = { endpointUrl ->
+            remoteFetchCalls += 1
+            lastFetchedUrl = endpointUrl
+            """["kotlin",["kotlin multiplatform","kotlin compose tutorial","kotlin coroutines guide"]]"""
+        }
+
+        fun waitUntilCondition(timeoutMs: Long = 3000L, condition: () -> Boolean) {
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (!condition() && System.currentTimeMillis() < deadline) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                composeTestRule.mainClock.advanceTimeBy(50L)
+                composeTestRule.waitForIdle()
+                Thread.sleep(20L)
+            }
+        }
+
+        // 1. Verify Smart Search Suggestions on Homepage (single search bar, live suggestions, caching, keyboard navigation)
+        vm.switchBrowsingMode(false)
+        vm.updateSettings {
+            it.copy(
+                searchEngine = com.example.data.local.SearchEngine.GOOGLE,
+                searchSuggestionsEnabled = true,
+                searchSuggestionProvider = "FOLLOW_DEFAULT",
+                privateModeSearchSuggestionsEnabled = false,
+                globalTextZoom = 100
+            )
+        }
+        waitUntilCondition {
+            vm.settings.value.searchEngine == com.example.data.local.SearchEngine.GOOGLE &&
+                vm.settings.value.searchSuggestionsEnabled &&
+                vm.settings.value.searchSuggestionProvider == "FOLLOW_DEFAULT" &&
+                vm.settings.value.globalTextZoom == 100
+        }
+
+        vm.onSearchQueryChanged("kotlin")
+        waitUntilCondition { vm.searchSuggestions.value.any { it.title == "kotlin multiplatform" } }
+        assertTrue("Expected remote suggestion endpoint to be called", remoteFetchCalls >= 1)
+        assertTrue("Expected Google suggest endpoint, got: $lastFetchedUrl", lastFetchedUrl.contains("suggestqueries.google.com"))
+
+        // Verify keyboard selection movement and selection retrieval
+        assertEquals(-1, vm.selectedSuggestionIndex.value)
+        vm.moveSuggestionSelection(1)
+        assertEquals(0, vm.selectedSuggestionIndex.value)
+        assertNotNull(vm.getSelectedSuggestionOrNull())
+
+        // Verify LRU Cache prevents duplicate network call for identical query + provider
+        val callsBeforeCachedRepeat = remoteFetchCalls
+        vm.onSearchQueryChanged("kotlin")
+        waitUntilCondition { vm.hasCompletedSuggestionLookup.value }
+        assertEquals("Cached suggestion lookup should not trigger another HTTP request", callsBeforeCachedRepeat, remoteFetchCalls)
+
+        // Verify switching search engine to Bing uses Bing suggestion endpoint
+        vm.updateSettings { it.copy(searchEngine = com.example.data.local.SearchEngine.BING) }
+        waitUntilCondition { vm.settings.value.searchEngine == com.example.data.local.SearchEngine.BING }
+        vm.onSearchQueryChanged("android")
+        waitUntilCondition { lastFetchedUrl.contains("api.bing.com/osjson.aspx") }
+        assertTrue("Expected Bing suggestion provider URL", lastFetchedUrl.contains("api.bing.com/osjson.aspx"))
+
+        // Verify Private Mode blocks remote suggestion requests by default and never stores private search queries
+        val callsBeforePrivate = remoteFetchCalls
+        val historyBeforePrivate = vm.recentSearchQueries.value
+        vm.switchBrowsingMode(true)
+        composeTestRule.waitForIdle()
+        vm.onSearchQueryChanged("secret query")
+        waitUntilCondition { vm.hasCompletedSuggestionLookup.value }
+        assertEquals("Private mode must not call remote suggestion endpoint by default", callsBeforePrivate, remoteFetchCalls)
+        vm.navigateInActiveTab("secret query")
+        composeTestRule.waitForIdle()
+        assertEquals("Private mode search query must never be saved to recent search history", historyBeforePrivate, vm.recentSearchQueries.value)
+
+        // Switch back to normal mode
+        vm.switchBrowsingMode(false)
+        composeTestRule.waitForIdle()
+
+        // 2. Verify Smooth Page Loading Progress (monotonic clamping across redirects, clean completion, clean error/stop reset)
+        val activeTabId = checkNotNull(vm.activeTab.value?.id)
+        vm.onWebPageStarted(activeTabId, "https://example.com/start")
+        assertTrue(checkNotNull(vm.activeTab.value).isLoading)
+        assertTrue(checkNotNull(vm.activeTab.value).progress >= 8)
+
+        vm.onWebProgressChanged(activeTabId, 65)
+        assertEquals(65, checkNotNull(vm.activeTab.value).progress)
+
+        // Simulate redirect reporting lower intermediate progress (e.g., 20%) — progress must remain monotonic (65%)
+        vm.onWebProgressChanged(activeTabId, 20)
+        assertEquals("Progress must not jump backward during redirect", 65, checkNotNull(vm.activeTab.value).progress)
+
+        vm.onWebPageFinished(activeTabId, "https://example.com/final", "Example Final", canGoBack = true, canGoForward = false)
+        assertFalse("isLoading must be false on page finish", checkNotNull(vm.activeTab.value).isLoading)
+        assertEquals(100, checkNotNull(vm.activeTab.value).progress)
+
+        // Simulate error / stopLoading resetting progress cleanly without getting stuck
+        vm.onWebPageStarted(activeTabId, "https://example.com/slow")
+        vm.onWebProgressChanged(activeTabId, 45)
+        vm.stopLoadingTab(activeTabId)
+        assertFalse("isLoading must be false after stopLoadingTab", checkNotNull(vm.activeTab.value).isLoading)
+        assertEquals("Progress must reset to 0 after stopLoadingTab", 0, checkNotNull(vm.activeTab.value).progress)
+
+        // 3. Verify Universal Website Text Scaling (default 100%, presets 75%..200%, propagation to tabs, and 1-tap reset to 100%)
+        assertEquals(100, vm.settings.value.globalTextZoom)
+        vm.setGlobalTextScale(130)
+        waitUntilCondition { vm.settings.value.globalTextZoom == 130 }
+        assertEquals(130, vm.settings.value.globalTextZoom)
+        assertEquals("Open tab without per-site override must immediately receive 130% text scale", 130, checkNotNull(vm.activeTab.value).textZoom)
+
+        vm.resetGlobalTextScaleTo100()
+        waitUntilCondition { vm.settings.value.globalTextZoom == 100 }
+        assertEquals(100, vm.settings.value.globalTextZoom)
+        assertEquals(100, checkNotNull(vm.activeTab.value).textZoom)
+    }
+
     private fun findFirstWebView(root: View?): WebView? {
         if (root == null) return null
         if (root is WebView) return root
@@ -3383,6 +3505,7 @@ class ExampleRobolectricTest {
         return null
     }
 }
+
 
 
 

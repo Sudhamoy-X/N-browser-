@@ -164,6 +164,10 @@ fun NyxoraMainBrowserScreen(
     val riskyDownloadPrompt by viewModel.pendingRiskyDownload.collectAsStateWithLifecycle()
     val sslWarningPrompt by viewModel.pendingSslErrorPrompt.collectAsStateWithLifecycle()
     val pendingRedirectWarning by viewModel.pendingRedirectWarning.collectAsStateWithLifecycle()
+    val searchSuggestions by viewModel.searchSuggestions.collectAsStateWithLifecycle()
+    val isFetchingSuggestions by viewModel.isFetchingSuggestions.collectAsStateWithLifecycle()
+    val hasCompletedSuggestionLookup by viewModel.hasCompletedSuggestionLookup.collectAsStateWithLifecycle()
+    val selectedSuggestionIndex by viewModel.selectedSuggestionIndex.collectAsStateWithLifecycle()
 
     // NYXORA Connect Realtime Room Sync States
     val connectRoomState by viewModel.connectManager.roomState.collectAsStateWithLifecycle()
@@ -609,30 +613,41 @@ fun NyxoraMainBrowserScreen(
                                 findInPageMatches = findInPageMatches,
                                 currentModeTabs = currentModeTabs,
                                 addressFocusRequester = addressFocusRequester,
-                                onAddressInputChange = {
+                                onAddressInputChange = { newText ->
                                     if (!isEditingAddress) isEditingAddress = true
-                                    addressInput = it
+                                    addressInput = newText
+                                    viewModel.onSearchQueryChanged(newText, isFocused = true)
                                 },
                                 onEditingChanged = { focused ->
                                     if (focused && !isEditingAddress) {
                                         addressInput = if (activeTab.isHomePage) "" else activeTab.url
                                         isEditingAddress = true
+                                        if (addressInput.isNotBlank()) {
+                                            viewModel.onSearchQueryChanged(addressInput, isFocused = true)
+                                        }
                                     } else if (!focused && isEditingAddress) {
                                         isEditingAddress = false
+                                        viewModel.clearSearchSuggestions()
                                     }
                                 },
                                 onSubmitAddress = {
-                                    val submitted = addressInput.trim()
+                                    val selected = viewModel.getSelectedSuggestionOrNull()
+                                    val submitted = (selected?.queryOrUrl ?: addressInput).trim()
                                     isEditingAddress = false
+                                    viewModel.clearSearchSuggestions()
                                     focusManager.clearFocus()
                                     if (submitted.isNotEmpty()) {
                                         viewModel.navigateInActiveTab(submitted, isUrlInput = true)
                                     }
                                 },
-                                onClearAddress = { addressInput = "" },
+                                onClearAddress = {
+                                    addressInput = ""
+                                    viewModel.clearSearchSuggestions()
+                                },
                                 onReloadOrStop = {
                                     if (activeTab.isLoading) {
                                         primaryController.stopLoading()
+                                        viewModel.stopLoadingTab(activeTab.id)
                                     } else {
                                         primaryController.reload()
                                     }
@@ -648,6 +663,11 @@ fun NyxoraMainBrowserScreen(
                                 onCloseFindInPage = {
                                     primaryController.clearFindMatches()
                                     viewModel.setFindInPageVisible(false)
+                                },
+                                onMoveSuggestionSelection = { delta ->
+                                    viewModel.moveSuggestionSelection(delta)?.let { selected ->
+                                        addressInput = selected.queryOrUrl
+                                    }
                                 }
                             )
                         }
@@ -831,6 +851,7 @@ fun NyxoraMainBrowserScreen(
                     historyFlow = viewModel.history,
                     onNavigateToUrl = { input ->
                         isEditingAddress = false
+                        viewModel.clearSearchSuggestions()
                         focusManager.clearFocus()
                         viewModel.navigateInActiveTab(input, isUrlInput = true)
                     },
@@ -840,7 +861,14 @@ fun NyxoraMainBrowserScreen(
                     onDeleteBookmark = { id -> viewModel.deleteBookmark(id) },
                     onMoveShortcut = viewModel::moveShortcut,
                     onOpenBookmarks = { viewModel.setOverlaySheet(OverlaySheet.BOOKMARKS) },
-                    onOpenHistory = { viewModel.setOverlaySheet(OverlaySheet.HISTORY) }
+                    onOpenHistory = { viewModel.setOverlaySheet(OverlaySheet.HISTORY) },
+                    searchSuggestions = searchSuggestions,
+                    isFetchingSuggestions = isFetchingSuggestions,
+                    hasCompletedSuggestionLookup = hasCompletedSuggestionLookup,
+                    selectedSuggestionIndex = selectedSuggestionIndex,
+                    onSearchQueryChanged = viewModel::onSearchQueryChanged,
+                    onMoveSuggestionSelection = viewModel::moveSuggestionSelection,
+                    onClearSearchSuggestions = viewModel::clearSearchSuggestions
                 )
             } else {
                 // Lazy-collect site settings & allowOnceUrls only when rendering a web page
@@ -1106,73 +1134,39 @@ fun NyxoraMainBrowserScreen(
                 }
             }
 
-            // Autocomplete Suggestions Dropdown Overlay when editing top address bar
+            // Smart Search Suggestions Dropdown Overlay when editing top address bar
             if (!isFullscreenVideo && isEditingAddress && addressInput.isNotBlank() && settings.searchSuggestionsEnabled) {
-                val bookmarks by viewModel.bookmarks.collectAsStateWithLifecycle()
-                val history by viewModel.history.collectAsStateWithLifecycle()
-                val suggestions = remember(addressInput, bookmarks, history) {
-                    val q = addressInput.trim().lowercase()
-                    val bmMatches = bookmarks.filter {
-                        it.title.lowercase().contains(q) || it.url.lowercase().contains(q)
-                    }.map { Triple(it.title, it.url, true) }
-                    val histMatches = history.filter {
-                        it.title.lowercase().contains(q) || it.url.lowercase().contains(q)
-                    }.map { Triple(it.title, it.url, false) }
-                    (bmMatches + histMatches).distinctBy { it.second }.take(6)
-                }
-
-                if (suggestions.isNotEmpty()) {
-                    Surface(
-                        modifier = Modifier
-                            .align(Alignment.TopCenter)
-                            .padding(horizontal = 12.dp, vertical = 8.dp)
-                            .fillMaxWidth()
-                            .widthIn(max = 600.dp),
-                        shape = RoundedCornerShape(14.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        tonalElevation = 6.dp,
-                        shadowElevation = 8.dp
-                    ) {
-                        LazyColumn(modifier = Modifier.padding(vertical = 4.dp)) {
-                            items(suggestions, key = { it.second }) { (title, url, isBookmark) ->
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable {
-                                            isEditingAddress = false
-                                            focusManager.clearFocus()
-                                            viewModel.navigateInActiveTab(url)
-                                        }
-                                        .padding(horizontal = 14.dp, vertical = 10.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(
-                                        imageVector = if (isBookmark) Icons.Default.Bookmark else Icons.Default.History,
-                                        contentDescription = null,
-                                        tint = if (isBookmark) NyxoraElectricBlue else MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(12.dp))
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = title,
-                                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                        Text(
-                                            text = url,
-                                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-                                }
-                            }
+                NyxoraSmartSuggestionsDropdown(
+                    query = addressInput,
+                    suggestions = searchSuggestions,
+                    isFetchingSuggestions = isFetchingSuggestions,
+                    hasCompletedLookup = hasCompletedSuggestionLookup,
+                    selectedIndex = selectedSuggestionIndex,
+                    providerLabel = settings.resolvedSuggestionEngine.label,
+                    onSelectSuggestion = { suggestion ->
+                        isEditingAddress = false
+                        viewModel.clearSearchSuggestions()
+                        focusManager.clearFocus()
+                        viewModel.navigateInActiveTab(suggestion.queryOrUrl, isUrlInput = true)
+                    },
+                    onFillSuggestionQuery = { suggestion ->
+                        addressInput = suggestion.queryOrUrl
+                        viewModel.onSearchQueryChanged(suggestion.queryOrUrl, isFocused = true)
+                    },
+                    onSubmitCurrentQuery = {
+                        val submitted = addressInput.trim()
+                        isEditingAddress = false
+                        viewModel.clearSearchSuggestions()
+                        focusManager.clearFocus()
+                        if (submitted.isNotEmpty()) {
+                            viewModel.navigateInActiveTab(submitted, isUrlInput = true)
                         }
-                    }
-                }
+                    },
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    dropdownTestTag = "search_suggestions_dropdown"
+                )
             }
 
             // Non-intrusive In-App Update Notification Card (Update Now / Later)
