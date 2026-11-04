@@ -220,12 +220,9 @@ class NyxoraBrowserViewModel(
     var apkUpdateManager: NyxoraApkUpdateManager? = initialApkUpdateManager
         internal set
 
-    val settings: StateFlow<NyxoraSettingsState> = settingsDataStore.settingsFlow
-        .stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5000L),
-            initialValue = NyxoraSettingsState()
-        )
+    private val pendingSettingsWriteCount = java.util.concurrent.atomic.AtomicInteger(0)
+    private val _settings = MutableStateFlow(NyxoraSettingsState())
+    val settings: StateFlow<NyxoraSettingsState> = _settings.asStateFlow()
 
     val connectManager: NyxoraConnectSessionManager = NyxoraConnectSessionManager(
         scope = viewModelScope,
@@ -429,6 +426,15 @@ class NyxoraBrowserViewModel(
     }
 
     init {
+        // Synchronize persisted DataStore settings into _settings whenever no immediate local write is in flight
+        viewModelScope.launch {
+            settingsDataStore.settingsFlow.collect { persisted ->
+                if (pendingSettingsWriteCount.get() == 0) {
+                    _settings.value = persisted
+                }
+            }
+        }
+
         // Keep ContentBlockingEngine and NyxoraShieldEngine updated with custom rules on a background thread
         viewModelScope.launch(Dispatchers.Default) {
             customFilterRules.collect { rules ->
@@ -2051,29 +2057,48 @@ class NyxoraBrowserViewModel(
 
     fun resetAllSitePermissions() {
         localSiteSettingCache.clear()
-        syncShieldEngineConfig(settings.value, emptyList())
+        val updated = _settings.updateAndGet {
+            it.copy(
+                defaultLocationPermission = "ASK",
+                defaultCameraPermission = "ASK",
+                defaultMicPermission = "ASK",
+                defaultNotificationPermission = "ASK"
+            )
+        }
+        syncShieldEngineConfig(updated, emptyList())
+        pendingSettingsWriteCount.incrementAndGet()
         viewModelScope.launch {
-            siteSettingDao.clearAllSiteSettings()
-            settingsDataStore.updateSettings {
-                it.copy(
-                    defaultLocationPermission = "ASK",
-                    defaultCameraPermission = "ASK",
-                    defaultMicPermission = "ASK",
-                    defaultNotificationPermission = "ASK"
-                )
+            try {
+                siteSettingDao.clearAllSiteSettings()
+                settingsDataStore.updateSettings {
+                    it.copy(
+                        defaultLocationPermission = "ASK",
+                        defaultCameraPermission = "ASK",
+                        defaultMicPermission = "ASK",
+                        defaultNotificationPermission = "ASK"
+                    )
+                }
+                emitToast("Reset all site permissions")
+            } finally {
+                pendingSettingsWriteCount.decrementAndGet()
             }
-            emitToast("Reset all site permissions")
         }
     }
 
     fun resetBrowserSettings() {
         localSiteSettingCache.clear()
         val defaults = NyxoraSettingsState()
+        _settings.value = defaults
         syncShieldEngineConfig(defaults, emptyList())
+        pendingSettingsWriteCount.incrementAndGet()
         viewModelScope.launch {
-            settingsDataStore.resetToDefaults()
-            siteSettingDao.clearAllSiteSettings()
-            emitToast("Browser settings restored to defaults")
+            try {
+                settingsDataStore.resetToDefaults()
+                siteSettingDao.clearAllSiteSettings()
+                emitToast("Browser settings restored to defaults")
+            } finally {
+                pendingSettingsWriteCount.decrementAndGet()
+            }
         }
     }
 
@@ -2201,17 +2226,15 @@ class NyxoraBrowserViewModel(
         val nextState = settings.value.copy(enabledFilterLists = nextLists)
         syncShieldEngineConfig(nextState, siteSettings.value)
         val updatedRuleCount = NyxoraShieldEngine.getTotalActiveRuleCount()
-        viewModelScope.launch {
-            settingsDataStore.updateSettings { s ->
-                val lists = if (enabled) s.enabledFilterLists + cleanId else s.enabledFilterLists - cleanId
-                s.copy(
-                    enabledFilterLists = lists,
-                    filterRuleCount = updatedRuleCount
-                )
-            }
-            val listTitle = ShieldFilterListId.fromId(cleanId)?.title ?: cleanId
-            emitToast(if (enabled) "Enabled $listTitle" else "Disabled $listTitle")
+        updateSettings { s ->
+            val lists = if (enabled) s.enabledFilterLists + cleanId else s.enabledFilterLists - cleanId
+            s.copy(
+                enabledFilterLists = lists,
+                filterRuleCount = updatedRuleCount
+            )
         }
+        val listTitle = ShieldFilterListId.fromId(cleanId)?.title ?: cleanId
+        emitToast(if (enabled) "Enabled $listTitle" else "Disabled $listTitle")
     }
 
     fun addWhitelistedWebsite(rawHostOrUrl: String) {
@@ -2223,13 +2246,11 @@ class NyxoraBrowserViewModel(
         val existingSite = getSiteSettingForHost(cleanHost) ?: SiteSettingItem(userId = currentUserId, host = cleanHost)
         val updatedSite = existingSite.copy(id = existingSite.id.ifBlank { cleanHost }, host = cleanHost, allowAds = true)
         localSiteSettingCache[cleanHost] = updatedSite
-        val nextSettings = settings.value.copy(whitelistedWebsites = settings.value.whitelistedWebsites + cleanHost)
-        syncShieldEngineConfig(nextSettings, siteSettings.value)
+        updateSettings { s ->
+            s.copy(whitelistedWebsites = s.whitelistedWebsites + cleanHost)
+        }
         viewModelScope.launch {
             siteSettingDao.upsertSiteSetting(updatedSite)
-            settingsDataStore.updateSettings { s ->
-                s.copy(whitelistedWebsites = s.whitelistedWebsites + cleanHost)
-            }
             emitToast("Added $cleanHost to NYXORA Shield whitelist")
         }
     }
@@ -2245,14 +2266,11 @@ class NyxoraBrowserViewModel(
                 siteSettingDao.upsertSiteSetting(updatedSite)
             }
         }
-        val nextSettings = settings.value.copy(whitelistedWebsites = settings.value.whitelistedWebsites - cleanHost)
-        syncShieldEngineConfig(nextSettings, siteSettings.value.filterNot { normalizeSiteHostKey(it.host) == cleanHost && it.allowAds })
-        viewModelScope.launch {
-            settingsDataStore.updateSettings { s ->
-                s.copy(whitelistedWebsites = s.whitelistedWebsites - cleanHost)
-            }
-            emitToast("Removed $cleanHost from NYXORA Shield whitelist")
+        updateSettings { s ->
+            s.copy(whitelistedWebsites = s.whitelistedWebsites - cleanHost)
         }
+        syncShieldEngineConfig(settings.value, siteSettings.value.filterNot { normalizeSiteHostKey(it.host) == cleanHost && it.allowAds })
+        emitToast("Removed $cleanHost from NYXORA Shield whitelist")
     }
 
     fun onPopupBlocked(blockedUrl: String) {
@@ -2505,8 +2523,8 @@ class NyxoraBrowserViewModel(
     // --- SETTINGS & ENCRYPTED BACKUP ---
 
     fun updateSettings(transform: (NyxoraSettingsState) -> NyxoraSettingsState) {
-        val before = settings.value
-        val after = transform(before)
+        val before = _settings.value
+        val after = _settings.updateAndGet(transform)
         syncShieldEngineConfig(after, siteSettings.value)
         if (after.globalTextZoom != before.globalTextZoom || after.defaultDesktopSite != before.defaultDesktopSite) {
             val propagateToTab: (BrowserTab) -> BrowserTab = { tab ->
@@ -2520,8 +2538,13 @@ class NyxoraBrowserViewModel(
             _privateTabs.update { list -> list.map(propagateToTab) }
             syncMultiTabState()
         }
+        pendingSettingsWriteCount.incrementAndGet()
         viewModelScope.launch {
-            settingsDataStore.updateSettings(transform)
+            try {
+                settingsDataStore.updateSettings(transform)
+            } finally {
+                pendingSettingsWriteCount.decrementAndGet()
+            }
         }
     }
 

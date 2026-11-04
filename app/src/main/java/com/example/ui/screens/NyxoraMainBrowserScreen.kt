@@ -507,10 +507,21 @@ fun NyxoraMainBrowserScreen(
     val currentOnSwipeForward by rememberUpdatedState(triggerBrowserForwardNavigation)
     val currentCanSwipeBack by rememberUpdatedState(canNavigateBack)
     val currentCanSwipeForward by rememberUpdatedState(canNavigateForward)
-    val currentEdgeSwipeEnabled by rememberUpdatedState(settings.edgeSwipeBackForward && !isFullscreenVideo)
+    val isEdgeSwipeActive = settings.edgeSwipeBackForward &&
+        !isFullscreenVideo &&
+        activeOverlay == OverlaySheet.NONE &&
+        !showOverflowMenu
+    val currentEdgeSwipeEnabled by rememberUpdatedState(isEdgeSwipeActive)
 
     var activeEdgeSwipeSide by remember { mutableStateOf<EdgeSwipeSide?>(null) }
     var edgeSwipeDragPx by remember { mutableFloatStateOf(0f) }
+
+    LaunchedEffect(isEdgeSwipeActive) {
+        if (!isEdgeSwipeActive) {
+            activeEdgeSwipeSide = null
+            edgeSwipeDragPx = 0f
+        }
+    }
 
     val shouldInterceptSystemBack = isFullscreenVideo ||
         pendingRedirectWarning != null ||
@@ -751,91 +762,97 @@ fun NyxoraMainBrowserScreen(
                 .consumeWindowInsets(WindowInsets.systemBars)
                 .consumeWindowInsets(WindowInsets.displayCutout)
                 .nestedScroll(browserMomentumConnection)
-                .pointerInput(edgeActivationWidthPx, edgeCommitThresholdPx) {
-                    val slopPx = viewConfiguration.touchSlop.coerceAtMost(14f)
-                    awaitEachGesture {
-                        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-                        if (!currentEdgeSwipeEnabled) return@awaitEachGesture
+                .then(
+                    if (isEdgeSwipeActive) {
+                        Modifier.pointerInput(edgeActivationWidthPx, edgeCommitThresholdPx) {
+                            val slopPx = viewConfiguration.touchSlop.coerceAtMost(14f)
+                            awaitEachGesture {
+                                val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                                if (!currentEdgeSwipeEnabled) return@awaitEachGesture
 
-                        val containerWidth = size.width.toFloat()
-                        val candidateSide = when {
-                            down.position.x <= edgeActivationWidthPx -> EdgeSwipeSide.LEFT_BACK
-                            containerWidth > 0f && down.position.x >= containerWidth - edgeActivationWidthPx -> EdgeSwipeSide.RIGHT_FORWARD
-                            else -> null
-                        } ?: return@awaitEachGesture
+                                val containerWidth = size.width.toFloat()
+                                val candidateSide = when {
+                                    down.position.x <= edgeActivationWidthPx -> EdgeSwipeSide.LEFT_BACK
+                                    containerWidth > 0f && down.position.x >= containerWidth - edgeActivationWidthPx -> EdgeSwipeSide.RIGHT_FORWARD
+                                    else -> null
+                                } ?: return@awaitEachGesture
 
-                        val pointerId = down.id
-                        val startX = down.position.x
-                        val startY = down.position.y
-                        var lockedHorizontal = false
-                        var crossedThresholdHapticFired = false
-                        var currentDrag = 0f
+                                val pointerId = down.id
+                                val startX = down.position.x
+                                val startY = down.position.y
+                                var lockedHorizontal = false
+                                var crossedThresholdHapticFired = false
+                                var currentDrag = 0f
 
-                        try {
-                            while (true) {
-                                val event = awaitPointerEvent(PointerEventPass.Initial)
-                                val change = event.changes.firstOrNull { it.id == pointerId }
-                                    ?: event.changes.firstOrNull()
-                                    ?: break
+                                try {
+                                    while (true) {
+                                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                                        val change = event.changes.firstOrNull { it.id == pointerId }
+                                            ?: event.changes.firstOrNull()
+                                            ?: break
 
-                                if (!change.pressed) {
-                                    if (lockedHorizontal) {
-                                        change.consume()
-                                    }
-                                    break
-                                }
-
-                                val dx = change.position.x - startX
-                                val dy = change.position.y - startY
-                                val inwardDrag = when (candidateSide) {
-                                    EdgeSwipeSide.LEFT_BACK -> dx
-                                    EdgeSwipeSide.RIGHT_FORWARD -> -dx
-                                }
-
-                                if (!lockedHorizontal) {
-                                    if (abs(dy) > slopPx && abs(dy) > abs(dx)) {
-                                        break
-                                    }
-                                    if (inwardDrag > slopPx && abs(dx) >= abs(dy)) {
-                                        lockedHorizontal = true
-                                        activeEdgeSwipeSide = candidateSide
-                                    } else if (inwardDrag < -slopPx) {
-                                        break
-                                    }
-                                }
-
-                                if (lockedHorizontal) {
-                                    change.consume()
-                                    currentDrag = inwardDrag.coerceAtLeast(0f)
-                                    edgeSwipeDragPx = currentDrag
-
-                                    val isAvailable = when (candidateSide) {
-                                        EdgeSwipeSide.LEFT_BACK -> currentCanSwipeBack
-                                        EdgeSwipeSide.RIGHT_FORWARD -> currentCanSwipeForward
-                                    }
-                                    if (isAvailable && currentDrag >= edgeCommitThresholdPx && !crossedThresholdHapticFired) {
-                                        crossedThresholdHapticFired = true
-                                        runCatching {
-                                            hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        if (!change.pressed) {
+                                            if (lockedHorizontal) {
+                                                change.consume()
+                                            }
+                                            break
                                         }
-                                    } else if (currentDrag < edgeCommitThresholdPx) {
-                                        crossedThresholdHapticFired = false
-                                    }
-                                }
-                            }
 
-                            if (lockedHorizontal && currentDrag >= edgeCommitThresholdPx) {
-                                when (candidateSide) {
-                                    EdgeSwipeSide.LEFT_BACK -> currentOnSwipeBack()
-                                    EdgeSwipeSide.RIGHT_FORWARD -> currentOnSwipeForward()
+                                        val dx = change.position.x - startX
+                                        val dy = change.position.y - startY
+                                        val inwardDrag = when (candidateSide) {
+                                            EdgeSwipeSide.LEFT_BACK -> dx
+                                            EdgeSwipeSide.RIGHT_FORWARD -> -dx
+                                        }
+
+                                        if (!lockedHorizontal) {
+                                            if (abs(dy) > slopPx && abs(dy) > abs(dx)) {
+                                                break
+                                            }
+                                            if (inwardDrag > slopPx && abs(dx) >= abs(dy)) {
+                                                lockedHorizontal = true
+                                                activeEdgeSwipeSide = candidateSide
+                                            } else if (inwardDrag < -slopPx) {
+                                                break
+                                            }
+                                        }
+
+                                        if (lockedHorizontal) {
+                                            change.consume()
+                                            currentDrag = inwardDrag.coerceAtLeast(0f)
+                                            edgeSwipeDragPx = currentDrag
+
+                                            val isAvailable = when (candidateSide) {
+                                                EdgeSwipeSide.LEFT_BACK -> currentCanSwipeBack
+                                                EdgeSwipeSide.RIGHT_FORWARD -> currentCanSwipeForward
+                                            }
+                                            if (isAvailable && currentDrag >= edgeCommitThresholdPx && !crossedThresholdHapticFired) {
+                                                crossedThresholdHapticFired = true
+                                                runCatching {
+                                                    hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                }
+                                            } else if (currentDrag < edgeCommitThresholdPx) {
+                                                crossedThresholdHapticFired = false
+                                            }
+                                        }
+                                    }
+
+                                    if (lockedHorizontal && currentDrag >= edgeCommitThresholdPx && currentEdgeSwipeEnabled) {
+                                        when (candidateSide) {
+                                            EdgeSwipeSide.LEFT_BACK -> currentOnSwipeBack()
+                                            EdgeSwipeSide.RIGHT_FORWARD -> currentOnSwipeForward()
+                                        }
+                                    }
+                                } finally {
+                                    activeEdgeSwipeSide = null
+                                    edgeSwipeDragPx = 0f
                                 }
                             }
-                        } finally {
-                            activeEdgeSwipeSide = null
-                            edgeSwipeDragPx = 0f
                         }
+                    } else {
+                        Modifier
                     }
-                }
+                )
                 .testTag("nyxora_central_browser_container")
         ) {
             if (isPrivateMode && settings.privateTabsLockEnabled && settings.privateTabsPinHash.isNotEmpty() && !isPrivateUnlocked) {
@@ -1096,7 +1113,7 @@ fun NyxoraMainBrowserScreen(
             }
 
             // Semantic Left & Right Edge-Swipe Zones + Visual Edge-Pull Navigation Indicator
-            if (settings.edgeSwipeBackForward && !isFullscreenVideo) {
+            if (isEdgeSwipeActive) {
                 Box(
                     modifier = Modifier
                         .align(Alignment.CenterStart)

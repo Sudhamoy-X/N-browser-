@@ -11,6 +11,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
@@ -1103,7 +1105,7 @@ enum class SettingsCategory(val title: String, val subtitle: String) {
     ),
     ABOUT(
         title = "About",
-        subtitle = "NYXORA Browser 3.0, Version & Build Info, Check for Updates, Legal, Credits"
+        subtitle = "NYXORA Browser 4.0, Version & Build Info, Check for Updates, Legal, Credits"
     ),
     // Kept for backward source compatibility
     DOWNLOADS(
@@ -1226,65 +1228,79 @@ fun NyxoraSettingsScreen(
         return keywords.any { it.contains(searchQuery, ignoreCase = true) }
     }
 
+    val headerContainerScrollState = rememberScrollState()
+
     Surface(
         modifier = Modifier
             .fillMaxSize()
             .testTag("nyxora_settings_screen"),
         color = SoulSettingsBg
     ) {
-        Column(
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxSize()
                 .windowInsetsPadding(WindowInsets.safeDrawing)
-                .widthIn(max = 700.dp)
-                .verticalScroll(settingsScrollState)
-                .padding(horizontal = 16.dp, vertical = 6.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // Compact Soul Browser Top Header
-            Row(
+            val bodyMaxHeight = (maxHeight - 64.dp).coerceAtLeast(240.dp)
+            Column(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 2.dp),
-                verticalAlignment = Alignment.CenterVertically
+                    .fillMaxSize()
+                    .widthIn(max = 700.dp)
+                    .verticalScroll(headerContainerScrollState)
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                IconButton(
-                    onClick = {
-                        if (selectedCategory != null) {
-                            selectedCategory = null
-                        } else {
-                            onDismiss()
-                        }
-                    },
-                    modifier = Modifier.testTag("settings_back_button")
+                // Compact Soul Browser Top Header (pinned at top of viewport)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Outlined.ArrowBack,
-                        contentDescription = "Back",
-                        tint = SoulSettingsTextPrimary
-                    )
-                }
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = selectedCategory?.title ?: "Settings",
-                        style = MaterialTheme.typography.titleMedium.copy(
-                            fontWeight = FontWeight.SemiBold,
-                            fontSize = 18.sp
-                        ),
-                        color = SoulSettingsTextPrimary
-                    )
-                    if (selectedCategory == null) {
-                        Text(
-                            text = "NYXORA Browser ${BuildConfig.VERSION_NAME}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = SoulSettingsTextSecondary
+                    IconButton(
+                        onClick = {
+                            if (selectedCategory != null) {
+                                selectedCategory = null
+                            } else {
+                                onDismiss()
+                            }
+                        },
+                        modifier = Modifier.testTag("settings_back_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Outlined.ArrowBack,
+                            contentDescription = "Back",
+                            tint = SoulSettingsTextPrimary
                         )
                     }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = selectedCategory?.title ?: "Settings",
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 18.sp
+                            ),
+                            color = SoulSettingsTextPrimary
+                        )
+                        if (selectedCategory == null) {
+                            Text(
+                                text = "NYXORA Browser ${BuildConfig.VERSION_NAME}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = SoulSettingsTextSecondary
+                            )
+                        }
+                    }
                 }
-            }
 
-            // Search input on Settings Home
-            if (selectedCategory == null) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = bodyMaxHeight)
+                        .verticalScroll(settingsScrollState),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    // Search input on Settings Home
+                    if (selectedCategory == null) {
                 OutlinedTextField(
                     value = searchQuery,
                     onValueChange = { searchQuery = it },
@@ -3077,6 +3093,8 @@ fun NyxoraSettingsScreen(
                     )
                 }
             }
+            }
+        }
         }
     }
 
