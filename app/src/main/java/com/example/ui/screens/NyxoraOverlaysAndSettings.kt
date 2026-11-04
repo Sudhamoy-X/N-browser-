@@ -1464,43 +1464,7 @@ fun NyxoraSettingsScreen(
                         testTag = "setting_search_suggestions_toggle"
                     )
 
-                    if (settings.searchSuggestionsEnabled) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("settings_suggestion_provider_section"),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Text(
-                                text = "Search Suggestion Provider: ${settings.suggestionProviderLabel}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Row(
-                                modifier = Modifier.horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                FilterChip(
-                                    selected = settings.searchSuggestionProvider.equals("FOLLOW_DEFAULT", ignoreCase = true),
-                                    onClick = {
-                                        onUpdateSettings { it.copy(searchSuggestionProvider = "FOLLOW_DEFAULT") }
-                                    },
-                                    label = { Text("Follow Default") },
-                                    modifier = Modifier.testTag("settings_suggestion_provider_chip_follow_default")
-                                )
-                                for (engine in SearchEngine.entries) {
-                                    FilterChip(
-                                        selected = settings.searchSuggestionProvider.equals(engine.name, ignoreCase = true),
-                                        onClick = {
-                                            onUpdateSettings { it.copy(searchSuggestionProvider = engine.name) }
-                                        },
-                                        label = { Text(engine.label) },
-                                        modifier = Modifier.testTag("settings_suggestion_provider_chip_${engine.name.lowercase()}")
-                                    )
-                                }
-                            }
-                        }
-                    }
+                    // Suggestions follow the selected default engine; remove the duplicate provider picker.
 
                     SoulSettingsSubtleDivider()
 
