@@ -112,8 +112,8 @@ jobs:
           set -euo pipefail
           GRADLE_VERSION_NAME=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)
           GRADLE_VERSION_CODE=$(sed -n 's/.*versionCode = \([0-9][0-9]*\).*/\1/p' app/build.gradle.kts | head -n 1)
-          GRADLE_VERSION_NAME="${GRADLE_VERSION_NAME:-3.0}"
-          GRADLE_VERSION_CODE="${GRADLE_VERSION_CODE:-4}"
+          GRADLE_VERSION_NAME="${GRADLE_VERSION_NAME:-4.0}"
+          GRADLE_VERSION_CODE="${GRADLE_VERSION_CODE:-5}"
 
           # Query latest published GitHub Release (if any) to ensure versionCode and versionName strictly increase
           LATEST_JSON=$(curl -fsSL \

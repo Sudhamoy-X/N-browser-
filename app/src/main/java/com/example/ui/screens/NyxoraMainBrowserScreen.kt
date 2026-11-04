@@ -868,7 +868,8 @@ fun NyxoraMainBrowserScreen(
                     selectedSuggestionIndex = selectedSuggestionIndex,
                     onSearchQueryChanged = viewModel::onSearchQueryChanged,
                     onMoveSuggestionSelection = viewModel::moveSuggestionSelection,
-                    onClearSearchSuggestions = viewModel::clearSearchSuggestions
+                    onClearSearchSuggestions = viewModel::clearSearchSuggestions,
+                    isVisibleOnScreen = (activeOverlay == OverlaySheet.NONE)
                 )
             } else {
                 // Lazy-collect site settings & allowOnceUrls only when rendering a web page

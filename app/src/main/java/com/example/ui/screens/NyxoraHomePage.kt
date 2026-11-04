@@ -101,6 +101,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import com.example.R
+import com.example.data.local.AnimationPerformanceMode
 import com.example.data.local.NyxoraSettingsState
 import com.example.data.model.BookmarkItem
 import com.example.data.model.HistoryItem
@@ -230,7 +231,8 @@ fun NyxoraHomePage(
     selectedSuggestionIndex: Int = -1,
     onSearchQueryChanged: (String, Boolean) -> Unit = { _, _ -> },
     onMoveSuggestionSelection: (Int) -> SearchSuggestionItem? = { null },
-    onClearSearchSuggestions: () -> Unit = {}
+    onClearSearchSuggestions: () -> Unit = {},
+    isVisibleOnScreen: Boolean = true
 ) {
     val bookmarks by bookmarksFlow.collectAsStateWithLifecycle()
     val userShortcuts = remember(bookmarks) {
@@ -319,8 +321,8 @@ fun NyxoraHomePage(
         } else {
             (maxHeight * 0.020f).coerceIn(13.dp, 17.dp)
         }
-        val brandLogoSize = if (isCompactViewport) 30.dp else 32.dp
-        val brandTitleFontSize = if (isCompactViewport) 21.sp else 22.sp
+        val brandLogoSize = if (isCompactViewport) 34.dp else 38.dp
+        val brandTitleFontSize = if (isCompactViewport) 22.sp else 24.sp
         val searchBarHeight = if (isCompactViewport) 44.dp else 48.dp
         val shortcutIconSize = if (isCompactViewport) 44.dp else 48.dp
         val shortcutRowSpacing = if (isCompactViewport) 10.dp else 14.dp
@@ -386,6 +388,9 @@ fun NyxoraHomePage(
                     isPrivateMode = isPrivateMode,
                     animateLogoGlow = settings.homeLogoAnimationEnabled,
                     reducedMotion = settings.reducedMotion,
+                    glowIntensityScale = settings.logoGlowIntensity,
+                    performanceMode = settings.animationPerformanceMode,
+                    isVisibleOnScreen = isVisibleOnScreen,
                     logoSize = brandLogoSize,
                     titleFontSize = brandTitleFontSize,
                     bottomSpacing = headerBottomSpacing
@@ -656,8 +661,11 @@ private fun ReferenceHomeBrandHeader(
     isPrivateMode: Boolean,
     animateLogoGlow: Boolean,
     reducedMotion: Boolean,
-    logoSize: Dp = 32.dp,
-    titleFontSize: TextUnit = 22.sp,
+    glowIntensityScale: Float = 0.75f,
+    performanceMode: AnimationPerformanceMode = AnimationPerformanceMode.BALANCED,
+    isVisibleOnScreen: Boolean = true,
+    logoSize: Dp = 38.dp,
+    titleFontSize: TextUnit = 24.sp,
     bottomSpacing: Dp = 6.dp
 ) {
     Column(
@@ -674,23 +682,45 @@ private fun ReferenceHomeBrandHeader(
             NyxoraHomeBrandLogo(
                 animateGlow = animateLogoGlow,
                 reducedMotion = reducedMotion,
+                glowIntensityScale = glowIntensityScale,
+                performanceMode = performanceMode,
+                isVisibleOnScreen = isVisibleOnScreen,
                 size = logoSize,
                 imageTestTag = "home_official_icon_image"
             )
-            Spacer(modifier = Modifier.width(10.dp))
-            Text(
-                text = "NYXORA",
-                style = MaterialTheme.typography.headlineSmall.copy(
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 2.6.sp,
-                    fontSize = titleFontSize
-                ),
-                color = Color(0xFFF8FAFC),
-                modifier = Modifier.testTag("home_brand_title_text")
-            )
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(horizontalAlignment = Alignment.Start) {
+                Text(
+                    text = "NYXORA",
+                    style = MaterialTheme.typography.headlineSmall.copy(
+                        fontWeight = FontWeight.ExtraBold,
+                        letterSpacing = 3.2.sp,
+                        fontSize = titleFontSize
+                    ),
+                    color = Color(0xFFF8FAFC),
+                    modifier = Modifier.testTag("home_brand_title_text")
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Box(
+                    modifier = Modifier
+                        .width(46.dp)
+                        .height(2.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(
+                            Brush.horizontalGradient(
+                                colors = listOf(
+                                    Color(0xFF38BDF8).copy(alpha = 0.85f),
+                                    Color(0xFF2563EB).copy(alpha = 0.65f),
+                                    Color.Transparent
+                                )
+                            )
+                        )
+                        .testTag("home_brand_accent_line")
+                )
+            }
         }
         if (isPrivateMode) {
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(modifier = Modifier.height(6.dp))
             Surface(
                 shape = RoundedCornerShape(999.dp),
                 color = Color(0xFF1E293B).copy(alpha = 0.85f),

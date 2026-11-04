@@ -146,6 +146,8 @@ class MainActivity : ComponentActivity() {
                 if (!splashCompleted && settings.launchAnimationEnabled) {
                     NyxoraLaunchSplash(
                         reducedMotion = settings.reducedMotion,
+                        logoGlowIntensityScale = settings.logoGlowIntensity,
+                        performanceMode = settings.animationPerformanceMode,
                         onSplashCompleted = { splashCompleted = true }
                     )
                 } else {

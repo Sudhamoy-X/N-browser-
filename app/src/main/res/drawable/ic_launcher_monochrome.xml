@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Android 13+ Monochrome / Themed Launcher Icon Silhouette (Safe Zone 66dp) -->
+    <path
+        android:pathData="M29.5,73.5 L41.5,34.5 L66.5,73.5 L78.5,34.5"
+        android:strokeWidth="12.0"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>

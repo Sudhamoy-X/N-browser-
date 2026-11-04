@@ -1,4 +1,171 @@
 <?xml version="1.0" encoding="utf-8"?>
-<inset xmlns:android="http://schemas.android.com/apk/res/android"
-    android:drawable="@drawable/nyxora_official_icon"
-    android:inset="20%" />
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!--
+      NYXORA Browser 4.0 Native 3D 'N' Brand Mark (Adaptive Icon Foreground)
+      - Strictly within the 66dp safe zone (X: 25..83, Y: 27..81 inside 108x108 canvas)
+      - Zero raster cutout borders, zero white edges, infinitely sharp vector geometry
+      - Realistic 3D ribbon depth, fold shadows, and controlled blue/cyan highlights
+    -->
+
+    <!-- 1. Soft Ambient Drop Shadow under the 3D N Ribbon -->
+    <path
+        android:pathData="M29.5,75.5 L41.5,36.5 L66.5,75.5 L78.5,36.5"
+        android:strokeWidth="14.5"
+        android:strokeColor="#48020617"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <!-- 2. Controlled Luminous Cyan-Blue Silhouette Halo -->
+    <path
+        android:pathData="M29.5,73.5 L41.5,34.5 L66.5,73.5 L78.5,34.5"
+        android:strokeWidth="15.2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:startX="26"
+                android:startY="76"
+                android:endX="82"
+                android:endY="32"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#2E38BDF8" />
+                <item android:offset="0.5" android:color="#262563EB" />
+                <item android:offset="1.0" android:color="#367DD3FC" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 3. Left Ascending 3D Ribbon Pillar (Bottom-Left Cyan Tip to Top-Left Royal Blue Fold) -->
+    <path
+        android:pathData="M29.5,73.5 L41.5,34.5"
+        android:strokeWidth="12.2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:startX="28"
+                android:startY="76"
+                android:endX="42"
+                android:endY="32"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FF7DD3FC" />
+                <item android:offset="0.28" android:color="#FF0EA5E9" />
+                <item android:offset="0.72" android:color="#FF1D4ED8" />
+                <item android:offset="1.0" android:color="#FF1E3A8A" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Left Pillar Inner Specular Rim -->
+    <path
+        android:pathData="M28.2,72.2 L40.2,34.8"
+        android:strokeWidth="2.2"
+        android:strokeLineCap="round">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:startX="28"
+                android:startY="73"
+                android:endX="40"
+                android:endY="34"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#99BAE6FD" />
+                <item android:offset="0.6" android:color="#4D60A5FA" />
+                <item android:offset="1.0" android:color="#001D4ED8" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 4. Right Ascending 3D Ribbon Pillar (Bottom-Right Sapphire Crease to Luminous Cyan Crown) -->
+    <path
+        android:pathData="M66.5,73.5 L78.5,34.5"
+        android:strokeWidth="12.2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:startX="66"
+                android:startY="76"
+                android:endX="80"
+                android:endY="30"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FF1E40AF" />
+                <item android:offset="0.32" android:color="#FF0284C7" />
+                <item android:offset="0.72" android:color="#FF38BDF8" />
+                <item android:offset="1.0" android:color="#FFE0F2FE" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Right Pillar Inner Luminous Highlight -->
+    <path
+        android:pathData="M67.6,71.8 L79.4,34.2"
+        android:strokeWidth="2.6"
+        android:strokeLineCap="round">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:startX="67"
+                android:startY="72"
+                android:endX="80"
+                android:endY="33"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#1A38BDF8" />
+                <item android:offset="0.55" android:color="#80BAE6FD" />
+                <item android:offset="1.0" android:color="#CCF0F9FF" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 5. 3D Ribbon Fold Crease Shadow (Separates Central Bridge from Left & Right Pillars) -->
+    <path
+        android:pathData="M41.2,35.8 L66.2,74.2"
+        android:strokeWidth="12.8"
+        android:strokeColor="#54040B1A"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <!-- 6. Central Diagonal 3D Ribbon Bridge (Folds Over Top-Left and into Bottom-Right) -->
+    <path
+        android:pathData="M41.5,34.5 L66.5,73.5"
+        android:strokeWidth="12.4"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:startX="39"
+                android:startY="31"
+                android:endX="69"
+                android:endY="76"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FF60A5FA" />
+                <item android:offset="0.24" android:color="#FF2563EB" />
+                <item android:offset="0.72" android:color="#FF1D4ED8" />
+                <item android:offset="1.0" android:color="#FF3B82F6" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 7. Upper-Bevel Specular Reflection along the Central Diagonal Ribbon -->
+    <path
+        android:pathData="M42.8,33.5 L67.2,71.6"
+        android:strokeWidth="2.4"
+        android:strokeLineCap="round">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:startX="41"
+                android:startY="32"
+                android:endX="68"
+                android:endY="72"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#D9E0F2FE" />
+                <item android:offset="0.48" android:color="#8093C5FD" />
+                <item android:offset="1.0" android:color="#3360A5FA" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

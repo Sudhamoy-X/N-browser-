@@ -2525,6 +2525,11 @@ class NyxoraBrowserViewModel(
         }
     }
 
+    fun restoreDefaultBranding() {
+        updateSettings { it.withDefaultBranding() }
+        emitToast("Restored default NYXORA branding")
+    }
+
     fun exportEncryptedBackup(passphrase: String, onResult: (Result<String>) -> Unit) {
         viewModelScope.launch {
             val s = settings.value

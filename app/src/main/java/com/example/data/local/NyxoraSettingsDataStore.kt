@@ -5,6 +5,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -85,6 +86,21 @@ enum class BrowserOrientationMode(val label: String) {
     PORTRAIT("Portrait Only"),
     LANDSCAPE("Landscape Only"),
     SENSOR("Auto-Rotate Sensor")
+}
+
+enum class AnimationPerformanceMode(val label: String, val description: String) {
+    SMOOTH("Smooth", "Full luminous breathing glow and periodic light shimmer"),
+    BALANCED("Balanced", "Refined luminous breathing glow with battery-conscious cadence"),
+    BATTERY_SAVER("Battery Saver", "Static luminous ambient accent with zero continuous loop")
+}
+
+object BrandGlowIntensityPresets {
+    const val SUBTLE = 0.35f
+    const val BALANCED = 0.75f
+    const val LUMINOUS = 1.0f
+    const val DEFAULT_INTENSITY = BALANCED
+
+    fun normalize(value: Float): Float = value.coerceIn(0f, 1f)
 }
 
 data class UserScriptItem(
@@ -198,6 +214,8 @@ data class NyxoraSettingsState(
     val showHomePromotionalCards: Boolean = false,
     val launchAnimationEnabled: Boolean = true,
     val homeLogoAnimationEnabled: Boolean = true,
+    val logoGlowIntensity: Float = BrandGlowIntensityPresets.DEFAULT_INTENSITY,
+    val animationPerformanceMode: AnimationPerformanceMode = AnimationPerformanceMode.BALANCED,
     val globalTextZoom: Int = 100,
     val compactBottomToolbar: Boolean = false,
     val addressBarShowReloadButton: Boolean = true,
@@ -298,6 +316,17 @@ data class NyxoraSettingsState(
         } else {
             resolvedSuggestionEngine.label
         }
+
+    fun withDefaultBranding(): NyxoraSettingsState = copy(
+        themeMode = ThemeMode.DARK,
+        homeWallpaperStyle = "AURORA_BLUE",
+        showAmbientHomeBackground = false,
+        launchAnimationEnabled = true,
+        homeLogoAnimationEnabled = true,
+        logoGlowIntensity = BrandGlowIntensityPresets.DEFAULT_INTENSITY,
+        animationPerformanceMode = AnimationPerformanceMode.BALANCED,
+        reducedMotion = false
+    )
 }
 
 class NyxoraSettingsDataStore(private val context: Context) {
@@ -318,6 +347,8 @@ class NyxoraSettingsDataStore(private val context: Context) {
         val SHOW_HOME_PROMO_CARDS = booleanPreferencesKey("show_home_promo_cards")
         val LAUNCH_ANIMATION_ENABLED = booleanPreferencesKey("launch_animation_enabled")
         val HOME_LOGO_ANIMATION_ENABLED = booleanPreferencesKey("home_logo_animation_enabled")
+        val LOGO_GLOW_INTENSITY = floatPreferencesKey("logo_glow_intensity")
+        val ANIMATION_PERFORMANCE_MODE = stringPreferencesKey("animation_performance_mode")
         val GLOBAL_TEXT_ZOOM = intPreferencesKey("global_text_zoom")
         val COMPACT_TOOLBAR = booleanPreferencesKey("compact_toolbar")
         val ADDRESS_BAR_SHOW_RELOAD = booleanPreferencesKey("address_bar_show_reload")
@@ -460,6 +491,14 @@ class NyxoraSettingsDataStore(private val context: Context) {
             showHomePromotionalCards = prefs[Keys.SHOW_HOME_PROMO_CARDS] ?: false,
             launchAnimationEnabled = prefs[Keys.LAUNCH_ANIMATION_ENABLED] ?: true,
             homeLogoAnimationEnabled = prefs[Keys.HOME_LOGO_ANIMATION_ENABLED] ?: true,
+            logoGlowIntensity = BrandGlowIntensityPresets.normalize(
+                prefs[Keys.LOGO_GLOW_INTENSITY] ?: BrandGlowIntensityPresets.DEFAULT_INTENSITY
+            ),
+            animationPerformanceMode = runCatching {
+                AnimationPerformanceMode.valueOf(
+                    prefs[Keys.ANIMATION_PERFORMANCE_MODE] ?: AnimationPerformanceMode.BALANCED.name
+                )
+            }.getOrDefault(AnimationPerformanceMode.BALANCED),
             globalTextZoom = (prefs[Keys.GLOBAL_TEXT_ZOOM] ?: 100).coerceIn(50, 250),
             compactBottomToolbar = prefs[Keys.COMPACT_TOOLBAR] ?: false,
             addressBarShowReloadButton = prefs[Keys.ADDRESS_BAR_SHOW_RELOAD] ?: true,
@@ -559,6 +598,8 @@ class NyxoraSettingsDataStore(private val context: Context) {
             prefs[Keys.SHOW_HOME_PROMO_CARDS] = updated.showHomePromotionalCards
             prefs[Keys.LAUNCH_ANIMATION_ENABLED] = updated.launchAnimationEnabled
             prefs[Keys.HOME_LOGO_ANIMATION_ENABLED] = updated.homeLogoAnimationEnabled
+            prefs[Keys.LOGO_GLOW_INTENSITY] = BrandGlowIntensityPresets.normalize(updated.logoGlowIntensity)
+            prefs[Keys.ANIMATION_PERFORMANCE_MODE] = updated.animationPerformanceMode.name
             prefs[Keys.GLOBAL_TEXT_ZOOM] = updated.globalTextZoom.coerceIn(50, 250)
             prefs[Keys.COMPACT_TOOLBAR] = updated.compactBottomToolbar
             prefs[Keys.ADDRESS_BAR_SHOW_RELOAD] = updated.addressBarShowReloadButton

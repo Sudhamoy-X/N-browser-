@@ -167,6 +167,111 @@ class ExampleUnitTest {
         assertEquals(100, com.example.data.local.UniversalTextScalePresets.normalizeScale(100))
         assertEquals(250, com.example.data.local.UniversalTextScalePresets.normalizeScale(300))
     }
+
+    @Test
+    fun brandingAndAnimationV4_pausesContinuousLogoAnimationsOnBackgroundHiddenOrBatterySaverAndRestoresDefaults() {
+        // 1. Continuous logo animation runs when visible, resumed, enabled, and not in battery saver
+        assertTrue(
+            com.example.ui.components.shouldRunContinuousLogoAnimation(
+                animateGlow = true,
+                reducedMotion = false,
+                performanceMode = com.example.data.local.AnimationPerformanceMode.BALANCED,
+                isVisibleOnScreen = true,
+                isLifecycleResumed = true,
+                isDevicePowerSaveMode = false
+            )
+        )
+
+        // 2. Pauses when homepage is hidden / covered by an overlay
+        assertFalse(
+            com.example.ui.components.shouldRunContinuousLogoAnimation(
+                animateGlow = true,
+                reducedMotion = false,
+                performanceMode = com.example.data.local.AnimationPerformanceMode.SMOOTH,
+                isVisibleOnScreen = false,
+                isLifecycleResumed = true,
+                isDevicePowerSaveMode = false
+            )
+        )
+
+        // 3. Pauses when app is backgrounded (!isLifecycleResumed)
+        assertFalse(
+            com.example.ui.components.shouldRunContinuousLogoAnimation(
+                animateGlow = true,
+                reducedMotion = false,
+                performanceMode = com.example.data.local.AnimationPerformanceMode.SMOOTH,
+                isVisibleOnScreen = true,
+                isLifecycleResumed = false,
+                isDevicePowerSaveMode = false
+            )
+        )
+
+        // 4. Pauses when AnimationPerformanceMode.BATTERY_SAVER or Android Power Save Mode is active
+        assertFalse(
+            com.example.ui.components.shouldRunContinuousLogoAnimation(
+                animateGlow = true,
+                reducedMotion = false,
+                performanceMode = com.example.data.local.AnimationPerformanceMode.BATTERY_SAVER,
+                isVisibleOnScreen = true,
+                isLifecycleResumed = true,
+                isDevicePowerSaveMode = false
+            )
+        )
+        assertFalse(
+            com.example.ui.components.shouldRunContinuousLogoAnimation(
+                animateGlow = true,
+                reducedMotion = false,
+                performanceMode = com.example.data.local.AnimationPerformanceMode.SMOOTH,
+                isVisibleOnScreen = true,
+                isLifecycleResumed = true,
+                isDevicePowerSaveMode = true
+            )
+        )
+
+        // 5. Pauses when reducedMotion is enabled or animateGlow is disabled
+        assertFalse(
+            com.example.ui.components.shouldRunContinuousLogoAnimation(
+                animateGlow = true,
+                reducedMotion = true,
+                performanceMode = com.example.data.local.AnimationPerformanceMode.SMOOTH,
+                isVisibleOnScreen = true,
+                isLifecycleResumed = true,
+                isDevicePowerSaveMode = false
+            )
+        )
+        assertFalse(
+            com.example.ui.components.shouldRunContinuousLogoAnimation(
+                animateGlow = false,
+                reducedMotion = false,
+                performanceMode = com.example.data.local.AnimationPerformanceMode.SMOOTH,
+                isVisibleOnScreen = true,
+                isLifecycleResumed = true,
+                isDevicePowerSaveMode = false
+            )
+        )
+
+        // 6. Verify BrandGlowIntensityPresets and withDefaultBranding() restoration
+        val customized = com.example.data.local.NyxoraSettingsState(
+            launchAnimationEnabled = false,
+            homeLogoAnimationEnabled = false,
+            logoGlowIntensity = com.example.data.local.BrandGlowIntensityPresets.SUBTLE,
+            animationPerformanceMode = com.example.data.local.AnimationPerformanceMode.BATTERY_SAVER,
+            homeWallpaperStyle = "EMERALD_MIST",
+            showAmbientHomeBackground = true
+        )
+        val restored = customized.withDefaultBranding()
+        assertTrue(restored.launchAnimationEnabled)
+        assertTrue(restored.homeLogoAnimationEnabled)
+        assertEquals(
+            com.example.data.local.BrandGlowIntensityPresets.DEFAULT_INTENSITY,
+            restored.logoGlowIntensity,
+            0.001f
+        )
+        assertEquals(
+            com.example.data.local.AnimationPerformanceMode.BALANCED,
+            restored.animationPerformanceMode
+        )
+        assertEquals("AURORA_BLUE", restored.homeWallpaperStyle)
+        assertFalse(restored.showAmbientHomeBackground)
+    }
 }
-
-

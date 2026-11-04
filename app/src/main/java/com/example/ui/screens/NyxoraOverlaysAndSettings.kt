@@ -85,6 +85,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.outlined.Code
+import com.example.data.local.AnimationPerformanceMode
+import com.example.data.local.BrandGlowIntensityPresets
 import com.example.data.local.BrowserOrientationMode
 import com.example.data.local.FullscreenOrientationMode
 import com.example.data.local.NyxoraSettingsState
@@ -112,6 +114,7 @@ import com.example.domain.browser.NyxoraShieldEngine
 import com.example.domain.browser.ReaderArticle
 import com.example.domain.browser.ShieldFilterListId
 import com.example.domain.update.ApkUpdateUiState
+import com.example.ui.components.NyxoraHomeBrandLogo
 import com.example.ui.components.rememberNyxoraGentleMomentumFlingBehavior
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -1761,7 +1764,8 @@ fun NyxoraSettingsScreen(
                     "Customization", "Appearance", "Theme", "Light", "Dark", "System",
                     "Shortcuts", "Wallpaper", "Animation", "Launch", "News", "Promo",
                     "Cards", "Toolbar", "Address Bar", "Reload", "Security Icon", "Swipe",
-                    "Text size", "Language", "Gesture"
+                    "Text size", "Language", "Gesture", "Branding", "Glow", "Intensity",
+                    "Performance", "Restore Default Branding", "Logo", "Splash"
                 )
             ) {
                 SettingsSectionCard(title = "Customization") {
@@ -1786,11 +1790,13 @@ fun NyxoraSettingsScreen(
                     }
 
                     SoulSettingsSubtleDivider()
-                    SoulSettingsSectionHeader("Homepage & Animation")
+                    Box(modifier = Modifier.testTag("settings_branding_animation_section")) {
+                        SoulSettingsSectionHeader("Branding & Animation")
+                    }
 
                     SettingToggleItem(
-                        title = "Opening Launch Animation",
-                        subtitle = "Play the 2-second glowing NYXORA opening animation on subsequent launches",
+                        title = "Splash Animation",
+                        subtitle = "Play the luminous 3D NYXORA opening sequence on browser launch",
                         checked = settings.launchAnimationEnabled,
                         onCheckedChange = { v ->
                             onUpdateSettings { it.copy(launchAnimationEnabled = v) }
@@ -1799,14 +1805,123 @@ fun NyxoraSettingsScreen(
                     )
 
                     SettingToggleItem(
-                        title = "Home Screen Logo Animation",
-                        subtitle = "Subtle breathing blue-violet glow around the NYXORA Home Screen logo",
+                        title = "Homepage Logo Animation",
+                        subtitle = "Persistent luminous breathing glow and light shimmer on the NYXORA logo",
                         checked = settings.homeLogoAnimationEnabled,
                         onCheckedChange = { v ->
                             onUpdateSettings { it.copy(homeLogoAnimationEnabled = v) }
                         },
                         testTag = "setting_home_logo_animation_toggle"
                     )
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Logo Glow Intensity",
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                            Text(
+                                text = "${(settings.logoGlowIntensity * 100f).roundToInt()}%",
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.testTag("setting_logo_glow_intensity_value")
+                            )
+                        }
+                        Slider(
+                            value = settings.logoGlowIntensity.coerceIn(0f, 1f),
+                            onValueChange = { newVal ->
+                                val rounded = (newVal * 20f).roundToInt() / 20f
+                                onUpdateSettings { it.copy(logoGlowIntensity = rounded.coerceIn(0f, 1f)) }
+                            },
+                            valueRange = 0f..1f,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("setting_logo_glow_intensity_slider")
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            val presets = listOf(
+                                "Subtle" to BrandGlowIntensityPresets.SUBTLE,
+                                "Balanced" to BrandGlowIntensityPresets.BALANCED,
+                                "Luminous" to BrandGlowIntensityPresets.LUMINOUS
+                            )
+                            for ((label, presetVal) in presets) {
+                                val isSelected = kotlin.math.abs(settings.logoGlowIntensity - presetVal) < 0.04f
+                                FilterChip(
+                                    selected = isSelected,
+                                    onClick = {
+                                        onUpdateSettings { it.copy(logoGlowIntensity = presetVal) }
+                                    },
+                                    label = { Text(label) },
+                                    modifier = Modifier.testTag("setting_logo_glow_chip_${label.lowercase()}")
+                                )
+                            }
+                        }
+                    }
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "Animation Performance Mode",
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                        Text(
+                            text = "Controls frame pacing and automatic pause behavior for luminous brand animations",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            for (perfMode in AnimationPerformanceMode.entries) {
+                                FilterChip(
+                                    selected = settings.animationPerformanceMode == perfMode,
+                                    onClick = {
+                                        onUpdateSettings { it.copy(animationPerformanceMode = perfMode) }
+                                    },
+                                    label = { Text(perfMode.label) },
+                                    modifier = Modifier.testTag("setting_anim_perf_chip_${perfMode.name.lowercase()}")
+                                )
+                            }
+                        }
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            onUpdateSettings { it.withDefaultBranding() }
+                            onToast("Restored default NYXORA branding")
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("setting_restore_default_branding_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Refresh,
+                            contentDescription = "Restore Default Branding",
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Restore Default Branding")
+                    }
+
+                    SoulSettingsSubtleDivider()
+                    SoulSettingsSectionHeader("Homepage Layout")
 
                     SettingToggleItem(
                         title = "Homepage Shortcuts",
@@ -2790,7 +2905,7 @@ fun NyxoraSettingsScreen(
             // F. ABOUT NYXORA
             if (selectedCategory == SettingsCategory.ABOUT ||
                 matchesSearch(
-                    "About", "NYXORA", "Sudhamoy", "Crafted", "Version", "3.0", "2.5", "2.0",
+                    "About", "NYXORA", "Sudhamoy", "Crafted", "Version", "4.0", "3.0", "2.5", "2.0",
                     "Update", "APK", "Release", "Share", "Engine", "WebView", "Capability",
                     "Licenses", "Privacy Policy", "Terms", "Support"
                 )
@@ -2801,18 +2916,32 @@ fun NyxoraSettingsScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "NYXORA Browser 3.0",
-                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                                modifier = Modifier.testTag("about_nyxora_title")
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            NyxoraHomeBrandLogo(
+                                animateGlow = settings.homeLogoAnimationEnabled,
+                                reducedMotion = settings.reducedMotion,
+                                glowIntensityScale = settings.logoGlowIntensity,
+                                performanceMode = settings.animationPerformanceMode,
+                                size = 34.dp,
+                                imageTestTag = "about_nyxora_brand_logo"
                             )
-                            Text(
-                                text = "Browse Beyond Ordinary.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.testTag("about_nyxora_tagline")
-                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text(
+                                    text = "NYXORA Browser 4.0",
+                                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                    modifier = Modifier.testTag("about_nyxora_title")
+                                )
+                                Text(
+                                    text = "Browse Beyond Ordinary.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.testTag("about_nyxora_tagline")
+                                )
+                            }
                         }
                         if (apkUpdateState.hasUpdateIndicator) {
                             val badgeVersion = apkUpdateState.activeReleaseInfo?.cleanVersion

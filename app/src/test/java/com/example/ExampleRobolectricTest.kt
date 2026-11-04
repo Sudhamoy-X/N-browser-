@@ -642,14 +642,14 @@ class ExampleRobolectricTest {
         // Verify easy bookmark access directly below the homepage search bar
         composeTestRule.onNodeWithTag("home_bookmarks_quick_access_button").assertIsDisplayed()
 
-        // Verify Version 3.0 build metadata (supports local "3.0" / code 4 and CI monotonic "3.0.<build>" / code >= 4)
+        // Verify Version 4.0 build metadata (supports local "4.0" / code 5 and CI monotonic "4.0.<build>" / code >= 5)
         assertTrue(
-            "Expected BuildConfig.VERSION_NAME to be \"3.0\" or start with \"3.0.\", but was \"${BuildConfig.VERSION_NAME}\"",
-            BuildConfig.VERSION_NAME == "3.0" || BuildConfig.VERSION_NAME.startsWith("3.0.")
+            "Expected BuildConfig.VERSION_NAME to be \"4.0\" or start with \"4.0.\", but was \"${BuildConfig.VERSION_NAME}\"",
+            BuildConfig.VERSION_NAME == "4.0" || BuildConfig.VERSION_NAME.startsWith("4.0.")
         )
         assertTrue(
-            "Expected BuildConfig.VERSION_CODE >= 4, but was ${BuildConfig.VERSION_CODE}",
-            BuildConfig.VERSION_CODE >= 4
+            "Expected BuildConfig.VERSION_CODE >= 5, but was ${BuildConfig.VERSION_CODE}",
+            BuildConfig.VERSION_CODE >= 5
         )
 
         // 3. Open bottom menu -> Settings -> Verify 7 categories, Room Sync removed from Settings, and About NYXORA works
@@ -2525,14 +2525,14 @@ class ExampleRobolectricTest {
 
         val vm = checkNotNull(composeTestRule.activity.activeBrowserViewModel)
 
-        // 1. Verify Version 3.0 and incremented VersionCode (supports local "3.0" / code 4 and CI monotonic "3.0.<build>" / code >= 4)
+        // 1. Verify Version 4.0 and incremented VersionCode (supports local "4.0" / code 5 and CI monotonic "4.0.<build>" / code >= 5)
         assertTrue(
-            "Expected BuildConfig.VERSION_NAME to be \"3.0\" or start with \"3.0.\", but was \"${BuildConfig.VERSION_NAME}\"",
-            BuildConfig.VERSION_NAME == "3.0" || BuildConfig.VERSION_NAME.startsWith("3.0.")
+            "Expected BuildConfig.VERSION_NAME to be \"4.0\" or start with \"4.0.\", but was \"${BuildConfig.VERSION_NAME}\"",
+            BuildConfig.VERSION_NAME == "4.0" || BuildConfig.VERSION_NAME.startsWith("4.0.")
         )
         assertTrue(
-            "Expected BuildConfig.VERSION_CODE >= 4, but was ${BuildConfig.VERSION_CODE}",
-            BuildConfig.VERSION_CODE >= 4
+            "Expected BuildConfig.VERSION_CODE >= 5, but was ${BuildConfig.VERSION_CODE}",
+            BuildConfig.VERSION_CODE >= 5
         )
         assertTrue(
             "2.6 must be recognized as newer than 2.5",
@@ -2617,14 +2617,14 @@ class ExampleRobolectricTest {
         assertFalse(noApkShareText.contains("nyxora.browser"))
         assertFalse(noApkShareText.contains("file://"))
 
-        // Verify About NYXORA 3.0 title and Share NYXORA Browser button launch native share chooser
+        // Verify About NYXORA 4.0 title and Share NYXORA Browser button launch native share chooser
         vm.setOverlaySheet(com.example.ui.viewmodel.OverlaySheet.SETTINGS)
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("settings_category_about").performScrollTo().performClick()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("about_nyxora_title").performScrollTo().assertIsDisplayed()
         assertTrue(
-            composeTestRule.onAllNodesWithText("NYXORA Browser 3.0", substring = true).fetchSemanticsNodes().isNotEmpty()
+            composeTestRule.onAllNodesWithText("NYXORA Browser 4.0", substring = true).fetchSemanticsNodes().isNotEmpty()
         )
         shadowOf(composeTestRule.activity.application).clearNextStartedActivities()
         composeTestRule.onNodeWithTag("about_share_app_button").performScrollTo().performClick()
@@ -3491,6 +3491,113 @@ class ExampleRobolectricTest {
         waitUntilCondition { vm.settings.value.globalTextZoom == 100 }
         assertEquals(100, vm.settings.value.globalTextZoom)
         assertEquals(100, checkNotNull(vm.activeTab.value).textZoom)
+    }
+
+    @Test
+    fun `nyxora browser 4_0 verifies adaptive launcher icon resources luminous homepage logo and branding animation settings`() {
+        composeTestRule.mainClock.advanceTimeBy(350L)
+        composeTestRule.waitForIdle()
+
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val vm = checkNotNull(composeTestRule.activity.activeBrowserViewModel)
+
+        fun waitUntilSettings(predicate: (com.example.data.local.NyxoraSettingsState) -> Boolean) {
+            val deadline = System.currentTimeMillis() + 3000L
+            while (!predicate(vm.settings.value) && System.currentTimeMillis() < deadline) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                composeTestRule.mainClock.advanceTimeBy(50L)
+                composeTestRule.waitForIdle()
+                Thread.sleep(20L)
+            }
+        }
+
+        // 1. Verify Adaptive Launcher Icon layers (foreground, background, monochrome) and mipmap assets load cleanly
+        assertNotNull(context.getDrawable(R.drawable.ic_launcher_background))
+        assertNotNull(context.getDrawable(R.drawable.ic_launcher_foreground))
+        assertNotNull(context.getDrawable(R.drawable.ic_launcher_monochrome))
+        assertNotNull(context.getDrawable(R.mipmap.ic_launcher))
+        assertNotNull(context.getDrawable(R.mipmap.ic_launcher_round))
+        assertNotNull(context.getDrawable(R.drawable.nyxora_official_icon))
+
+        // 2. Verify Homepage Luminous NYXORA Brand Header, Horizon Accent Line, and Single Search Bar
+        vm.switchBrowsingMode(false)
+        vm.closeAllTabs(inPrivateMode = false)
+        vm.setOverlaySheet(com.example.ui.viewmodel.OverlaySheet.NONE)
+        vm.restoreDefaultBranding()
+        waitUntilSettings {
+            it.launchAnimationEnabled &&
+                it.homeLogoAnimationEnabled &&
+                kotlin.math.abs(it.logoGlowIntensity - com.example.data.local.BrandGlowIntensityPresets.DEFAULT_INTENSITY) < 0.01f &&
+                it.animationPerformanceMode == com.example.data.local.AnimationPerformanceMode.BALANCED
+        }
+
+        composeTestRule.onNodeWithTag("home_logo_header").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("home_official_icon_image", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("home_brand_title_text").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("home_brand_accent_line", useUnmergedTree = true).assertIsDisplayed()
+        assertEquals(
+            "Homepage must contain exactly one search bar trigger",
+            1,
+            composeTestRule.onAllNodesWithTag("home_search_bar_trigger").fetchSemanticsNodes().size
+        )
+
+        // 3. Open Settings -> Customization -> Branding & Animation and verify all V4.0 controls & persistence
+        vm.setOverlaySheet(com.example.ui.viewmodel.OverlaySheet.SETTINGS)
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("settings_category_customization").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("settings_branding_animation_section").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("setting_launch_animation_toggle").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("setting_home_logo_animation_toggle").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("setting_logo_glow_intensity_slider").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("setting_logo_glow_chip_subtle").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("setting_logo_glow_chip_balanced").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("setting_logo_glow_chip_luminous").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("setting_anim_perf_chip_smooth").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("setting_anim_perf_chip_balanced").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("setting_anim_perf_chip_battery_saver").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("setting_restore_default_branding_button").performScrollTo().assertIsDisplayed()
+
+        // Select Luminous glow preset and Battery Saver performance mode, and toggle Homepage Logo Animation OFF
+        composeTestRule.onNodeWithTag("setting_logo_glow_chip_luminous").performScrollTo().performClick()
+        waitUntilSettings { kotlin.math.abs(it.logoGlowIntensity - com.example.data.local.BrandGlowIntensityPresets.LUMINOUS) < 0.01f }
+        assertEquals(com.example.data.local.BrandGlowIntensityPresets.LUMINOUS, vm.settings.value.logoGlowIntensity, 0.01f)
+
+        composeTestRule.onNodeWithTag("setting_anim_perf_chip_battery_saver").performScrollTo().performClick()
+        waitUntilSettings { it.animationPerformanceMode == com.example.data.local.AnimationPerformanceMode.BATTERY_SAVER }
+        assertEquals(com.example.data.local.AnimationPerformanceMode.BATTERY_SAVER, vm.settings.value.animationPerformanceMode)
+
+        composeTestRule.onNodeWithTag("setting_home_logo_animation_toggle").performScrollTo().performClick()
+        waitUntilSettings { !it.homeLogoAnimationEnabled }
+        assertFalse(vm.settings.value.homeLogoAnimationEnabled)
+
+        // Tap Restore Default Branding button and verify defaults are restored immediately
+        composeTestRule.onNodeWithTag("setting_restore_default_branding_button").performScrollTo().performClick()
+        waitUntilSettings {
+            it.homeLogoAnimationEnabled &&
+                it.launchAnimationEnabled &&
+                kotlin.math.abs(it.logoGlowIntensity - com.example.data.local.BrandGlowIntensityPresets.DEFAULT_INTENSITY) < 0.01f &&
+                it.animationPerformanceMode == com.example.data.local.AnimationPerformanceMode.BALANCED
+        }
+        assertTrue(vm.settings.value.homeLogoAnimationEnabled)
+        assertTrue(vm.settings.value.launchAnimationEnabled)
+        assertEquals(com.example.data.local.BrandGlowIntensityPresets.DEFAULT_INTENSITY, vm.settings.value.logoGlowIntensity, 0.01f)
+        assertEquals(com.example.data.local.AnimationPerformanceMode.BALANCED, vm.settings.value.animationPerformanceMode)
+
+        // 4. Navigate to About NYXORA and verify V4.0 brand logo and title
+        composeTestRule.onNodeWithTag("settings_back_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("settings_category_about").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("about_nyxora_brand_logo", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("about_nyxora_title").performScrollTo().assertIsDisplayed()
+        assertTrue(
+            composeTestRule.onAllNodesWithText("NYXORA Browser 4.0", substring = true).fetchSemanticsNodes().isNotEmpty()
+        )
+
+        vm.setOverlaySheet(com.example.ui.viewmodel.OverlaySheet.NONE)
+        composeTestRule.waitForIdle()
     }
 
     private fun findFirstWebView(root: View?): WebView? {
