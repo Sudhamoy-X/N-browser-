@@ -652,23 +652,28 @@ class ExampleRobolectricTest {
             BuildConfig.VERSION_CODE >= 5
         )
 
-        // 3. Open bottom menu -> Settings -> Verify 7 categories, Room Sync removed from Settings, and About NYXORA works
+        // 3. Open bottom menu -> Settings -> Verify the five consolidated categories and About NYXORA
         composeTestRule.onNodeWithTag("toolbar_overflow_menu_button").performClick()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("menu_item_settings").performClick()
         composeTestRule.waitForIdle()
 
-        // Verify Settings Home has all 6 Soul Browser primary categories and does NOT contain Room Sync button
+        // Settings Home keeps five categories. Scripts is intentionally nested inside Browser Tools.
         composeTestRule.onNodeWithTag("settings_category_general").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("settings_category_customization").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("settings_category_privacy").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("settings_category_advanced").performScrollTo().assertIsDisplayed()
-        composeTestRule.onNodeWithTag("settings_category_scripts").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("settings_category_about").performScrollTo().assertIsDisplayed()
+        assertEquals(
+            "Scripts must be nested under Browser Tools, not shown as a separate home category",
+            0,
+            composeTestRule.onAllNodesWithTag("settings_category_scripts").fetchSemanticsNodes().size
+        )
 
-        // Verify Advanced category (including Video Assistant & Playback)
+        // Verify Browser Tools contains Video Assistant and the nested Scripts section.
         composeTestRule.onNodeWithTag("settings_category_advanced").performScrollTo().performClick()
         composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("settings_scripts_section").performScrollTo().assertIsDisplayed()
         assertEquals(
             "Room Sync button must be removed from Settings",
             0,
