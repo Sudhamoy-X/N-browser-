@@ -480,6 +480,8 @@ fun NyxoraLaunchSplash(
     val glowIntensity = remember { Animatable(if (reducedMotion) 0.48f * effectiveGlowScale else 0.16f * effectiveGlowScale) }
     val sweepProgress = remember { Animatable(0f) }
     val brandingAlpha = remember { Animatable(if (reducedMotion) 1f else 0f) }
+    val wordmarkReveal = remember { Animatable(if (reducedMotion) 1f else 0f) }
+    val underlineReveal = remember { Animatable(if (reducedMotion) 1f else 0f) }
     val containerAlpha = remember { Animatable(1f) }
 
     LaunchedEffect(reducedMotion, forceFullDurationInTest, performanceMode) {
@@ -509,6 +511,8 @@ fun NyxoraLaunchSplash(
             if (isRobolectric && !forceFullDurationInTest) {
                 launch {
                     brandingAlpha.animateTo(1f, animationSpec = tween(p1Duration, easing = FastOutSlowInEasing))
+                    wordmarkReveal.animateTo(1f, animationSpec = tween(p1Duration, easing = FastOutSlowInEasing))
+                    underlineReveal.animateTo(1f, animationSpec = tween(p1Duration, easing = FastOutSlowInEasing))
                 }
             }
             jobAmbient.join()
@@ -526,9 +530,13 @@ fun NyxoraLaunchSplash(
             val jobSweep = launch {
                 sweepProgress.animateTo(1f, animationSpec = tween(p2Duration, easing = FastOutSlowInEasing))
             }
+            // The completed N becomes the anchor. Reveal NYXORA letter-by-letter, then draw the luminous underline.
             val jobBrandEarly = launch {
-                delay(scaledMs(480).toLong())
-                brandingAlpha.animateTo(1f, animationSpec = tween(scaledMs(420), easing = FastOutSlowInEasing))
+                delay(scaledMs(180).toLong())
+                brandingAlpha.animateTo(1f, animationSpec = tween(scaledMs(220), easing = FastOutSlowInEasing))
+                wordmarkReveal.animateTo(1f, animationSpec = tween(scaledMs(620), easing = FastOutSlowInEasing))
+                delay(scaledMs(70).toLong())
+                underlineReveal.animateTo(1f, animationSpec = tween(scaledMs(420), easing = FastOutSlowInEasing))
             }
             jobGlow.join()
             jobSweep.join()
@@ -619,40 +627,90 @@ fun NyxoraLaunchSplash(
             verticalArrangement = Arrangement.Center,
             modifier = Modifier.padding(horizontal = 24.dp)
         ) {
-            Box(
-                modifier = Modifier.graphicsLayer {
-                    alpha = logoAlpha.value
-                    scaleX = logoScale.value
-                    scaleY = logoScale.value
-                },
-                contentAlignment = Alignment.Center
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
             ) {
-                NyxoraGeometricLogo(
-                    size = 92.dp,
-                    sweepProgress = sweepProgress.value,
-                    glowIntensity = glowIntensity.value,
-                    modifier = Modifier.testTag("splash_official_icon")
-                )
+                Box(
+                    modifier = Modifier.graphicsLayer {
+                        alpha = logoAlpha.value
+                        scaleX = logoScale.value
+                        scaleY = logoScale.value
+                    },
+                    contentAlignment = Alignment.Center
+                ) {
+                    NyxoraGeometricLogo(
+                        size = 86.dp,
+                        sweepProgress = sweepProgress.value,
+                        glowIntensity = glowIntensity.value,
+                        modifier = Modifier.testTag("splash_official_icon")
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(12.dp))
+
+                Column(
+                    horizontalAlignment = Alignment.Start,
+                    modifier = Modifier.width(202.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.testTag("splash_wordmark_reveal")
+                    ) {
+                        "NYXORA".forEachIndexed { index, letter ->
+                            val letterAlpha = ((wordmarkReveal.value * 6f) - index).coerceIn(0f, 1f)
+                            Text(
+                                text = letter.toString(),
+                                style = MaterialTheme.typography.headlineLarge.copy(
+                                    letterSpacing = 2.2.sp,
+                                    fontWeight = FontWeight.Medium
+                                ),
+                                color = Color(0xFFF8FAFC).copy(alpha = letterAlpha),
+                                modifier = Modifier.graphicsLayer {
+                                    alpha = letterAlpha
+                                    translationX = (1f - letterAlpha) * 9f
+                                    translationY = (1f - letterAlpha) * 3f
+                                }
+                            )
+                        }
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .padding(top = 7.dp)
+                            .width(178.dp)
+                            .height(3.dp)
+                            .testTag("splash_brand_underline_track")
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .width(178.dp * underlineReveal.value)
+                                .height(3.dp)
+                                .background(
+                                    Brush.horizontalGradient(
+                                        listOf(
+                                            Color(0xFF0EA5E9),
+                                            Color(0xFF38BDF8),
+                                            Color(0xFF93C5FD),
+                                            Color(0xFF2563EB)
+                                        )
+                                    )
+                                )
+                                .graphicsLayer {
+                                    shadowElevation = 12f * underlineReveal.value
+                                }
+                                .testTag("splash_brand_underline")
+                        )
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(22.dp))
 
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.graphicsLayer {
-                    alpha = brandingAlpha.value
-                }
+                modifier = Modifier.graphicsLayer { alpha = brandingAlpha.value }
             ) {
-                Text(
-                    text = "NYXORA",
-                    style = MaterialTheme.typography.headlineLarge.copy(
-                        letterSpacing = 5.5.sp,
-                        fontWeight = FontWeight.Bold
-                    ),
-                    color = Color(0xFFF8FAFC),
-                    modifier = Modifier.testTag("splash_brand_title_text")
-                )
-                Spacer(modifier = Modifier.height(6.dp))
                 Text(
                     text = "Browse Beyond Ordinary.",
                     style = MaterialTheme.typography.bodyMedium,
@@ -660,9 +718,7 @@ fun NyxoraLaunchSplash(
                     modifier = Modifier.testTag("splash_tagline_text")
                 )
                 Spacer(modifier = Modifier.height(16.dp))
-                NyxoraCreatorSignature(
-                    textTestTag = "splash_creator_credit"
-                )
+                NyxoraCreatorSignature(textTestTag = "splash_creator_credit")
             }
         }
     }
