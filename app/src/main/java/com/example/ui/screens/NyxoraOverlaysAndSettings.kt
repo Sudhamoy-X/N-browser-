@@ -1080,7 +1080,7 @@ fun NyxoraReaderModeSheet(
     }
 }
 
-// --- PROFESSIONAL 7-CATEGORY SETTINGS SCREEN (NYXORA 2.0) ---
+// --- COMPACT SETTINGS HOME (NYXORA V5) ---
 
 enum class SettingsCategory(val title: String, val subtitle: String) {
     GENERAL(
@@ -1088,20 +1088,20 @@ enum class SettingsCategory(val title: String, val subtitle: String) {
         subtitle = "Search Engine, Homepage, User Agent, Downloads, Language, Clear Data, Sync"
     ),
     CUSTOMIZATION(
-        title = "Customization",
-        subtitle = "Theme, Homepage Layout, Toolbar & Address Bar, Gestures, Font Appearance"
+        title = "Appearance",
+        subtitle = "Theme, Homepage, Toolbar, Branding and Website Text Size"
     ),
     PRIVACY(
         title = "Privacy & Security",
         subtitle = "NYXORA Shield, Ad & Tracker Blocking, WebRTC, Cookies, Site Permissions, Incognito"
     ),
     ADVANCED(
-        title = "Advanced",
-        subtitle = "JavaScript, Video Assistant, Desktop Mode, Cache & Storage, Diagnostics, Reset"
+        title = "Browser Tools",
+        subtitle = "Web Engine, Video Assistant, Gestures, Storage and Diagnostics"
     ),
     SCRIPTS(
         title = "Scripts",
-        subtitle = "Custom JavaScript, Per-Website Script Rules, Import/Export, Execution Permissions"
+        subtitle = "Custom JavaScript and website script rules"
     ),
     ABOUT(
         title = "About",
@@ -1110,11 +1110,11 @@ enum class SettingsCategory(val title: String, val subtitle: String) {
     // Kept for backward source compatibility
     DOWNLOADS(
         title = "Downloads",
-        subtitle = "Download Manager, Risky File Warnings, Download Notifications, Storage"
+        subtitle = "Download Manager and download preferences"
     ),
     MEDIA_VIDEO_ASSISTANT(
         title = "Media & Video Assistant",
-        subtitle = "Video Assistant, 500% Max Zoom, Fullscreen Orientation, Aspect Ratio, PiP"
+        subtitle = "Video playback, fullscreen, zoom and picture-in-picture"
     )
 }
 
@@ -1354,15 +1354,6 @@ fun NyxoraSettingsScreen(
                         icon = Icons.Outlined.Tune,
                         testTag = "settings_category_advanced",
                         onClick = { selectedCategory = SettingsCategory.ADVANCED }
-                    )
-                    SoulSettingsSubtleDivider()
-                    SoulSettingsCategoryRow(
-                        title = SettingsCategory.SCRIPTS.title,
-                        subtitle = SettingsCategory.SCRIPTS.subtitle,
-                        icon = Icons.Outlined.Code,
-                        testTag = "settings_category_scripts",
-                        badgeText = if (settings.parsedUserScripts.isNotEmpty()) "${settings.parsedUserScripts.size} active" else null,
-                        onClick = { selectedCategory = SettingsCategory.SCRIPTS }
                     )
                     SoulSettingsSubtleDivider()
                     SoulSettingsCategoryRow(
@@ -2529,7 +2520,7 @@ fun NyxoraSettingsScreen(
                     "Cache", "Storage", "Reset", "Diagnostics", "Memory", "CPU", "Crash"
                 )
             ) {
-                SettingsSectionCard(title = "Advanced") {
+                SettingsSectionCard(title = "Browser Tools") {
                     SoulSettingsSectionHeader("Web Engine & Content Rendering")
 
                     SettingToggleItem(
@@ -2863,6 +2854,7 @@ fun NyxoraSettingsScreen(
 
             // E. SCRIPTS
             if (selectedCategory == SettingsCategory.SCRIPTS ||
+                selectedCategory == SettingsCategory.ADVANCED ||
                 matchesSearch(
                     "Scripts", "User Script", "Custom JavaScript", "Userscript",
                     "Script Rules", "Script Import", "Script Export"
