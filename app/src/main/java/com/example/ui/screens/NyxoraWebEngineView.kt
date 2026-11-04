@@ -2314,11 +2314,11 @@ private fun createConfiguredTabWebView(
             textZoom = currentTabProvider().textZoom.coerceIn(50, 250)
             setSupportMultipleWindows(true)
             javaScriptCanOpenWindowsAutomatically = false
-            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
             allowContentAccess = false
             allowFileAccess = false
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                runCatching { safeBrowsingEnabled = false }
+                runCatching { safeBrowsingEnabled = true }
             }
         }
 
