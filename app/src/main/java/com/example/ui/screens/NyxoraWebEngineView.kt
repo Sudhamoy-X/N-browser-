@@ -2798,7 +2798,15 @@ private fun createConfiguredTabWebView(
                     val cameraPreAllowed = "CAMERA" !in requestedTypes || effectiveCameraRule == "ALLOW"
                     val micPreAllowed = "MICROPHONE" !in requestedTypes || effectiveMicRule == "ALLOW"
                     if (cameraPreAllowed && micPreAllowed) {
-                        req.grant(req.resources)
+                        val approvedResources = req.resources.filter { resource ->
+                            resource == PermissionRequest.RESOURCE_VIDEO_CAPTURE ||
+                                resource == PermissionRequest.RESOURCE_AUDIO_CAPTURE
+                        }.toTypedArray()
+                        if (approvedResources.isNotEmpty()) {
+                            req.grant(approvedResources)
+                        } else {
+                            req.deny()
+                        }
                     } else {
                         onPromptSitePermission(
                             PendingSitePermissionPrompt(
