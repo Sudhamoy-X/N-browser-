@@ -2181,80 +2181,37 @@ fun NyxoraSettingsScreen(
                         }
                     }
 
-                    // 1. Master Shield ON / OFF
+                    // V5: One unified protection control. Legacy sub-feature preferences are
+                    // intentionally kept in the data model for migration compatibility.
                     SettingToggleItem(
-                        title = "Master Shield Protection",
+                        title = "NYXORA Shield",
                         subtitle = if (settings.shieldMasterEnabled) {
-                            "NYXORA Shield active ($activeShieldRuleCount rules loaded)"
+                            "Ad, tracker, popup, redirect and malicious-domain protection active • $activeShieldRuleCount rules"
                         } else {
-                            "NYXORA Shield is paused across all websites"
+                            "All network and cosmetic protection is paused"
                         },
                         checked = settings.shieldMasterEnabled,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(shieldMasterEnabled = v) } },
+                        onCheckedChange = { enabled ->
+                            onUpdateSettings { current ->
+                                current.copy(
+                                    shieldMasterEnabled = enabled,
+                                    adBlockingEnabled = enabled,
+                                    trackerProtectionEnabled = enabled,
+                                    popupBlockingEnabled = enabled,
+                                    redirectBlockingEnabled = enabled,
+                                    cosmeticFilteringEnabled = enabled,
+                                    urlTrackingProtectionEnabled = enabled,
+                                    dnsProtectionEnabled = enabled
+                                )
+                            }
+                        },
                         testTag = "shield_master_toggle"
                     )
 
-                    // 2. Advertisement Blocking
-                    SettingToggleItem(
-                        title = "Advertisement Blocking",
-                        subtitle = "Block intrusive ad domains, banners, and video ad scripts (${settings.totalAdsBlockedCount} blocked)",
-                        checked = settings.adBlockingEnabled,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(adBlockingEnabled = v) } },
-                        testTag = "shield_ad_blocking_toggle"
-                    )
-
-                    // 3. Tracker Protection
-                    SettingToggleItem(
-                        title = "Tracker Protection",
-                        subtitle = "Block third-party analytics, telemetry, and fingerprinting scripts (${settings.totalTrackersBlockedCount} blocked)",
-                        checked = settings.trackerProtectionEnabled,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(trackerProtectionEnabled = v) } },
-                        testTag = "shield_tracker_protection_toggle"
-                    )
-
-                    // 4. Pop-up Protection
-                    SettingToggleItem(
-                        title = "Pop-up Protection",
-                        subtitle = "Block unrequested pop-up windows and tab-unders (${settings.totalPopupsBlockedCount} blocked)",
-                        checked = settings.popupBlockingEnabled,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(popupBlockingEnabled = v) } },
-                        testTag = "shield_popup_protection_toggle"
-                    )
-
-                    // 5. Auto-Redirect Protection
-                    SettingToggleItem(
-                        title = "Auto-Redirect Protection",
-                        subtitle = "Block automatic cross-site redirects without user interaction (${settings.totalRedirectsBlockedCount} blocked)",
-                        checked = settings.redirectBlockingEnabled,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(redirectBlockingEnabled = v) } },
-                        testTag = "shield_redirect_protection_toggle"
-                    )
-
-                    // 6. Cosmetic Filtering
-                    SettingToggleItem(
-                        title = "Cosmetic Filtering",
-                        subtitle = "Hide webpage advertisement containers and empty sponsor slots safely",
-                        checked = settings.cosmeticFilteringEnabled,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(cosmeticFilteringEnabled = v) } },
-                        testTag = "shield_cosmetic_filtering_toggle"
-                    )
-
-                    // 7. URL Tracking Protection
-                    SettingToggleItem(
-                        title = "URL Tracking Parameter Protection",
-                        subtitle = "Strip utm_*, fbclid, gclid, msclkid, and affiliate tracking parameters (${settings.totalTrackingParamsStrippedCount} cleaned)",
-                        checked = settings.urlTrackingProtectionEnabled,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(urlTrackingProtectionEnabled = v) } },
-                        testTag = "shield_url_tracking_toggle"
-                    )
-
-                    // 8. DNS & Malvertising Protection
-                    SettingToggleItem(
-                        title = "DNS & Malvertising Guard",
-                        subtitle = "Block malicious advertising and phishing domains inside NYXORA without VPN (${settings.totalDnsThreatsBlockedCount} blocked)",
-                        checked = settings.dnsProtectionEnabled,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(dnsProtectionEnabled = v) } },
-                        testTag = "shield_dns_protection_toggle"
+                    Text(
+                        text = "One switch controls all protection layers. Filter sources, trusted websites and protection statistics remain available below.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
 
                     SoulSettingsSubtleDivider()
