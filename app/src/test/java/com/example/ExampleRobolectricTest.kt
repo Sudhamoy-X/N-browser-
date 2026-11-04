@@ -3352,10 +3352,10 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("settings_back_button").performScrollTo().performClick()
         composeTestRule.waitForIdle()
 
-        // Category E: Scripts — test creating a custom user script & toggling it
-        composeTestRule.onNodeWithTag("settings_category_scripts").performScrollTo().performClick()
+        // Category E: Scripts are nested inside Browser Tools in the consolidated V5 settings.
+        composeTestRule.onNodeWithTag("settings_category_advanced").performScrollTo().performClick()
         composeTestRule.waitForIdle()
-        composeTestRule.onNodeWithTag("settings_scripts_section").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("settings_scripts_section").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("scripts_add_button").performScrollTo().performClick()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("script_dialog_name_input").performTextReplacement("Example Tweaker")
