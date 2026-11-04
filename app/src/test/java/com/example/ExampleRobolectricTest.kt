@@ -3065,14 +3065,19 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("settings_category_privacy").performScrollTo().performClick()
         composeTestRule.waitForIdle()
 
+        // V5 consolidates the former per-feature switches into one functional master control.
         composeTestRule.onNodeWithTag("shield_master_toggle").performScrollTo().assertIsDisplayed()
-        composeTestRule.onNodeWithTag("shield_ad_blocking_toggle").performScrollTo().assertIsDisplayed()
-        composeTestRule.onNodeWithTag("shield_tracker_protection_toggle").performScrollTo().assertIsDisplayed()
-        composeTestRule.onNodeWithTag("shield_popup_protection_toggle").performScrollTo().assertIsDisplayed()
-        composeTestRule.onNodeWithTag("shield_redirect_protection_toggle").performScrollTo().assertIsDisplayed()
-        composeTestRule.onNodeWithTag("shield_cosmetic_filtering_toggle").performScrollTo().assertIsDisplayed()
-        composeTestRule.onNodeWithTag("shield_url_tracking_toggle").performScrollTo().assertIsDisplayed()
-        composeTestRule.onNodeWithTag("shield_dns_protection_toggle").performScrollTo().assertIsDisplayed()
+        assertEquals(
+            "Legacy individual Shield switches must not reappear in the compact V5 interface",
+            0,
+            composeTestRule.onAllNodesWithTag("shield_ad_blocking_toggle").fetchSemanticsNodes().size +
+                composeTestRule.onAllNodesWithTag("shield_tracker_protection_toggle").fetchSemanticsNodes().size +
+                composeTestRule.onAllNodesWithTag("shield_popup_protection_toggle").fetchSemanticsNodes().size +
+                composeTestRule.onAllNodesWithTag("shield_redirect_protection_toggle").fetchSemanticsNodes().size +
+                composeTestRule.onAllNodesWithTag("shield_cosmetic_filtering_toggle").fetchSemanticsNodes().size +
+                composeTestRule.onAllNodesWithTag("shield_url_tracking_toggle").fetchSemanticsNodes().size +
+                composeTestRule.onAllNodesWithTag("shield_dns_protection_toggle").fetchSemanticsNodes().size
+        )
         composeTestRule.onNodeWithTag("shield_statistics_section").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("shield_active_rule_count_text").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("shield_last_update_text").performScrollTo().assertIsDisplayed()
