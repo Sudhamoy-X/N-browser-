@@ -15,8 +15,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -579,8 +577,7 @@ fun NyxoraLaunchSplash(
                     )
                 )
             )
-            .testTag("nyxora_launch_splash")
-            ,
+            .testTag("nyxora_launch_splash"),
         contentAlignment = Alignment.Center
     ) {
         // Layered sapphire & cyan ambient illumination behind the centered NYXORA logo
