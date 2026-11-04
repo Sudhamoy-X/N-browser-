@@ -1876,23 +1876,6 @@ fun NyxoraSettingsScreen(
                     }
 
                     SettingToggleItem(
-                        title = "Disable News Feeds & Extra Homepage Cards",
-                        subtitle = "Keep the homepage distraction-free without news feeds, discovery cards, or activity clutter",
-                        checked = !settings.showHomeNewsFeed && !settings.showHomeFreqVisited && !settings.showHomeRecentActivity,
-                        onCheckedChange = { disableExtras ->
-                            onUpdateSettings {
-                                it.copy(
-                                    showHomeNewsFeed = !disableExtras,
-                                    showHomeFreqVisited = false,
-                                    showHomeRecentActivity = !disableExtras,
-                                    showHomeGreeting = false
-                                )
-                            }
-                        },
-                        testTag = "setting_disable_news_feed_toggle"
-                    )
-
-                    SettingToggleItem(
                         title = "Disable Promotional & Discovery Cards",
                         subtitle = "Prevent promotional banners and sponsored cards from appearing on the homepage",
                         checked = !settings.showHomePromotionalCards,
@@ -1984,35 +1967,6 @@ fun NyxoraSettingsScreen(
                         testTag = "setting_customization_force_dark_toggle"
                     )
 
-                    SoulSettingsSubtleDivider()
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.Language,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Text("Language", style = MaterialTheme.typography.bodyLarge)
-                    }
-                    Row(
-                        modifier = Modifier.horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        for (lang in SUPPORTED_LANGUAGES) {
-                            FilterChip(
-                                selected = settings.preferredLanguage == lang,
-                                onClick = {
-                                    onUpdateSettings { it.copy(preferredLanguage = lang) }
-                                    onToast("Language preference: $lang")
-                                },
-                                label = { Text(lang) }
-                            )
-                        }
-                    }
                 }
             }
 
@@ -2022,7 +1976,7 @@ fun NyxoraSettingsScreen(
                     "Privacy",
                     "Security",
                     "Shield",
-                    "NYXORA Shield",
+                    "Content Blocking",
                     "Ad",
                     "Tracker",
                     "Pop-up",
@@ -2041,7 +1995,7 @@ fun NyxoraSettingsScreen(
                     "Permissions"
                 )
             ) {
-                SettingsSectionCard(title = "Privacy & Security — NYXORA Shield") {
+                SettingsSectionCard(title = "Privacy & Security") {
                     var whitelistInput by remember { mutableStateOf("") }
                     val filterListStatuses = remember(settings.enabledFilterLists, settings.lastFilterUpdateMillis, customFilterRules.size) {
                         NyxoraShieldEngine.getFilterListStatuses()
@@ -2063,7 +2017,7 @@ fun NyxoraSettingsScreen(
                     // V5: One unified protection control. Legacy sub-feature preferences are
                     // intentionally kept in the data model for migration compatibility.
                     SettingToggleItem(
-                        title = "NYXORA Shield",
+                        title = "Content Blocking",
                         subtitle = if (settings.shieldMasterEnabled) {
                             "Ad, tracker, popup, redirect and malicious-domain protection active • $activeShieldRuleCount rules"
                         } else {
@@ -2088,7 +2042,7 @@ fun NyxoraSettingsScreen(
                     )
 
                     Text(
-                        text = "One switch controls all protection layers. Filter sources, trusted websites and protection statistics remain available below.",
+                        text = "Built-in ad, tracker and malicious-domain filtering. uBlock Origin extension support requires a browser-engine upgrade.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -2107,13 +2061,13 @@ fun NyxoraSettingsScreen(
                             style = MaterialTheme.typography.labelLarge
                         )
                         Text(
-                            text = "Ads Blocked: ${settings.totalAdsBlockedCount} • Trackers Blocked: ${settings.totalTrackersBlockedCount}",
+                            text = "Ads: ${settings.totalAdsBlockedCount} • Trackers: ${settings.totalTrackersBlockedCount}",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.testTag("shield_stats_ads_trackers_text")
                         )
                         Text(
-                            text = "Pop-ups Blocked: ${settings.totalPopupsBlockedCount} • Redirects Blocked: ${settings.totalRedirectsBlockedCount}",
+                            text = "Pop-ups: ${settings.totalPopupsBlockedCount} • Redirects: ${settings.totalRedirectsBlockedCount}",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.testTag("shield_stats_popups_redirects_text")
@@ -2175,11 +2129,11 @@ fun NyxoraSettingsScreen(
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Text(
-                            text = "Filter List Manager",
+                            text = "Filter Sources",
                             style = MaterialTheme.typography.labelLarge
                         )
                         Text(
-                            text = "Maintain reputable filter sources (AdGuard Base, EasyList, EasyPrivacy, Peter Lowe's List, Malvertising Guard)",
+                            text = "Choose which built-in filter sources are active",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -2210,7 +2164,7 @@ fun NyxoraSettingsScreen(
                             style = MaterialTheme.typography.labelLarge
                         )
                         Text(
-                            text = "Disable NYXORA Shield filtering on trusted domains where you want ads or trackers allowed",
+                            text = "Exclude trusted websites from built-in content filtering",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
