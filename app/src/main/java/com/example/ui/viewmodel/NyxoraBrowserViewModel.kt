@@ -72,6 +72,24 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
+/**
+ * Atomically updates a MutableStateFlow and returns the committed value.
+ *
+ * The transform must be side-effect-free because a compare-and-set retry may
+ * evaluate it more than once under concurrent updates.
+ */
+private fun <T> MutableStateFlow<T>.updateAndGetCompat(
+    transform: (T) -> T
+): T {
+    while (true) {
+        val previous = value
+        val next = transform(previous)
+        if (compareAndSet(previous, next)) {
+            return next
+        }
+    }
+}
+
 data class BrowserTab(
     val id: String = UUID.randomUUID().toString(),
     val title: String = "New Tab",
@@ -2057,7 +2075,7 @@ class NyxoraBrowserViewModel(
 
     fun resetAllSitePermissions() {
         localSiteSettingCache.clear()
-        val updated = _settings.updateAndGet {
+        val updated = _settings.updateAndGetCompat {
             it.copy(
                 defaultLocationPermission = "ASK",
                 defaultCameraPermission = "ASK",
@@ -2524,7 +2542,7 @@ class NyxoraBrowserViewModel(
 
     fun updateSettings(transform: (NyxoraSettingsState) -> NyxoraSettingsState) {
         val before = _settings.value
-        val after = _settings.updateAndGet(transform)
+        val after = _settings.updateAndGetCompat(transform)
         syncShieldEngineConfig(after, siteSettings.value)
         if (after.globalTextZoom != before.globalTextZoom || after.defaultDesktopSite != before.defaultDesktopSite) {
             val propagateToTab: (BrowserTab) -> BrowserTab = { tab ->
