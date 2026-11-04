@@ -3302,10 +3302,6 @@ class ExampleRobolectricTest {
         waitUntilSettings { it.userAgentMode == com.example.data.local.UserAgentMode.DESKTOP }
         assertEquals(com.example.data.local.UserAgentMode.DESKTOP, vm.settings.value.userAgentMode)
 
-        composeTestRule.onNodeWithTag("setting_external_video_player_toggle").performScrollTo().performClick()
-        waitUntilSettings { it.externalVideoPlayerEnabled }
-        assertTrue(vm.settings.value.externalVideoPlayerEnabled)
-
         composeTestRule.onNodeWithTag("setting_clear_data_on_exit_toggle").performScrollTo().performClick()
         waitUntilSettings { it.clearDataOnExit }
         assertTrue(vm.settings.value.clearDataOnExit)
@@ -3349,6 +3345,9 @@ class ExampleRobolectricTest {
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("setting_advanced_javascript_toggle").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("setting_advanced_load_images_toggle").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("setting_advanced_external_video_toggle").performScrollTo().performClick()
+        waitUntilSettings { it.externalVideoPlayerEnabled }
+        assertTrue(vm.settings.value.externalVideoPlayerEnabled)
         composeTestRule.onNodeWithTag("settings_back_button").performScrollTo().performClick()
         composeTestRule.waitForIdle()
 
