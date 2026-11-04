@@ -498,7 +498,7 @@ fun NyxoraLaunchSplash(
             fun scaledMs(ms: Int): Int = (ms * timeScale).toInt().coerceAtLeast(15)
 
             // Steps 1 & 2 (0.0s – 0.4s): Deep midnight background fades in + NYXORA logo appears smoothly
-            val p1Duration = scaledMs(380)
+            val p1Duration = scaledMs(450)
             val jobAmbient = launch {
                 ambientAlpha.animateTo(1f, animationSpec = tween(p1Duration, easing = FastOutSlowInEasing))
             }
@@ -520,7 +520,7 @@ fun NyxoraLaunchSplash(
             jobLogoScale.join()
 
             // Steps 3 & 4 (0.4s – 1.2s): Soft blue/cyan luminous effect activates + subtle light sweep across N symbol
-            val p2Duration = scaledMs(760)
+            val p2Duration = scaledMs(800)
             val jobGlow = launch {
                 glowIntensity.animateTo(
                     targetValue = (0.88f * effectiveGlowScale).coerceIn(0.25f, 1f),
@@ -533,17 +533,17 @@ fun NyxoraLaunchSplash(
             // The completed N becomes the anchor. Reveal NYXORA letter-by-letter, then draw the luminous underline.
             val jobBrandEarly = launch {
                 delay(scaledMs(180).toLong())
-                brandingAlpha.animateTo(1f, animationSpec = tween(scaledMs(220), easing = FastOutSlowInEasing))
-                wordmarkReveal.animateTo(1f, animationSpec = tween(scaledMs(620), easing = FastOutSlowInEasing))
+                brandingAlpha.animateTo(1f, animationSpec = tween(scaledMs(260), easing = FastOutSlowInEasing))
+                wordmarkReveal.animateTo(1f, animationSpec = tween(scaledMs(850), easing = FastOutSlowInEasing))
                 delay(scaledMs(70).toLong())
-                underlineReveal.animateTo(1f, animationSpec = tween(scaledMs(420), easing = FastOutSlowInEasing))
+                underlineReveal.animateTo(1f, animationSpec = tween(scaledMs(500), easing = FastOutSlowInEasing))
             }
             jobGlow.join()
             jobSweep.join()
 
             // Step 5 (1.2s – 1.7s): Logo settles into a refined breathing glow
-            val pulseUpMs = scaledMs(240)
-            val pulseDownMs = scaledMs(240)
+            val pulseUpMs = scaledMs(300)
+            val pulseDownMs = scaledMs(300)
             glowIntensity.animateTo(
                 targetValue = (1.0f * effectiveGlowScale).coerceIn(0.30f, 1f),
                 animationSpec = tween(pulseUpMs, easing = FastOutSlowInEasing)
@@ -555,7 +555,9 @@ fun NyxoraLaunchSplash(
             jobBrandEarly.join()
 
             // Step 6 (1.7s – 2.0s): Smooth transition into the main browser interface
-            val p4Duration = scaledMs(280)
+            // Keep the completed brand mark visible briefly so the reveal can actually be seen.
+            delay(scaledMs(250).toLong())
+            val p4Duration = scaledMs(300)
             containerAlpha.animateTo(0f, animationSpec = tween(p4Duration, easing = FastOutSlowInEasing))
             onSplashCompleted()
         }
@@ -578,12 +580,7 @@ fun NyxoraLaunchSplash(
                 )
             )
             .testTag("nyxora_launch_splash")
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null
-            ) {
-                onSplashCompleted()
-            },
+            ,
         contentAlignment = Alignment.Center
     ) {
         // Layered sapphire & cyan ambient illumination behind the centered NYXORA logo
