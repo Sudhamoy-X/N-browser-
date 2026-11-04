@@ -692,7 +692,12 @@ class ExampleRobolectricTest {
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("setting_launch_animation_toggle").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("setting_home_wallpaper_toggle").performScrollTo().assertIsDisplayed()
-        composeTestRule.onNodeWithTag("setting_disable_news_feed_toggle").performScrollTo().assertIsDisplayed()
+        // Duplicate inverse feed toggle was removed; the direct News Feed switch is the single source of truth.
+        composeTestRule.onNodeWithTag("setting_home_news_feed_toggle").performScrollTo().assertIsDisplayed()
+        assertEquals(
+            0,
+            composeTestRule.onAllNodesWithTag("setting_disable_news_feed_toggle").fetchSemanticsNodes().size
+        )
         composeTestRule.onNodeWithTag("setting_disable_promo_cards_toggle").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("settings_back_button").performScrollTo().performClick()
         composeTestRule.waitForIdle()
