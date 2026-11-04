@@ -1436,14 +1436,11 @@ fun NyxoraSettingsScreen(
 
                     SoulSettingsSubtleDivider()
 
-                    // 3. Default Search Engine & Search Suggestions
-                    ReusableSettingRow(
-                        title = "Search Engine",
-                        subtitle = "Default search engine for address bar and homepage",
-                        valueText = settings.searchEngine.label,
-                        icon = Icons.Outlined.Search,
-                        testTag = "settings_search_engine_row",
-                        onClick = { showSearchEngineSelector = true }
+                    // Search engine selection: one compact chip row, no duplicate selector row.
+                    Text(
+                        text = "Default Search Engine",
+                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                     Row(
                         modifier = Modifier.horizontalScroll(rememberScrollState()),
@@ -1507,17 +1504,11 @@ fun NyxoraSettingsScreen(
 
                     SoulSettingsSubtleDivider()
 
-                    // 4. User Agent (Default / Desktop / Mobile / Custom)
-                    ReusableSettingRow(
-                        title = "User Agent",
-                        subtitle = if (settings.userAgentMode == UserAgentMode.CUSTOM && settings.customUserAgent.isNotBlank()) {
-                            settings.customUserAgent
-                        } else {
-                            "Choose Default, Mobile, Desktop, or Custom User-Agent string"
-                        },
-                        valueText = settings.userAgentMode.label,
-                        testTag = "settings_user_agent_option",
-                        onClick = { showUserAgentDialog = true }
+                    // User Agent: keep the direct choices; the separate selector row duplicated them.
+                    Text(
+                        text = "User Agent",
+                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -1552,15 +1543,7 @@ fun NyxoraSettingsScreen(
 
                     SoulSettingsSubtleDivider()
 
-                    // 4. Download Location & Download Manager
-                    ReusableSettingRow(
-                        title = "Download Location",
-                        subtitle = "Android Public Downloads folder (/Download • Scoped Storage)",
-                        valueText = "Downloads",
-                        icon = Icons.Outlined.FolderOpen,
-                        testTag = "settings_download_location_row",
-                        onClick = onOpenDownloads
-                    )
+                    // Download Manager is opened once below; avoid a second misleading entry labelled Download Location.
                     SettingToggleItem(
                         title = "Confirm Risky Downloads",
                         subtitle = "Warn before downloading APK or executable files",
@@ -1588,15 +1571,7 @@ fun NyxoraSettingsScreen(
 
                     SoulSettingsSubtleDivider()
 
-                    // 5. External Video Player & Orientation & Language & Font Settings
-                    SettingToggleItem(
-                        title = "External Video Player",
-                        subtitle = "Show quick action in fullscreen video player to open streams in an external player app",
-                        checked = settings.externalVideoPlayerEnabled,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(externalVideoPlayerEnabled = v) } },
-                        testTag = "setting_external_video_player_toggle"
-                    )
-
+                    // Video playback integrations live in Browser Tools to avoid duplicate controls.
                     ReusableSettingRow(
                         title = "Browser Orientation",
                         subtitle = "Control screen rotation behavior while browsing",
@@ -1614,58 +1589,7 @@ fun NyxoraSettingsScreen(
                         onClick = { showLanguageSelector = true }
                     )
 
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("settings_general_font_section"),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "Default Website Text Scale: ${settings.globalTextZoom}%",
-                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium)
-                            )
-                            TextButton(
-                                onClick = {
-                                    onUpdateSettings {
-                                        it.copy(globalTextZoom = UniversalTextScalePresets.DEFAULT_SCALE)
-                                    }
-                                    onToast("Website text scale reset to 100%")
-                                },
-                                enabled = settings.globalTextZoom != UniversalTextScalePresets.DEFAULT_SCALE,
-                                modifier = Modifier.testTag("settings_reset_text_scale_button")
-                            ) {
-                                Text("Reset to 100%")
-                            }
-                        }
-                        Row(
-                            modifier = Modifier.horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            for (preset in UniversalTextScalePresets.PRESETS) {
-                                FilterChip(
-                                    selected = settings.globalTextZoom == preset,
-                                    onClick = {
-                                        onUpdateSettings { it.copy(globalTextZoom = preset) }
-                                    },
-                                    label = { Text("${preset}%") },
-                                    modifier = Modifier.testTag("settings_text_scale_chip_$preset")
-                                )
-                            }
-                        }
-                        Slider(
-                            value = settings.globalTextZoom.toFloat(),
-                            onValueChange = { v ->
-                                val stepped = ((v / 5f).roundToInt() * 5).coerceIn(50, 250)
-                                onUpdateSettings { it.copy(globalTextZoom = stepped) }
-                            },
-                            valueRange = 50f..200f
-                        )
-                    }
+                    // Website text scaling is managed once under Browser Tools.
 
                     SoulSettingsSubtleDivider()
 
