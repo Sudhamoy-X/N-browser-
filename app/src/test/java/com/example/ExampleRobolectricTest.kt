@@ -658,25 +658,15 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("menu_item_settings").performClick()
         composeTestRule.waitForIdle()
 
-        // Verify Settings Home has all 7 required categories and does NOT contain Room Sync button
+        // Verify Settings Home has all 6 Soul Browser primary categories and does NOT contain Room Sync button
         composeTestRule.onNodeWithTag("settings_category_general").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("settings_category_customization").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("settings_category_privacy").performScrollTo().assertIsDisplayed()
-        composeTestRule.onNodeWithTag("settings_category_downloads").performScrollTo().assertIsDisplayed()
-        composeTestRule.onNodeWithTag("settings_category_media_video").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("settings_category_advanced").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("settings_category_scripts").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("settings_category_about").performScrollTo().assertIsDisplayed()
 
-        // Verify dedicated Media & Video Assistant category
-        composeTestRule.onNodeWithTag("settings_category_media_video").performScrollTo().performClick()
-        composeTestRule.waitForIdle()
-        composeTestRule.onNodeWithTag("settings_video_assistant_section").performScrollTo().assertIsDisplayed()
-        composeTestRule.onNodeWithTag("setting_video_assistant_toggle").performScrollTo().assertIsDisplayed()
-        composeTestRule.onNodeWithTag("video_assistant_max_zoom_label").performScrollTo().assertIsDisplayed()
-        composeTestRule.onNodeWithTag("settings_back_button").performScrollTo().performClick()
-        composeTestRule.waitForIdle()
-
-        // Verify Advanced category
+        // Verify Advanced category (including Video Assistant & Playback)
         composeTestRule.onNodeWithTag("settings_category_advanced").performScrollTo().performClick()
         composeTestRule.waitForIdle()
         assertEquals(
@@ -685,6 +675,8 @@ class ExampleRobolectricTest {
             composeTestRule.onAllNodesWithTag("settings_open_connect_button").fetchSemanticsNodes().size
         )
         composeTestRule.onNodeWithTag("settings_video_assistant_section").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("setting_video_assistant_toggle").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("video_assistant_max_zoom_label").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("settings_back_button").performScrollTo().performClick()
         composeTestRule.waitForIdle()
 
@@ -3216,6 +3208,167 @@ class ExampleRobolectricTest {
         assertTrue("Tabs button must be vertically centered", kotlin.math.abs(tabsBounds.center.y - refCenterY) <= 1.5f)
         assertTrue("Tab counter box must be vertically centered", kotlin.math.abs(tabsCounterBoxBounds.center.y - refCenterY) <= 1.5f)
         assertTrue("Menu button must be vertically centered", kotlin.math.abs(menuBounds.center.y - refCenterY) <= 1.5f)
+    }
+
+    @Test
+    fun `soul browser settings redesign verifies all 6 categories persistence user agent scripts and about metadata`() {
+        composeTestRule.mainClock.advanceTimeBy(350L)
+        composeTestRule.waitForIdle()
+
+        val vm = composeTestRule.activity.activeBrowserViewModel!!
+        fun waitUntilSettings(predicate: (com.example.data.local.NyxoraSettingsState) -> Boolean) {
+            val deadline = System.currentTimeMillis() + 3000L
+            while (!predicate(vm.settings.value) && System.currentTimeMillis() < deadline) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                composeTestRule.mainClock.advanceTimeBy(50L)
+                composeTestRule.waitForIdle()
+                Thread.sleep(20L)
+            }
+        }
+
+        // Reset to clean defaults before testing
+        vm.resetBrowserSettings()
+        waitUntilSettings {
+            it.searchEngine == com.example.data.local.SearchEngine.GOOGLE &&
+                it.userAgentMode == com.example.data.local.UserAgentMode.DEFAULT &&
+                !it.externalVideoPlayerEnabled &&
+                !it.clearDataOnExit &&
+                it.parsedUserScripts.isEmpty()
+        }
+
+        // 1. Verify User-Agent resolution helper for DEFAULT, MOBILE, DESKTOP, and CUSTOM modes
+        val defaultSettings = com.example.data.local.NyxoraSettingsState()
+        assertEquals(
+            com.example.ui.screens.MOBILE_USER_AGENT,
+            com.example.ui.screens.resolveEffectiveUserAgent(tabDesktopMode = false, settings = defaultSettings)
+        )
+        assertEquals(
+            com.example.ui.screens.DESKTOP_USER_AGENT,
+            com.example.ui.screens.resolveEffectiveUserAgent(
+                tabDesktopMode = false,
+                settings = defaultSettings.copy(userAgentMode = com.example.data.local.UserAgentMode.DESKTOP)
+            )
+        )
+        val customUa = "Mozilla/5.0 (X11; CustomNyxoraTest/2.5)"
+        assertEquals(
+            customUa,
+            com.example.ui.screens.resolveEffectiveUserAgent(
+                tabDesktopMode = false,
+                settings = defaultSettings.copy(
+                    userAgentMode = com.example.data.local.UserAgentMode.CUSTOM,
+                    customUserAgent = customUa
+                )
+            )
+        )
+
+        // 2. Verify UserScriptStorage safe import behavior (imported scripts NEVER auto-execute without user approval)
+        val rawImportJson = """[{"id":"imp_1","name":"Imported Script","domainPattern":"example.com","code":"console.log(1);","enabled":true,"approvedByUser":true}]"""
+        val unapprovedImport = com.example.data.local.UserScriptStorage.parseImportedScripts(
+            rawJson = rawImportJson,
+            userExplicitlyApproved = false
+        )
+        assertEquals(1, unapprovedImport.size)
+        assertFalse("Imported script must default to disabled when not approved", unapprovedImport.first().enabled)
+        assertFalse("Imported script must default to approvedByUser=false", unapprovedImport.first().approvedByUser)
+        assertTrue(com.example.data.local.UserScriptStorage.matchesDomain("example.com", "sub.example.com"))
+        assertFalse(com.example.data.local.UserScriptStorage.matchesDomain("example.com", "other.org"))
+
+        // 3. Open Settings and navigate through all 6 categories (General, Customization, Privacy, Advanced, Scripts, About)
+        composeTestRule.onNodeWithTag("toolbar_overflow_menu_button").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("menu_item_settings").performClick()
+        composeTestRule.waitForIdle()
+
+        // Category A: General — test Search Engine, User Agent, Clear on Exit, Save Form Data, External Video Player
+        composeTestRule.onNodeWithTag("settings_category_general").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("settings_search_engine_chip_duckduckgo").performScrollTo().performClick()
+        waitUntilSettings { it.searchEngine == com.example.data.local.SearchEngine.DUCKDUCKGO }
+        assertEquals(com.example.data.local.SearchEngine.DUCKDUCKGO, vm.settings.value.searchEngine)
+
+        composeTestRule.onNodeWithTag("settings_ua_chip_desktop").performScrollTo().performClick()
+        waitUntilSettings { it.userAgentMode == com.example.data.local.UserAgentMode.DESKTOP }
+        assertEquals(com.example.data.local.UserAgentMode.DESKTOP, vm.settings.value.userAgentMode)
+
+        composeTestRule.onNodeWithTag("setting_external_video_player_toggle").performScrollTo().performClick()
+        waitUntilSettings { it.externalVideoPlayerEnabled }
+        assertTrue(vm.settings.value.externalVideoPlayerEnabled)
+
+        composeTestRule.onNodeWithTag("setting_clear_data_on_exit_toggle").performScrollTo().performClick()
+        waitUntilSettings { it.clearDataOnExit }
+        assertTrue(vm.settings.value.clearDataOnExit)
+
+        composeTestRule.onNodeWithTag("settings_back_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+
+        // Category B: Customization — test Theme & Toolbar/Address Bar toggles
+        composeTestRule.onNodeWithTag("settings_category_customization").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("setting_theme_chip_light").performScrollTo().performClick()
+        waitUntilSettings { it.themeMode == com.example.data.local.ThemeMode.LIGHT }
+        assertEquals(com.example.data.local.ThemeMode.LIGHT, vm.settings.value.themeMode)
+        composeTestRule.onNodeWithTag("setting_theme_chip_dark").performScrollTo().performClick()
+        waitUntilSettings { it.themeMode == com.example.data.local.ThemeMode.DARK }
+        assertEquals(com.example.data.local.ThemeMode.DARK, vm.settings.value.themeMode)
+
+        composeTestRule.onNodeWithTag("setting_address_bar_reload_toggle").performScrollTo().performClick()
+        waitUntilSettings { !it.addressBarShowReloadButton }
+        assertFalse(vm.settings.value.addressBarShowReloadButton)
+
+        composeTestRule.onNodeWithTag("settings_back_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+
+        // Category C: Privacy & Security — test WebRTC leak protection & Adblock toggles
+        composeTestRule.onNodeWithTag("settings_category_privacy").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("setting_webrtc_protection_toggle").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("setting_webrtc_protection_toggle").performScrollTo().performClick()
+        waitUntilSettings { !it.webrtcLeakProtectionEnabled }
+        assertFalse(vm.settings.value.webrtcLeakProtectionEnabled)
+        composeTestRule.onNodeWithTag("setting_webrtc_protection_toggle").performScrollTo().performClick()
+        waitUntilSettings { it.webrtcLeakProtectionEnabled }
+        assertTrue(vm.settings.value.webrtcLeakProtectionEnabled)
+
+        composeTestRule.onNodeWithTag("settings_back_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+
+        // Category D: Advanced — test JavaScript & Image loading toggles
+        composeTestRule.onNodeWithTag("settings_category_advanced").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("setting_advanced_javascript_toggle").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("setting_advanced_load_images_toggle").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("settings_back_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+
+        // Category E: Scripts — test creating a custom user script & toggling it
+        composeTestRule.onNodeWithTag("settings_category_scripts").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("settings_scripts_section").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("scripts_add_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("script_dialog_name_input").performTextReplacement("Example Tweaker")
+        composeTestRule.onNodeWithTag("script_dialog_domain_input").performTextReplacement("example.com")
+        composeTestRule.onNodeWithTag("script_dialog_code_input").performTextReplacement("document.body.dataset.nyxora='1';")
+        composeTestRule.onNodeWithTag("script_dialog_save_button").performClick()
+        waitUntilSettings { it.parsedUserScripts.size == 1 }
+
+        val savedScripts = vm.settings.value.parsedUserScripts
+        assertEquals(1, savedScripts.size)
+        assertEquals("Example Tweaker", savedScripts.first().name)
+        assertEquals("example.com", savedScripts.first().domainPattern)
+        assertTrue(savedScripts.first().enabled)
+
+        composeTestRule.onNodeWithTag("settings_back_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+
+        // Category F: About — verify version name, version code, Privacy Policy, Terms, and Credits
+        composeTestRule.onNodeWithTag("settings_category_about").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("about_nyxora_title").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("about_installed_version_text").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("about_privacy_policy_button").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("about_terms_button").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("about_nyxora_creator_credit").performScrollTo().assertIsDisplayed()
     }
 
     private fun findFirstWebView(root: View?): WebView? {

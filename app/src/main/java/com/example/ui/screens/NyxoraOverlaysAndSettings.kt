@@ -84,18 +84,21 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.material.icons.outlined.Code
+import com.example.data.local.BrowserOrientationMode
 import com.example.data.local.FullscreenOrientationMode
 import com.example.data.local.NyxoraSettingsState
-import com.example.domain.browser.InputClassification
-import com.example.domain.browser.UrlAndSearchHandler
 import com.example.data.local.SearchEngine
 import com.example.data.local.ThemeMode
+import com.example.data.local.UserAgentMode
 import com.example.data.local.VideoAspectMode
 import com.example.data.model.BookmarkItem
 import com.example.data.model.CustomFilterRule
 import com.example.data.model.DownloadRecord
 import com.example.data.model.HistoryItem
 import com.example.data.model.SiteSettingItem
+import com.example.domain.browser.InputClassification
+import com.example.domain.browser.UrlAndSearchHandler
 import androidx.compose.foundation.background
 import androidx.compose.runtime.LaunchedEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -1041,16 +1044,29 @@ fun NyxoraReaderModeSheet(
 enum class SettingsCategory(val title: String, val subtitle: String) {
     GENERAL(
         title = "General",
-        subtitle = "Homepage, Default Search Engine, Site Settings, Startup, Default Browser"
+        subtitle = "Search Engine, Homepage, User Agent, Downloads, Language, Clear Data, Sync"
     ),
     CUSTOMIZATION(
-        title = "Appearance",
-        subtitle = "Theme, Minimal Wallpaper, Homepage Shortcuts, Launch Animation, Toolbar, Text Size"
+        title = "Customization",
+        subtitle = "Theme, Homepage Layout, Toolbar & Address Bar, Gestures, Font Appearance"
     ),
     PRIVACY(
         title = "Privacy & Security",
-        subtitle = "Ad & Tracker Blocking, Pop-ups, Incognito PIN, Cookies, HTTPS-Only, Clear Data"
+        subtitle = "NYXORA Shield, Ad & Tracker Blocking, WebRTC, Cookies, Site Permissions, Incognito"
     ),
+    ADVANCED(
+        title = "Advanced",
+        subtitle = "JavaScript, Video Assistant, Desktop Mode, Cache & Storage, Diagnostics, Reset"
+    ),
+    SCRIPTS(
+        title = "Scripts",
+        subtitle = "Custom JavaScript, Per-Website Script Rules, Import/Export, Execution Permissions"
+    ),
+    ABOUT(
+        title = "About",
+        subtitle = "NYXORA Browser 2.5, Version & Build Info, Check for Updates, Legal, Credits"
+    ),
+    // Kept for backward source compatibility
     DOWNLOADS(
         title = "Downloads",
         subtitle = "Download Manager, Risky File Warnings, Download Notifications, Storage"
@@ -1058,14 +1074,6 @@ enum class SettingsCategory(val title: String, val subtitle: String) {
     MEDIA_VIDEO_ASSISTANT(
         title = "Media & Video Assistant",
         subtitle = "Video Assistant, 500% Max Zoom, Fullscreen Orientation, Aspect Ratio, PiP"
-    ),
-    ADVANCED(
-        title = "Advanced",
-        subtitle = "Gesture Navigation, Accessibility, Cache, Reset Settings, Diagnostics"
-    ),
-    ABOUT(
-        title = "About NYXORA",
-        subtitle = "NYXORA Browser 2.5, Automatic APK Updates, Share App, Engine Capabilities"
     )
 }
 
@@ -1138,21 +1146,28 @@ fun NyxoraSettingsScreen(
     var selectedCategory by remember { mutableStateOf<SettingsCategory?>(null) }
     val settingsScrollState = rememberScrollState()
 
-    // Automatically check for new releases when the user opens Settings > About NYXORA
+    // Automatically check for new releases when the user opens Settings > About
     LaunchedEffect(selectedCategory) {
         settingsScrollState.scrollTo(0)
         if (selectedCategory == SettingsCategory.ABOUT) {
             onCheckForUpdates(false)
         }
     }
+
     var searchQuery by remember { mutableStateOf("") }
     var showBackupDialog by remember { mutableStateOf(false) }
     var showPinDialog by remember { mutableStateOf(false) }
     var showCustomRuleDialog by remember { mutableStateOf(false) }
     var showCapabilityMatrixDialog by remember { mutableStateOf(false) }
     var showOpenSourceLicensesDialog by remember { mutableStateOf(false) }
+    var showPrivacyPolicyDialog by remember { mutableStateOf(false) }
+    var showTermsDialog by remember { mutableStateOf(false) }
     var showResetConfirmDialog by remember { mutableStateOf(false) }
     var showHomepageDialog by remember { mutableStateOf(false) }
+    var showUserAgentDialog by remember { mutableStateOf(false) }
+    var showSearchEngineSelector by remember { mutableStateOf(false) }
+    var showOrientationSelector by remember { mutableStateOf(false) }
+    var showLanguageSelector by remember { mutableStateOf(false) }
 
     BackHandler {
         if (selectedCategory != null) {
@@ -1160,6 +1175,10 @@ fun NyxoraSettingsScreen(
         } else {
             onDismiss()
         }
+    }
+
+    LaunchedEffect(selectedCategory) {
+        settingsScrollState.scrollTo(0)
     }
 
     val isSearching = searchQuery.isNotBlank()
@@ -1172,7 +1191,7 @@ fun NyxoraSettingsScreen(
         modifier = Modifier
             .fillMaxSize()
             .testTag("nyxora_settings_screen"),
-        color = MaterialTheme.colorScheme.background
+        color = SoulSettingsBg
     ) {
         Column(
             modifier = Modifier
@@ -1180,11 +1199,16 @@ fun NyxoraSettingsScreen(
                 .windowInsetsPadding(WindowInsets.safeDrawing)
                 .widthIn(max = 700.dp)
                 .verticalScroll(settingsScrollState)
-                .padding(horizontal = 16.dp, vertical = 4.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // Header
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            // Compact Soul Browser Top Header
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 IconButton(
                     onClick = {
                         if (selectedCategory != null) {
@@ -1195,12 +1219,29 @@ fun NyxoraSettingsScreen(
                     },
                     modifier = Modifier.testTag("settings_back_button")
                 ) {
-                    Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "Back")
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Outlined.ArrowBack,
+                        contentDescription = "Back",
+                        tint = SoulSettingsTextPrimary
+                    )
                 }
-                Text(
-                    text = selectedCategory?.title ?: "Settings",
-                    style = MaterialTheme.typography.titleLarge
-                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = selectedCategory?.title ?: "Settings",
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 18.sp
+                        ),
+                        color = SoulSettingsTextPrimary
+                    )
+                    if (selectedCategory == null) {
+                        Text(
+                            text = "NYXORA Browser ${BuildConfig.VERSION_NAME}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = SoulSettingsTextSecondary
+                        )
+                    }
+                }
             }
 
             // Search input on Settings Home
@@ -1218,67 +1259,82 @@ fun NyxoraSettingsScreen(
                         }
                     },
                     singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
+                    shape = RoundedCornerShape(10.dp),
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("settings_search_input")
                 )
             }
 
-            // Settings Home: 7 clean categories when not searching
+            // Settings Home: 6 Primary Soul Browser Categories when not searching
             if (selectedCategory == null && !isSearching) {
-                SettingsCategoryRow(
-                    icon = Icons.Outlined.Settings,
-                    category = SettingsCategory.GENERAL,
-                    testTag = "settings_category_general",
-                    onClick = { selectedCategory = SettingsCategory.GENERAL }
-                )
-                SettingsCategoryRow(
-                    icon = Icons.Outlined.Palette,
-                    category = SettingsCategory.CUSTOMIZATION,
-                    testTag = "settings_category_customization",
-                    onClick = { selectedCategory = SettingsCategory.CUSTOMIZATION }
-                )
-                SettingsCategoryRow(
-                    icon = Icons.Outlined.Shield,
-                    category = SettingsCategory.PRIVACY,
-                    testTag = "settings_category_privacy",
-                    onClick = { selectedCategory = SettingsCategory.PRIVACY }
-                )
-                SettingsCategoryRow(
-                    icon = Icons.Outlined.Download,
-                    category = SettingsCategory.DOWNLOADS,
-                    testTag = "settings_category_downloads",
-                    onClick = { selectedCategory = SettingsCategory.DOWNLOADS }
-                )
-                SettingsCategoryRow(
-                    icon = Icons.Outlined.PlayArrow,
-                    category = SettingsCategory.MEDIA_VIDEO_ASSISTANT,
-                    testTag = "settings_category_media_video",
-                    onClick = { selectedCategory = SettingsCategory.MEDIA_VIDEO_ASSISTANT }
-                )
-                SettingsCategoryRow(
-                    icon = Icons.Outlined.Tune,
-                    category = SettingsCategory.ADVANCED,
-                    testTag = "settings_category_advanced",
-                    onClick = { selectedCategory = SettingsCategory.ADVANCED }
-                )
-                SettingsCategoryRow(
-                    icon = Icons.Outlined.Info,
-                    category = SettingsCategory.ABOUT,
-                    testTag = "settings_category_about",
-                    badgeText = if (apkUpdateState.hasUpdateIndicator) "Update available" else null,
-                    badgeTestTag = "settings_about_update_badge",
-                    onClick = { selectedCategory = SettingsCategory.ABOUT }
-                )
+                SoulSettingsGroupCard {
+                    SoulSettingsCategoryRow(
+                        title = SettingsCategory.GENERAL.title,
+                        subtitle = SettingsCategory.GENERAL.subtitle,
+                        icon = Icons.Outlined.Settings,
+                        testTag = "settings_category_general",
+                        onClick = { selectedCategory = SettingsCategory.GENERAL }
+                    )
+                    SoulSettingsSubtleDivider()
+                    SoulSettingsCategoryRow(
+                        title = SettingsCategory.CUSTOMIZATION.title,
+                        subtitle = SettingsCategory.CUSTOMIZATION.subtitle,
+                        icon = Icons.Outlined.Palette,
+                        testTag = "settings_category_customization",
+                        onClick = { selectedCategory = SettingsCategory.CUSTOMIZATION }
+                    )
+                    SoulSettingsSubtleDivider()
+                    SoulSettingsCategoryRow(
+                        title = SettingsCategory.PRIVACY.title,
+                        subtitle = SettingsCategory.PRIVACY.subtitle,
+                        icon = Icons.Outlined.Shield,
+                        testTag = "settings_category_privacy",
+                        onClick = { selectedCategory = SettingsCategory.PRIVACY }
+                    )
+                    SoulSettingsSubtleDivider()
+                    SoulSettingsCategoryRow(
+                        title = SettingsCategory.ADVANCED.title,
+                        subtitle = SettingsCategory.ADVANCED.subtitle,
+                        icon = Icons.Outlined.Tune,
+                        testTag = "settings_category_advanced",
+                        onClick = { selectedCategory = SettingsCategory.ADVANCED }
+                    )
+                    SoulSettingsSubtleDivider()
+                    SoulSettingsCategoryRow(
+                        title = SettingsCategory.SCRIPTS.title,
+                        subtitle = SettingsCategory.SCRIPTS.subtitle,
+                        icon = Icons.Outlined.Code,
+                        testTag = "settings_category_scripts",
+                        badgeText = if (settings.parsedUserScripts.isNotEmpty()) "${settings.parsedUserScripts.size} active" else null,
+                        onClick = { selectedCategory = SettingsCategory.SCRIPTS }
+                    )
+                    SoulSettingsSubtleDivider()
+                    SoulSettingsCategoryRow(
+                        title = SettingsCategory.ABOUT.title,
+                        subtitle = SettingsCategory.ABOUT.subtitle,
+                        icon = Icons.Outlined.Info,
+                        testTag = "settings_category_about",
+                        badgeText = if (apkUpdateState.hasUpdateIndicator) "Update available" else null,
+                        badgeTestTag = "settings_about_update_badge",
+                        onClick = { selectedCategory = SettingsCategory.ABOUT }
+                    )
+                }
             }
 
-            // 1. GENERAL
+            // A. GENERAL
             if (selectedCategory == SettingsCategory.GENERAL ||
-                matchesSearch("General", "Homepage", "Search", "Engine", "Google", "DuckDuckGo", "Brave", "Site Settings", "Downloads", "Restore", "Startup", "Default Browser")
+                selectedCategory == SettingsCategory.DOWNLOADS ||
+                matchesSearch(
+                    "General", "Homepage", "Search", "Engine", "Google", "DuckDuckGo", "Brave",
+                    "Startpage", "Ecosia", "User Agent", "Desktop", "Mobile", "Download",
+                    "External Video", "Orientation", "Language", "Font", "Clear Data on Exit",
+                    "Password", "Form Data", "Site Configuration", "Site Settings", "Sync",
+                    "Bookmark", "Backup", "Restore", "Startup", "Default Browser"
+                )
             ) {
                 SettingsSectionCard(title = "General") {
-                    // Homepage
+                    // 1. Homepage
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1305,9 +1361,9 @@ fun NyxoraSettingsScreen(
                         }
                     }
 
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                    SoulSettingsSubtleDivider()
 
-                    // Site Settings
+                    // 2. Site Configuration
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1318,7 +1374,7 @@ fun NyxoraSettingsScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("Site Settings", style = MaterialTheme.typography.bodyLarge)
+                            Text("Site Configuration", style = MaterialTheme.typography.bodyLarge)
                             Text(
                                 text = "Content, permissions (Location, Camera, Mic), and per-site rules",
                                 style = MaterialTheme.typography.bodyMedium,
@@ -1332,10 +1388,17 @@ fun NyxoraSettingsScreen(
                         )
                     }
 
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                    SoulSettingsSubtleDivider()
 
-                    // Default Search Engine
-                    Text("Default Search Engine", style = MaterialTheme.typography.bodyLarge)
+                    // 3. Default Search Engine & Search Suggestions
+                    ReusableSettingRow(
+                        title = "Search Engine",
+                        subtitle = "Default search engine for address bar and homepage",
+                        valueText = settings.searchEngine.label,
+                        icon = Icons.Outlined.Search,
+                        testTag = "settings_search_engine_row",
+                        onClick = { showSearchEngineSelector = true }
+                    )
                     Row(
                         modifier = Modifier.horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1344,39 +1407,215 @@ fun NyxoraSettingsScreen(
                             FilterChip(
                                 selected = settings.searchEngine == engine,
                                 onClick = { onUpdateSettings { it.copy(searchEngine = engine) } },
-                                label = { Text(engine.label) }
+                                label = { Text(engine.label) },
+                                modifier = Modifier.testTag("settings_search_engine_chip_${engine.name.lowercase()}")
                             )
                         }
                     }
+
                     SettingToggleItem(
                         title = "Search & Address Suggestions",
-                        subtitle = "Show matching bookmarks and history while typing",
+                        subtitle = "Show matching bookmarks, history, and live suggestions while typing",
                         checked = settings.searchSuggestionsEnabled,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(searchSuggestionsEnabled = v) } }
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(searchSuggestionsEnabled = v) } },
+                        testTag = "setting_search_suggestions_toggle"
                     )
 
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                    SoulSettingsSubtleDivider()
 
-                    // Restore Tabs on Startup
+                    // 4. User Agent (Default / Desktop / Mobile / Custom)
+                    ReusableSettingRow(
+                        title = "User Agent",
+                        subtitle = if (settings.userAgentMode == UserAgentMode.CUSTOM && settings.customUserAgent.isNotBlank()) {
+                            settings.customUserAgent
+                        } else {
+                            "Choose Default, Mobile, Desktop, or Custom User-Agent string"
+                        },
+                        valueText = settings.userAgentMode.label,
+                        testTag = "settings_user_agent_option",
+                        onClick = { showUserAgentDialog = true }
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        for (uaMode in listOf(UserAgentMode.DEFAULT, UserAgentMode.MOBILE, UserAgentMode.DESKTOP, UserAgentMode.CUSTOM)) {
+                            val compactLabel = when (uaMode) {
+                                UserAgentMode.DEFAULT -> "Default"
+                                UserAgentMode.MOBILE -> "Mobile"
+                                UserAgentMode.DESKTOP -> "Desktop"
+                                UserAgentMode.CUSTOM -> "Custom"
+                            }
+                            FilterChip(
+                                selected = settings.userAgentMode == uaMode,
+                                onClick = {
+                                    if (uaMode == UserAgentMode.CUSTOM) {
+                                        showUserAgentDialog = true
+                                    } else {
+                                        onUpdateSettings {
+                                            it.copy(
+                                                userAgentMode = uaMode,
+                                                defaultDesktopSite = uaMode == UserAgentMode.DESKTOP
+                                            )
+                                        }
+                                    }
+                                },
+                                label = { Text(compactLabel) },
+                                modifier = Modifier.testTag("settings_ua_chip_${uaMode.name.lowercase()}")
+                            )
+                        }
+                    }
+
+                    SoulSettingsSubtleDivider()
+
+                    // 4. Download Location & Download Manager
+                    ReusableSettingRow(
+                        title = "Download Location",
+                        subtitle = "Android Public Downloads folder (/Download • Scoped Storage)",
+                        valueText = "Downloads",
+                        icon = Icons.Outlined.FolderOpen,
+                        testTag = "settings_download_location_row",
+                        onClick = onOpenDownloads
+                    )
+                    SettingToggleItem(
+                        title = "Confirm Risky Downloads",
+                        subtitle = "Warn before downloading APK or executable files",
+                        checked = settings.downloadConfirmRiskyFiles,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(downloadConfirmRiskyFiles = v) } },
+                        testTag = "setting_confirm_risky_downloads_toggle"
+                    )
+                    SettingToggleItem(
+                        title = "Download Notifications",
+                        subtitle = "Show progress and completion notifications in the system tray",
+                        checked = settings.downloadNotificationsEnabled,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(downloadNotificationsEnabled = v) } },
+                        testTag = "setting_download_notifications_toggle"
+                    )
+                    OutlinedButton(
+                        onClick = onOpenDownloads,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("settings_open_downloads_button")
+                    ) {
+                        Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Download Manager")
+                    }
+
+                    SoulSettingsSubtleDivider()
+
+                    // 5. External Video Player & Orientation & Language & Font Settings
+                    SettingToggleItem(
+                        title = "External Video Player",
+                        subtitle = "Show quick action in fullscreen video player to open streams in an external player app",
+                        checked = settings.externalVideoPlayerEnabled,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(externalVideoPlayerEnabled = v) } },
+                        testTag = "setting_external_video_player_toggle"
+                    )
+
+                    ReusableSettingRow(
+                        title = "Browser Orientation",
+                        subtitle = "Control screen rotation behavior while browsing",
+                        valueText = settings.browserOrientationMode.label,
+                        testTag = "settings_browser_orientation_row",
+                        onClick = { showOrientationSelector = true }
+                    )
+
+                    ReusableSettingRow(
+                        title = "Language",
+                        subtitle = "Browser interface and Accept-Language preference",
+                        valueText = settings.preferredLanguage,
+                        icon = Icons.Outlined.Language,
+                        testTag = "settings_language_selector_row",
+                        onClick = { showLanguageSelector = true }
+                    )
+
+                    Column(modifier = Modifier.testTag("settings_general_font_section")) {
+                        Text(
+                            text = "Font Size & Text Scaling: ${settings.globalTextZoom}%",
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium)
+                        )
+                        Slider(
+                            value = settings.globalTextZoom.toFloat(),
+                            onValueChange = { v ->
+                                val stepped = ((v / 5f).roundToInt() * 5).coerceIn(50, 250)
+                                onUpdateSettings { it.copy(globalTextZoom = stepped) }
+                            },
+                            valueRange = 50f..200f
+                        )
+                    }
+
+                    SoulSettingsSubtleDivider()
+
+                    // 6. Password / Form Data, Clear Data on Exit, Clear Browsing Data
+                    SettingToggleItem(
+                        title = "Save Form Data & Autofill Hints",
+                        subtitle = "Remember form inputs on normal tabs (always disabled in Private Mode)",
+                        checked = settings.saveFormDataEnabled,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(saveFormDataEnabled = v) } },
+                        testTag = "setting_save_form_data_toggle"
+                    )
+
+                    SettingToggleItem(
+                        title = "Clear Browsing Data on Exit",
+                        subtitle = "Automatically wipe history, cookies, and site storage when closing NYXORA",
+                        checked = settings.clearDataOnExit,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(clearDataOnExit = v) } },
+                        testTag = "setting_clear_data_on_exit_toggle"
+                    )
+
+                    ReusableSettingRow(
+                        title = "Clear Browsing Data Now",
+                        subtitle = "Clear history, cookies, cache, and site storage immediately",
+                        icon = Icons.Outlined.DeleteSweep,
+                        testTag = "settings_general_clear_data_button",
+                        onClick = {
+                            onClearBrowsingData(true, true)
+                            onClearCache()
+                            onToast("Browsing history, cookies, and cache cleared")
+                        }
+                    )
+
+                    SoulSettingsSubtleDivider()
+
+                    // 7. Sync Settings, Import/Export Bookmarks & Data
+                    ReusableSettingRow(
+                        title = "Sync Settings & Encrypted Backup",
+                        subtitle = "Export or import bookmarks, site rules, and browser data with AES-256-GCM",
+                        testTag = "settings_sync_settings_row",
+                        onClick = { showBackupDialog = true }
+                    )
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = { showBackupDialog = true },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("settings_export_bookmarks_button")
+                        ) {
+                            Text("Export Data")
+                        }
+                        OutlinedButton(
+                            onClick = { showBackupDialog = true },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("settings_import_bookmarks_button")
+                        ) {
+                            Text("Import Data")
+                        }
+                    }
+
+                    SoulSettingsSubtleDivider()
+
+                    // 8. Restore Tabs on Startup & Set as Default Browser
                     SettingToggleItem(
                         title = "Restore Tabs on Startup",
                         subtitle = "Reopen your previous normal tabs when launching NYXORA",
                         checked = settings.restoreTabsOnStartup,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(restoreTabsOnStartup = v) } }
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(restoreTabsOnStartup = v) } },
+                        testTag = "setting_restore_tabs_toggle"
                     )
 
-                    if (selectedCategory == SettingsCategory.GENERAL) {
-                        OutlinedButton(
-                            onClick = onOpenDownloads,
-                            modifier = Modifier.testTag("settings_open_downloads_button")
-                        ) {
-                            Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("Manage Downloads")
-                        }
-                    }
-
-                    // Set as Default Browser
                     OutlinedButton(
                         onClick = {
                             runCatching {
@@ -1404,12 +1643,17 @@ fun NyxoraSettingsScreen(
                 }
             }
 
-            // 2. APPEARANCE (CUSTOMIZATION)
+            // B. CUSTOMIZATION
             if (selectedCategory == SettingsCategory.CUSTOMIZATION ||
-                matchesSearch("Customization", "Appearance", "Theme", "Light", "Dark", "System", "Shortcuts", "Wallpaper", "Animation", "Launch", "News", "Promo", "Cards", "Toolbar", "Text size", "Language")
+                matchesSearch(
+                    "Customization", "Appearance", "Theme", "Light", "Dark", "System",
+                    "Shortcuts", "Wallpaper", "Animation", "Launch", "News", "Promo",
+                    "Cards", "Toolbar", "Address Bar", "Reload", "Security Icon", "Swipe",
+                    "Text size", "Language", "Gesture"
+                )
             ) {
-                SettingsSectionCard(title = "Appearance") {
-                    Text("Theme", style = MaterialTheme.typography.bodyLarge)
+                SettingsSectionCard(title = "Customization") {
+                    Text("Browser Theme", style = MaterialTheme.typography.bodyLarge)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         for (mode in ThemeMode.entries) {
                             FilterChip(
@@ -1423,10 +1667,14 @@ fun NyxoraSettingsScreen(
                                             ThemeMode.SYSTEM -> "System"
                                         }
                                     )
-                                }
+                                },
+                                modifier = Modifier.testTag("setting_theme_chip_${mode.name.lowercase()}")
                             )
                         }
                     }
+
+                    SoulSettingsSubtleDivider()
+                    SoulSettingsSectionHeader("Homepage & Animation")
 
                     SettingToggleItem(
                         title = "Opening Launch Animation",
@@ -1532,11 +1780,58 @@ fun NyxoraSettingsScreen(
                         testTag = "setting_disable_promo_cards_toggle"
                     )
 
+                    SoulSettingsSubtleDivider()
+                    SoulSettingsSectionHeader("Toolbar & Address Bar")
+
                     SettingToggleItem(
                         title = "Compact Toolbar Layout",
-                        subtitle = "Use compact bottom navigation bar height for more vertical screen space",
+                        subtitle = "Use compact bottom navigation and address bar height for extra vertical screen space",
                         checked = settings.compactBottomToolbar,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(compactBottomToolbar = v) } }
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(compactBottomToolbar = v) } },
+                        testTag = "setting_compact_toolbar_toggle"
+                    )
+
+                    SettingToggleItem(
+                        title = "Show Reload Button in Address Bar",
+                        subtitle = "Display quick page refresh icon inside the top address bar",
+                        checked = settings.addressBarShowReloadButton,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(addressBarShowReloadButton = v) } },
+                        testTag = "setting_address_bar_reload_toggle"
+                    )
+
+                    SettingToggleItem(
+                        title = "Show Security Lock Icon in Address Bar",
+                        subtitle = "Display HTTPS lock or HTTP warning indicator beside the domain",
+                        checked = settings.addressBarShowSecurityIcon,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(addressBarShowSecurityIcon = v) } },
+                        testTag = "setting_address_bar_security_icon_toggle"
+                    )
+
+                    SettingToggleItem(
+                        title = "Swipe Address Bar to Switch Tabs",
+                        subtitle = "Swipe left or right across the top address bar to switch open tabs",
+                        checked = settings.addressBarSwipeToSwitchTabs,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(addressBarSwipeToSwitchTabs = v) } },
+                        testTag = "setting_address_bar_swipe_tabs_toggle"
+                    )
+
+                    SoulSettingsSubtleDivider()
+                    SoulSettingsSectionHeader("Navigation Gestures & Typography")
+
+                    SettingToggleItem(
+                        title = "Edge Swipe Back & Forward",
+                        subtitle = "Swipe from left or right screen edges to navigate browsing history",
+                        checked = settings.edgeSwipeBackForward,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(edgeSwipeBackForward = v) } },
+                        testTag = "setting_customization_edge_swipe_toggle"
+                    )
+
+                    SettingToggleItem(
+                        title = "Pull-to-Refresh Web Pages",
+                        subtitle = "Pull down from the top of a web page to reload",
+                        checked = settings.pullToRefreshEnabled,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(pullToRefreshEnabled = v) } },
+                        testTag = "setting_customization_pull_refresh_toggle"
                     )
 
                     Column {
@@ -1559,7 +1854,15 @@ fun NyxoraSettingsScreen(
                         )
                     }
 
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                    SettingToggleItem(
+                        title = "Force Dark Web Pages",
+                        subtitle = "Apply dark theme styling to light websites automatically",
+                        checked = settings.forceDarkWebPages,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(forceDarkWebPages = v) } },
+                        testTag = "setting_customization_force_dark_toggle"
+                    )
+
+                    SoulSettingsSubtleDivider()
 
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -1591,7 +1894,7 @@ fun NyxoraSettingsScreen(
                 }
             }
 
-            // 3. PRIVACY & SECURITY (NYXORA SHIELD)
+            // C. PRIVACY & SECURITY (NYXORA SHIELD)
             if (selectedCategory == SettingsCategory.PRIVACY ||
                 matchesSearch(
                     "Privacy",
@@ -1610,11 +1913,13 @@ fun NyxoraSettingsScreen(
                     "Clear",
                     "Cookie",
                     "Do Not Track",
+                    "WebRTC",
                     "HTTPS",
-                    "Backup"
+                    "Backup",
+                    "Permissions"
                 )
             ) {
-                SettingsSectionCard(title = "NYXORA Shield — Ad & Tracker Protection") {
+                SettingsSectionCard(title = "Privacy & Security — NYXORA Shield") {
                     var whitelistInput by remember { mutableStateOf("") }
                     val filterListStatuses = remember(settings.enabledFilterLists, settings.lastFilterUpdateMillis, customFilterRules.size) {
                         NyxoraShieldEngine.getFilterListStatuses()
@@ -1700,7 +2005,7 @@ fun NyxoraSettingsScreen(
                         testTag = "shield_url_tracking_toggle"
                     )
 
-                    // 8. DNS & Malvertising Protection (Browser-level without VPN or system DNS modification)
+                    // 8. DNS & Malvertising Protection
                     SettingToggleItem(
                         title = "DNS & Malvertising Guard",
                         subtitle = "Block malicious advertising and phishing domains inside NYXORA without VPN (${settings.totalDnsThreatsBlockedCount} blocked)",
@@ -1709,7 +2014,7 @@ fun NyxoraSettingsScreen(
                         testTag = "shield_dns_protection_toggle"
                     )
 
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                    SoulSettingsSubtleDivider()
 
                     // 9. Blocked Requests Statistics
                     Column(
@@ -1742,7 +2047,7 @@ fun NyxoraSettingsScreen(
                         )
                     }
 
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                    SoulSettingsSubtleDivider()
 
                     // 10. Last Filter Update & Update Filters Now
                     Column(
@@ -1781,7 +2086,7 @@ fun NyxoraSettingsScreen(
                         }
                     }
 
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                    SoulSettingsSubtleDivider()
 
                     // 11. Filter List Manager
                     Column(
@@ -1812,7 +2117,7 @@ fun NyxoraSettingsScreen(
                         }
                     }
 
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                    SoulSettingsSubtleDivider()
 
                     // 12. Website Whitelist Manager
                     Column(
@@ -1896,52 +2201,95 @@ fun NyxoraSettingsScreen(
                         }
                     }
 
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                    SoulSettingsSubtleDivider()
 
+                    // 13. Private Browsing & Incognito Security
                     SettingToggleItem(
                         title = "Incognito Screenshot Protection",
                         subtitle = "Hide incognito tabs from screenshots and recent apps switcher",
                         checked = settings.incognitoBlockScreenshots,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(incognitoBlockScreenshots = v) } }
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(incognitoBlockScreenshots = v) } },
+                        testTag = "setting_incognito_screenshots_toggle"
                     )
-                    OutlinedButton(onClick = { showPinDialog = true }) {
+                    OutlinedButton(
+                        onClick = { showPinDialog = true },
+                        modifier = Modifier.testTag("setting_private_pin_lock_button")
+                    ) {
                         Text(if (settings.privateTabsLockEnabled) "Change Incognito PIN" else "Set Incognito PIN Lock")
                     }
 
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                    SoulSettingsSubtleDivider()
 
+                    // 14. Cookie Management & Third-Party Cookie Control
                     SettingToggleItem(
                         title = "Allow Cookies",
                         subtitle = "Enable first-party website cookies for sign-in sessions",
                         checked = settings.cookiesEnabled,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(cookiesEnabled = v) } }
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(cookiesEnabled = v) } },
+                        testTag = "setting_cookies_enabled_toggle"
                     )
                     SettingToggleItem(
                         title = "Block Third-Party Cookies",
                         subtitle = "Prevent cross-site tracking cookies across websites",
                         checked = settings.blockThirdPartyCookies,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(blockThirdPartyCookies = v) } }
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(blockThirdPartyCookies = v) } },
+                        testTag = "setting_block_3p_cookies_toggle"
                     )
                     SettingToggleItem(
                         title = "Hide Cookie Consent Banners",
                         subtitle = "Automatically hide common cookie consent pop-ups",
                         checked = settings.hideCookieConsentBanners,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(hideCookieConsentBanners = v) } }
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(hideCookieConsentBanners = v) } },
+                        testTag = "setting_hide_cookie_banners_toggle"
                     )
 
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                    SoulSettingsSubtleDivider()
 
+                    // 15. Do Not Track, WebRTC Protection, HTTPS-Only, Clipboard & Site Permissions
                     SettingToggleItem(
-                        title = "Send 'Do Not Track' Signal",
-                        subtitle = "Include DNT and Global Privacy Control signals with requests",
+                        title = "Send 'Do Not Track' & GPC Signal",
+                        subtitle = "Include DNT=1 and Global Privacy Control signals with requests",
                         checked = settings.doNotTrackEnabled,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(doNotTrackEnabled = v) } }
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(doNotTrackEnabled = v) } },
+                        testTag = "setting_do_not_track_toggle"
+                    )
+                    SettingToggleItem(
+                        title = "WebRTC Local IP Leak Protection",
+                        subtitle = "Prevent unconsented STUN/ICE peer connections from exposing local network IPs",
+                        checked = settings.webrtcLeakProtectionEnabled,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(webrtcLeakProtectionEnabled = v) } },
+                        testTag = "setting_webrtc_protection_toggle"
                     )
                     SettingToggleItem(
                         title = "HTTPS-Only Mode",
                         subtitle = "Upgrade connections to HTTPS whenever possible",
                         checked = settings.httpsOnlyMode,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(httpsOnlyMode = v) } }
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(httpsOnlyMode = v) } },
+                        testTag = "setting_https_only_toggle"
+                    )
+                    SettingToggleItem(
+                        title = "Allow Website Clipboard Access",
+                        subtitle = "Allow websites to read or write system clipboard via navigator.clipboard",
+                        checked = settings.clipboardAccessEnabled,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(clipboardAccessEnabled = v) } },
+                        testTag = "setting_clipboard_access_toggle"
+                    )
+                    ReusableSettingRow(
+                        title = "Site Permissions (Camera, Mic, Location)",
+                        subtitle = "Manage per-website and default hardware permissions",
+                        testTag = "settings_privacy_site_permissions_button",
+                        onClick = onOpenSiteSettings
+                    )
+
+                    SoulSettingsSubtleDivider()
+
+                    // 16. Clear Data on Exit & Clear Browsing Data
+                    SettingToggleItem(
+                        title = "Clear Browsing Data on Exit",
+                        subtitle = "Automatically clear history, cookies, and site storage when closing the browser",
+                        checked = settings.clearDataOnExit,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(clearDataOnExit = v) } },
+                        testTag = "setting_privacy_clear_on_exit_toggle"
                     )
 
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1961,52 +2309,79 @@ fun NyxoraSettingsScreen(
                 }
             }
 
-            // 4. DOWNLOADS
-            if (selectedCategory == SettingsCategory.DOWNLOADS ||
-                matchesSearch("Downloads", "Risky", "File", "Download Notifications")
+            // D. ADVANCED (Includes Web Engine, Video Assistant, Cache/Storage, Gestures, Diagnostics, Reset)
+            if (selectedCategory == SettingsCategory.ADVANCED ||
+                selectedCategory == SettingsCategory.MEDIA_VIDEO_ASSISTANT ||
+                matchesSearch(
+                    "Advanced", "JavaScript", "Image", "Data Saver", "Desktop Mode", "User Agent",
+                    "Hardware Acceleration", "Media", "Video", "Video Assistant", "Zoom", "500%",
+                    "Fullscreen", "Orientation", "Aspect", "PiP", "Picture-in-Picture",
+                    "Keep Screen On", "Background Audio", "Gesture", "Swipe", "Accessibility",
+                    "Cache", "Storage", "Reset", "Diagnostics", "Memory", "CPU", "Crash"
+                )
             ) {
-                SettingsSectionCard(title = "Downloads") {
-                    SettingToggleItem(
-                        title = "Confirm Risky Downloads",
-                        subtitle = "Warn before downloading APK or executable files",
-                        checked = settings.downloadConfirmRiskyFiles,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(downloadConfirmRiskyFiles = v) } },
-                        testTag = "setting_confirm_risky_downloads_toggle"
-                    )
-                    SettingToggleItem(
-                        title = "Download Notifications",
-                        subtitle = "Show progress and completion notifications in the system tray",
-                        checked = settings.downloadNotificationsEnabled,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(downloadNotificationsEnabled = v) } },
-                        testTag = "setting_download_notifications_toggle"
-                    )
-                    Text(
-                        text = "Storage Location: Android Public Downloads folder (scoped storage)",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    OutlinedButton(
-                        onClick = onOpenDownloads,
-                        modifier = Modifier.testTag("settings_open_downloads_button")
-                    ) {
-                        Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Open Download Manager")
-                    }
-                }
-            }
+                SettingsSectionCard(title = "Advanced") {
+                    SoulSettingsSectionHeader("Web Engine & Content Rendering")
 
-            // 5. MEDIA & VIDEO ASSISTANT
-            if (selectedCategory == SettingsCategory.MEDIA_VIDEO_ASSISTANT ||
-                matchesSearch("Media", "Video", "Video Assistant", "Zoom", "500%", "Fullscreen", "Orientation", "Aspect", "PiP", "Picture-in-Picture", "Keep Screen On", "Background Audio")
-            ) {
-                SettingsSectionCard(title = "Media & Video Assistant") {
+                    SettingToggleItem(
+                        title = "JavaScript",
+                        subtitle = "Allow websites to execute JavaScript (required by most modern web apps)",
+                        checked = settings.javascriptEnabled,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(javascriptEnabled = v) } },
+                        testTag = "setting_advanced_javascript_toggle"
+                    )
+
+                    SettingToggleItem(
+                        title = "Load Images Automatically",
+                        subtitle = "Load network images on web pages (disable to save mobile data)",
+                        checked = !settings.dataSaverBlockImages,
+                        onCheckedChange = { loadImages ->
+                            onUpdateSettings { it.copy(dataSaverBlockImages = !loadImages) }
+                        },
+                        testTag = "setting_advanced_load_images_toggle"
+                    )
+
+                    SettingToggleItem(
+                        title = "Default Desktop Mode",
+                        subtitle = "Request desktop websites by default on newly opened tabs",
+                        checked = settings.defaultDesktopSite,
+                        onCheckedChange = { v ->
+                            onUpdateSettings {
+                                it.copy(
+                                    defaultDesktopSite = v,
+                                    userAgentMode = if (v) UserAgentMode.DESKTOP else UserAgentMode.DEFAULT
+                                )
+                            }
+                        },
+                        testTag = "setting_default_desktop_toggle"
+                    )
+
+                    ReusableSettingRow(
+                        title = "User Agent Configuration",
+                        subtitle = "Override browser User-Agent string (${settings.userAgentMode.label})",
+                        valueText = settings.userAgentMode.label,
+                        testTag = "settings_advanced_user_agent_row",
+                        onClick = { showUserAgentDialog = true }
+                    )
+
+                    SettingToggleItem(
+                        title = "Show Blocked Pop-up & Redirect Notices",
+                        subtitle = "Display non-intrusive toast/banner when a pop-up or auto-redirect is blocked",
+                        checked = settings.showBlockedMessages,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(showBlockedMessages = v) } },
+                        testTag = "setting_show_blocked_messages_toggle"
+                    )
+
+                    SoulSettingsSubtleDivider()
+
+                    // Video Playback & Video Assistant Section
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("settings_video_assistant_section"),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        SoulSettingsSectionHeader("Video Playback & Video Assistant")
                         SettingToggleItem(
                             title = "Video Assistant",
                             subtitle = "Enable fullscreen video assistant toolbar with orientation, fit/fill, zoom-out/reset, and up to 500% zoom",
@@ -2038,7 +2413,7 @@ fun NyxoraSettingsScreen(
                             }
                         }
                         Text(
-                            text = "Default Video Aspect Ratio: ${settings.defaultVideoAspectMode.label}",
+                            text = "Default Video Display Mode: ${settings.defaultVideoAspectMode.label}",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -2058,29 +2433,67 @@ fun NyxoraSettingsScreen(
                             title = "Picture-in-Picture (PiP)",
                             subtitle = "Allow supported fullscreen videos to continue in a floating PiP window",
                             checked = settings.pipEnabled,
-                            onCheckedChange = { v -> onUpdateSettings { it.copy(pipEnabled = v) } }
+                            onCheckedChange = { v -> onUpdateSettings { it.copy(pipEnabled = v) } },
+                            testTag = "setting_pip_toggle"
                         )
                         SettingToggleItem(
                             title = "Keep Screen On During Video",
                             subtitle = "Prevent screen sleep while fullscreen video is playing",
                             checked = settings.keepScreenOnWhilePlaying,
-                            onCheckedChange = { v -> onUpdateSettings { it.copy(keepScreenOnWhilePlaying = v) } }
+                            onCheckedChange = { v -> onUpdateSettings { it.copy(keepScreenOnWhilePlaying = v) } },
+                            testTag = "setting_keep_screen_on_toggle"
                         )
                         SettingToggleItem(
                             title = "Background Audio Playback",
                             subtitle = "Allow supported HTML5 media audio to continue when tab is in the background",
                             checked = settings.backgroundAudioEnabled,
-                            onCheckedChange = { v -> onUpdateSettings { it.copy(backgroundAudioEnabled = v) } }
+                            onCheckedChange = { v -> onUpdateSettings { it.copy(backgroundAudioEnabled = v) } },
+                            testTag = "setting_background_audio_toggle"
+                        )
+                        SettingToggleItem(
+                            title = "External Video Player Integration",
+                            subtitle = "Show quick external player launch button in fullscreen video controls",
+                            checked = settings.externalVideoPlayerEnabled,
+                            onCheckedChange = { v -> onUpdateSettings { it.copy(externalVideoPlayerEnabled = v) } },
+                            testTag = "setting_advanced_external_video_toggle"
                         )
                     }
-                }
-            }
 
-            // 6. ADVANCED
-            if (selectedCategory == SettingsCategory.ADVANCED ||
-                matchesSearch("Advanced", "Gesture", "Swipe", "Accessibility", "Cache", "Reset", "Diagnostics", "Memory", "CPU", "Crash")
-            ) {
-                SettingsSectionCard(title = "Advanced") {
+                    SoulSettingsSubtleDivider()
+
+                    SoulSettingsSectionHeader("Gesture Navigation & Accessibility")
+                    SettingToggleItem(
+                        title = "Edge Swipe Back & Forward",
+                        subtitle = "Swipe from left or right screen edges to navigate history",
+                        checked = settings.edgeSwipeBackForward,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(edgeSwipeBackForward = v) } },
+                        testTag = "setting_edge_swipe_toggle"
+                    )
+                    SettingToggleItem(
+                        title = "Pull-to-Refresh",
+                        subtitle = "Pull down from the top of a webpage to reload",
+                        checked = settings.pullToRefreshEnabled,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(pullToRefreshEnabled = v) } },
+                        testTag = "setting_pull_refresh_toggle"
+                    )
+                    SettingToggleItem(
+                        title = "Reduced Motion",
+                        subtitle = "Minimize UI transitions and animations",
+                        checked = settings.reducedMotion,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(reducedMotion = v) } },
+                        testTag = "setting_reduced_motion_toggle"
+                    )
+                    SettingToggleItem(
+                        title = "Force Dark Web Pages",
+                        subtitle = "Apply dark theme styling to light websites",
+                        checked = settings.forceDarkWebPages,
+                        onCheckedChange = { v -> onUpdateSettings { it.copy(forceDarkWebPages = v) } },
+                        testTag = "setting_force_dark_web_toggle"
+                    )
+
+                    SoulSettingsSubtleDivider()
+
+                    SoulSettingsSectionHeader("Cache, Storage & Reset")
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(
                             onClick = {
@@ -2112,83 +2525,7 @@ fun NyxoraSettingsScreen(
                         }
                     }
 
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
-
-                    Text("Gesture Navigation", style = MaterialTheme.typography.labelLarge)
-                    SettingToggleItem(
-                        title = "Edge Swipe Back & Forward",
-                        subtitle = "Swipe from left or right screen edges to navigate history",
-                        checked = settings.edgeSwipeBackForward,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(edgeSwipeBackForward = v) } },
-                        testTag = "setting_edge_swipe_toggle"
-                    )
-                    SettingToggleItem(
-                        title = "Pull-to-Refresh",
-                        subtitle = "Pull down from the top of a webpage to reload",
-                        checked = settings.pullToRefreshEnabled,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(pullToRefreshEnabled = v) } }
-                    )
-
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
-
-                    if (selectedCategory == SettingsCategory.ADVANCED) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("settings_video_assistant_section"),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Text("Video Assistant & Playback", style = MaterialTheme.typography.labelLarge)
-                            SettingToggleItem(
-                                title = "Video Assistant",
-                                subtitle = "Enable fullscreen video assistant toolbar with orientation, fit/fill, zoom-out/reset, and up to 500% zoom",
-                                checked = settings.videoAssistantEnabled,
-                                onCheckedChange = { v -> onUpdateSettings { it.copy(videoAssistantEnabled = v) } },
-                                testTag = "setting_video_assistant_toggle"
-                            )
-                            Text(
-                                text = "Maximum Video Zoom: 500% (with Zoom-Out & 1-Tap Reset)",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.testTag("video_assistant_max_zoom_label")
-                            )
-                            Text(
-                                text = "Fullscreen Orientation: ${settings.fullscreenOrientationMode.label}",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Row(
-                                modifier = Modifier.horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                for (mode in FullscreenOrientationMode.entries) {
-                                    FilterChip(
-                                        selected = settings.fullscreenOrientationMode == mode,
-                                        onClick = { onUpdateSettings { it.copy(fullscreenOrientationMode = mode) } },
-                                        label = { Text(mode.name) }
-                                    )
-                                }
-                            }
-                        }
-
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outline)
-                    }
-
-                    Text("Accessibility", style = MaterialTheme.typography.labelLarge)
-                    SettingToggleItem(
-                        title = "Reduced Motion",
-                        subtitle = "Minimize UI transitions and animations",
-                        checked = settings.reducedMotion,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(reducedMotion = v) } }
-                    )
-                    SettingToggleItem(
-                        title = "Force Dark Web Pages",
-                        subtitle = "Apply dark theme styling to light websites",
-                        checked = settings.forceDarkWebPages,
-                        onCheckedChange = { v -> onUpdateSettings { it.copy(forceDarkWebPages = v) } }
-                    )
-
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                    SoulSettingsSubtleDivider()
 
                     val diagSnapshot by BrowserDiagnosticsEngine.snapshotFlow.collectAsStateWithLifecycle()
                     Column(
@@ -2259,9 +2596,27 @@ fun NyxoraSettingsScreen(
                 }
             }
 
-            // 7. ABOUT NYXORA
+            // E. SCRIPTS
+            if (selectedCategory == SettingsCategory.SCRIPTS ||
+                matchesSearch(
+                    "Scripts", "User Script", "Custom JavaScript", "Userscript",
+                    "Script Rules", "Script Import", "Script Export"
+                )
+            ) {
+                ScriptsSettingsSection(
+                    settings = settings,
+                    onUpdateSettings = onUpdateSettings,
+                    onToast = onToast
+                )
+            }
+
+            // F. ABOUT NYXORA
             if (selectedCategory == SettingsCategory.ABOUT ||
-                matchesSearch("About", "NYXORA", "Sudhamoy", "Crafted", "Version", "2.5", "2.0", "Update", "APK", "Release", "Share", "Engine", "WebView", "Capability", "Licenses")
+                matchesSearch(
+                    "About", "NYXORA", "Sudhamoy", "Crafted", "Version", "2.5", "2.0",
+                    "Update", "APK", "Release", "Share", "Engine", "WebView", "Capability",
+                    "Licenses", "Privacy Policy", "Terms", "Support"
+                )
             ) {
                 SettingsSectionCard(title = "About NYXORA") {
                     Row(
@@ -2312,12 +2667,13 @@ fun NyxoraSettingsScreen(
                         modifier = Modifier.testTag("about_installed_version_text")
                     )
                     Text(
-                        text = "Local-first storage (Room + DataStore) with zero account requirement, zero telemetry, and strict incognito isolation.",
+                        text = "Package: ${BuildConfig.APPLICATION_ID} • Local-first storage (Room + DataStore) with zero telemetry and strict incognito isolation.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag("about_build_info_text")
                     )
 
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                    SoulSettingsSubtleDivider()
 
                     // Automatic APK Update System Section
                     NyxoraApkUpdateSection(
@@ -2329,7 +2685,7 @@ fun NyxoraSettingsScreen(
                         onInstallUpdateNow = { onInstallUpdateNow(context) }
                     )
 
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                    SoulSettingsSubtleDivider()
 
                     OutlinedButton(
                         onClick = {
@@ -2362,7 +2718,9 @@ fun NyxoraSettingsScreen(
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(
                             onClick = { showCapabilityMatrixDialog = true },
-                            modifier = Modifier.testTag("about_engine_capabilities_button")
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("about_engine_capabilities_button")
                         ) {
                             Icon(Icons.Outlined.Info, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(6.dp))
@@ -2370,13 +2728,43 @@ fun NyxoraSettingsScreen(
                         }
                         OutlinedButton(
                             onClick = { showOpenSourceLicensesDialog = true },
-                            modifier = Modifier.testTag("about_open_source_licenses_button")
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("about_open_source_licenses_button")
                         ) {
                             Text("Open-Source Licenses")
                         }
                     }
 
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = { showPrivacyPolicyDialog = true },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("about_privacy_policy_button")
+                        ) {
+                            Text("Privacy Policy")
+                        }
+                        OutlinedButton(
+                            onClick = { showTermsDialog = true },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("about_terms_button")
+                        ) {
+                            Text("Terms & Conditions")
+                        }
+                    }
+
+                    ReusableSettingRow(
+                        title = "Contact & GitHub Issue Tracker",
+                        subtitle = "github.com/Sudhamoy-X/N-browser-",
+                        testTag = "about_contact_support_button",
+                        onClick = {
+                            onToast("Support: github.com/Sudhamoy-X/N-browser-")
+                        }
+                    )
+
+                    SoulSettingsSubtleDivider()
 
                     com.example.ui.components.NyxoraCreatorSignature(
                         textTestTag = "about_nyxora_creator_credit"
@@ -2384,6 +2772,179 @@ fun NyxoraSettingsScreen(
                 }
             }
         }
+    }
+
+    if (showSearchEngineSelector) {
+        ReusableSettingSelector(
+            title = "Default Search Engine",
+            options = SearchEngine.entries.toList(),
+            selectedOption = settings.searchEngine,
+            optionLabel = { it.label },
+            optionSubtitle = { it.searchUrlTemplate.substringBefore("?") },
+            onSelectOption = { engine ->
+                onUpdateSettings { it.copy(searchEngine = engine) }
+            },
+            onDismiss = { showSearchEngineSelector = false }
+        )
+    }
+
+    if (showOrientationSelector) {
+        ReusableSettingSelector(
+            title = "Browser Orientation",
+            options = BrowserOrientationMode.entries.toList(),
+            selectedOption = settings.browserOrientationMode,
+            optionLabel = { it.label },
+            onSelectOption = { mode ->
+                onUpdateSettings { it.copy(browserOrientationMode = mode) }
+            },
+            onDismiss = { showOrientationSelector = false }
+        )
+    }
+
+    if (showLanguageSelector) {
+        ReusableSettingSelector(
+            title = "Language Preference",
+            options = SUPPORTED_LANGUAGES,
+            selectedOption = settings.preferredLanguage,
+            optionLabel = { it },
+            onSelectOption = { lang ->
+                onUpdateSettings { it.copy(preferredLanguage = lang) }
+                onToast("Language preference: $lang")
+            },
+            onDismiss = { showLanguageSelector = false }
+        )
+    }
+
+    if (showUserAgentDialog) {
+        var selectedMode by remember(settings.userAgentMode) { mutableStateOf(settings.userAgentMode) }
+        var customUaInput by remember(settings.customUserAgent) {
+            mutableStateOf(settings.customUserAgent.ifBlank { MOBILE_USER_AGENT })
+        }
+        AlertDialog(
+            onDismissRequest = { showUserAgentDialog = false },
+            containerColor = SoulSettingsSurface,
+            titleContentColor = SoulSettingsTextPrimary,
+            textContentColor = SoulSettingsTextSecondary,
+            title = { Text("User Agent Configuration") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    for (mode in UserAgentMode.entries) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { selectedMode = mode }
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            androidx.compose.material3.RadioButton(
+                                selected = selectedMode == mode,
+                                onClick = { selectedMode = mode }
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = mode.label,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = SoulSettingsTextPrimary
+                            )
+                        }
+                    }
+                    if (selectedMode == UserAgentMode.CUSTOM) {
+                        OutlinedTextField(
+                            value = customUaInput,
+                            onValueChange = { customUaInput = it },
+                            label = { Text("Custom User-Agent String") },
+                            minLines = 2,
+                            maxLines = 4,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("user_agent_custom_input")
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onUpdateSettings {
+                            it.copy(
+                                userAgentMode = selectedMode,
+                                customUserAgent = if (selectedMode == UserAgentMode.CUSTOM) customUaInput.trim() else it.customUserAgent,
+                                defaultDesktopSite = selectedMode == UserAgentMode.DESKTOP
+                            )
+                        }
+                        showUserAgentDialog = false
+                        onToast("User Agent updated: ${selectedMode.label}")
+                    },
+                    modifier = Modifier.testTag("user_agent_save_button")
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showUserAgentDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showPrivacyPolicyDialog) {
+        AlertDialog(
+            onDismissRequest = { showPrivacyPolicyDialog = false },
+            containerColor = SoulSettingsSurface,
+            titleContentColor = SoulSettingsTextPrimary,
+            textContentColor = SoulSettingsTextSecondary,
+            title = { Text("NYXORA Privacy Policy") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "1. Local-First Architecture: Bookmarks, browsing history, tabs, custom filter rules, and settings are stored strictly on your device using Room and Jetpack DataStore.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        text = "2. Zero Telemetry: NYXORA Browser does not collect analytics, behavioral profiles, or browsing history on external servers.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        text = "3. Incognito Isolation: Private tabs never write to history, disk cache, or persistent site storage, and are wiped immediately on close.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showPrivacyPolicyDialog = false }) {
+                    Text("Close")
+                }
+            }
+        )
+    }
+
+    if (showTermsDialog) {
+        AlertDialog(
+            onDismissRequest = { showTermsDialog = false },
+            containerColor = SoulSettingsSurface,
+            titleContentColor = SoulSettingsTextPrimary,
+            textContentColor = SoulSettingsTextSecondary,
+            title = { Text("Terms & Conditions") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "NYXORA Browser is provided for safe, high-performance mobile web browsing. Users are responsible for custom scripts, filter rules, and third-party websites accessed through the browser.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        text = "Crafted by Sudhamoy • All Rights Reserved.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = SoulSettingsAccent
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showTermsDialog = false }) {
+                    Text("Close")
+                }
+            }
+        )
     }
 
     if (showHomepageDialog) {
@@ -3185,24 +3746,17 @@ private fun SettingsSectionCard(
     title: String,
     content: @Composable () -> Unit
 ) {
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(14.dp)),
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surface
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.primary
-            )
-            content()
-        }
+    SoulSettingsGroupCard {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleMedium.copy(
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 15.sp
+            ),
+            color = SoulSettingsAccent
+        )
+        SoulSettingsSubtleDivider()
+        content()
     }
 }
 
@@ -3214,19 +3768,12 @@ private fun SettingToggleItem(
     onCheckedChange: (Boolean) -> Unit,
     testTag: String? = null
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface)
-            Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
-            modifier = if (testTag != null) Modifier.testTag(testTag) else Modifier
-        )
-    }
+    ReusableSettingSwitch(
+        title = title,
+        subtitle = subtitle,
+        checked = checked,
+        onCheckedChange = onCheckedChange,
+        testTag = testTag
+    )
 }
+

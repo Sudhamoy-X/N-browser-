@@ -109,8 +109,12 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import android.content.Intent
+import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import com.example.data.local.FullscreenOrientationMode
 import com.example.data.local.NyxoraSettingsState
+import com.example.data.local.UserAgentMode
+import com.example.data.local.UserScriptStorage
 import com.example.data.local.VideoAspectMode
 import com.example.data.model.SiteSettingItem
 import com.example.domain.browser.BrowserDiagnosticsEngine
@@ -1887,6 +1891,59 @@ fun NyxoraWebEngineView(
                             }
                         )
 
+                        // 3b. External Video Player (when enabled in General Settings)
+                        if (settings.externalVideoPlayerEnabled) {
+                            MonochromeVideoToolbarButton(
+                                icon = Icons.AutoMirrored.Outlined.OpenInNew,
+                                contentDescription = "External Video Player",
+                                testTag = "fullscreen_external_player_button",
+                                onClick = {
+                                    isVideoToolbarVisible = true
+                                    videoToolbarInteractionTick++
+                                    val wv = controllerHandle.webView
+                                    if (wv != null) {
+                                        wv.evaluateJavascript(
+                                            "(function(){try{var v=document.querySelector('video');return v?(v.currentSrc||v.src||''):'';}catch(e){return '';}})();"
+                                        ) { raw ->
+                                            val videoUrl = raw?.trim()?.removeSurrounding("\"")?.trim().orEmpty()
+                                            val fallbackUrl = currentTab.url
+                                            val launchUrl = if (videoUrl.startsWith("http://", ignoreCase = true) ||
+                                                videoUrl.startsWith("https://", ignoreCase = true)
+                                            ) {
+                                                videoUrl
+                                            } else {
+                                                fallbackUrl
+                                            }
+                                            if (launchUrl.startsWith("http://", ignoreCase = true) ||
+                                                launchUrl.startsWith("https://", ignoreCase = true)
+                                            ) {
+                                                runCatching {
+                                                    val intent = Intent(Intent.ACTION_VIEW).apply {
+                                                        setDataAndType(Uri.parse(launchUrl), "video/*")
+                                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                    }
+                                                    context.startActivity(Intent.createChooser(intent, "Open in External Video Player").apply {
+                                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                    })
+                                                }.onFailure {
+                                                    runCatching {
+                                                        val fallbackIntent = Intent(Intent.ACTION_VIEW, Uri.parse(launchUrl)).apply {
+                                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                        }
+                                                        context.startActivity(fallbackIntent)
+                                                    }.onFailure {
+                                                        onToast("No external video player installed")
+                                                    }
+                                                }
+                                            } else {
+                                                onToast("Stream uses embedded MSE/DRM buffer; cannot export direct URL")
+                                            }
+                                        }
+                                    }
+                                }
+                            )
+                        }
+
                         // 4. Exit Fullscreen
                         MonochromeVideoToolbarButton(
                             icon = Icons.Outlined.Close,
@@ -2397,18 +2454,32 @@ private fun createConfiguredTabWebView(
                     view?.evaluateJavascript(cosmeticJs, null)
                 }
                 if (view != null) {
-                    applyViewportModeScript(view, currentTabProvider().desktopMode)
+                    val effectiveDesktop = currentTabProvider().desktopMode ||
+                        settingsSnap.userAgentMode == UserAgentMode.DESKTOP
+                    applyViewportModeScript(view, effectiveDesktop)
                 }
-                if (currentSettingsProvider().doNotTrackEnabled) {
+                if (settingsSnap.doNotTrackEnabled) {
                     view?.evaluateJavascript(
                         "(function(){try{Object.defineProperty(navigator,'doNotTrack',{get:function(){return '1';}});Object.defineProperty(navigator,'globalPrivacyControl',{get:function(){return true;}});}catch(e){}})();",
                         null
                     )
                 }
-                if (!currentSettingsProvider().clipboardAccessEnabled) {
+                if (settingsSnap.webrtcLeakProtectionEnabled) {
+                    view?.evaluateJavascript(WEBRTC_IP_LEAK_PROTECTION_JS, null)
+                }
+                if (!settingsSnap.clipboardAccessEnabled) {
                     view?.evaluateJavascript(
                         "(function(){try{if(navigator.clipboard){navigator.clipboard.readText=function(){return Promise.reject(new DOMException('Clipboard access blocked by NYXORA','NotAllowedError'));};navigator.clipboard.writeText=function(){return Promise.reject(new DOMException('Clipboard access blocked by NYXORA','NotAllowedError'));};}}catch(e){}})();",
                         null
+                    )
+                }
+                if (view != null && settingsSnap.javascriptEnabled && settingsSnap.userScriptsEnabled) {
+                    injectMatchingUserScripts(
+                        webView = view,
+                        pageUrl = safeUrl,
+                        pageHost = pageHost,
+                        settings = settingsSnap,
+                        atDocumentEnd = false
                     )
                 }
             }
@@ -2445,12 +2516,26 @@ private fun createConfiguredTabWebView(
                     view?.evaluateJavascript(cosmeticJs, null)
                 }
                 if (view != null) {
-                    applyViewportModeScript(view, currentTabProvider().desktopMode)
+                    val effectiveDesktop = currentTabProvider().desktopMode ||
+                        settingsSnap.userAgentMode == UserAgentMode.DESKTOP
+                    applyViewportModeScript(view, effectiveDesktop)
                 }
-                if (!currentSettingsProvider().clipboardAccessEnabled) {
+                if (settingsSnap.webrtcLeakProtectionEnabled) {
+                    view?.evaluateJavascript(WEBRTC_IP_LEAK_PROTECTION_JS, null)
+                }
+                if (!settingsSnap.clipboardAccessEnabled) {
                     view?.evaluateJavascript(
                         "(function(){try{if(navigator.clipboard){navigator.clipboard.readText=function(){return Promise.reject(new DOMException('Clipboard access blocked by NYXORA','NotAllowedError'));};navigator.clipboard.writeText=function(){return Promise.reject(new DOMException('Clipboard access blocked by NYXORA','NotAllowedError'));};}}catch(e){}})();",
                         null
+                    )
+                }
+                if (view != null && settingsSnap.javascriptEnabled && settingsSnap.userScriptsEnabled) {
+                    injectMatchingUserScripts(
+                        webView = view,
+                        pageUrl = safeUrl,
+                        pageHost = pageHost,
+                        settings = settingsSnap,
+                        atDocumentEnd = true
                     )
                 }
                 onPageFinished(
@@ -2779,6 +2864,66 @@ internal fun findSiteSettingForHost(
     }
 }
 
+internal const val WEBRTC_IP_LEAK_PROTECTION_JS = """
+(function() {
+    try {
+        if (window.__nyxoraWebRtcProtected) return;
+        window.__nyxoraWebRtcProtected = true;
+        var OrigPeerConnection = window.RTCPeerConnection || window.webkitRTCPeerConnection;
+        if (!OrigPeerConnection) return;
+        var SafePeerConnection = function(config, constraints) {
+            var safeConfig = config ? Object.assign({}, config) : {};
+            if (!safeConfig.iceTransportPolicy) {
+                safeConfig.iceServers = [];
+            }
+            return new OrigPeerConnection(safeConfig, constraints);
+        };
+        SafePeerConnection.prototype = OrigPeerConnection.prototype;
+        window.RTCPeerConnection = SafePeerConnection;
+        if (window.webkitRTCPeerConnection) {
+            window.webkitRTCPeerConnection = SafePeerConnection;
+        }
+    } catch (e) {}
+})();
+"""
+
+internal fun resolveEffectiveUserAgent(
+    tabDesktopMode: Boolean,
+    settings: NyxoraSettingsState
+): String {
+    return when {
+        tabDesktopMode -> DESKTOP_USER_AGENT
+        settings.userAgentMode == UserAgentMode.DESKTOP -> DESKTOP_USER_AGENT
+        settings.userAgentMode == UserAgentMode.CUSTOM && settings.customUserAgent.isNotBlank() ->
+            settings.customUserAgent.trim()
+        else -> MOBILE_USER_AGENT
+    }
+}
+
+private fun injectMatchingUserScripts(
+    webView: WebView,
+    pageUrl: String,
+    pageHost: String,
+    settings: NyxoraSettingsState,
+    atDocumentEnd: Boolean
+) {
+    if (!pageUrl.startsWith("https://", ignoreCase = true) &&
+        !pageUrl.startsWith("http://", ignoreCase = true)
+    ) {
+        return
+    }
+    val scripts = settings.parsedUserScripts
+    if (scripts.isEmpty()) return
+    for (script in scripts) {
+        if (!script.enabled) continue
+        if (settings.userScriptsRequireApproval && !script.approvedByUser) continue
+        if (script.runAtDocumentEnd != atDocumentEnd) continue
+        if (!UserScriptStorage.matchesDomain(script.domainPattern, pageHost)) continue
+        val wrapped = "(function(){try{\n${script.code}\n}catch(err){console.warn('NYXORA UserScript error:',err);}})();"
+        webView.evaluateJavascript(wrapped, null)
+    }
+}
+
 /**
  * Applies dynamic per-tab & global settings (including Desktop Mode User-Agent and viewport behavior).
  * Returns true if the User-Agent string changed so the caller can trigger a page reload.
@@ -2791,7 +2936,7 @@ internal fun applyDynamicWebSettings(
     if (webView.settings.javaScriptEnabled != settings.javascriptEnabled) {
         webView.settings.javaScriptEnabled = settings.javascriptEnabled
     }
-    val targetUa = if (tab.desktopMode) DESKTOP_USER_AGENT else MOBILE_USER_AGENT
+    val targetUa = resolveEffectiveUserAgent(tab.desktopMode, settings)
     val uaChanged = webView.settings.userAgentString != targetUa
     if (uaChanged) {
         webView.settings.userAgentString = targetUa
@@ -2801,7 +2946,8 @@ internal fun applyDynamicWebSettings(
     webView.settings.setSupportZoom(true)
     webView.settings.builtInZoomControls = true
     webView.settings.displayZoomControls = false
-    val desiredLayoutAlgorithm = if (tab.desktopMode) {
+    val effectiveDesktop = tab.desktopMode || settings.userAgentMode == UserAgentMode.DESKTOP
+    val desiredLayoutAlgorithm = if (effectiveDesktop) {
         WebSettings.LayoutAlgorithm.NORMAL
     } else {
         WebSettings.LayoutAlgorithm.TEXT_AUTOSIZING
@@ -2814,6 +2960,10 @@ internal fun applyDynamicWebSettings(
     }
     if (webView.settings.blockNetworkImage != settings.dataSaverBlockImages) {
         webView.settings.blockNetworkImage = settings.dataSaverBlockImages
+    }
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+        @Suppress("DEPRECATION")
+        webView.settings.saveFormData = settings.saveFormDataEnabled && !tab.isPrivate
     }
     val desiredCacheMode = if (tab.isPrivate) {
         WebSettings.LOAD_NO_CACHE

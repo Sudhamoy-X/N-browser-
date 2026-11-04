@@ -61,6 +61,114 @@ enum class VideoAspectMode(val label: String) {
     ORIGINAL("Original Ratio")
 }
 
+enum class UserAgentMode(val label: String) {
+    DEFAULT("Default (Mobile)"),
+    MOBILE("Mobile User Agent"),
+    DESKTOP("Desktop User Agent"),
+    CUSTOM("Custom User Agent")
+}
+
+enum class BrowserOrientationMode(val label: String) {
+    SYSTEM("System Default"),
+    PORTRAIT("Portrait Only"),
+    LANDSCAPE("Landscape Only"),
+    SENSOR("Auto-Rotate Sensor")
+}
+
+data class UserScriptItem(
+    val id: String,
+    val name: String,
+    val domainPattern: String = "*",
+    val code: String,
+    val enabled: Boolean = true,
+    val runAtDocumentEnd: Boolean = true,
+    val approvedByUser: Boolean = true
+)
+
+object UserScriptStorage {
+
+    fun parseScripts(rawJson: String): List<UserScriptItem> {
+        val trimmed = rawJson.trim()
+        if (trimmed.isEmpty() || trimmed == "[]") return emptyList()
+        return runCatching {
+            val arr = org.json.JSONArray(trimmed)
+            val result = mutableListOf<UserScriptItem>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val id = obj.optString("id").trim().ifEmpty { "script_$i" }
+                val name = obj.optString("name").trim().ifEmpty { "User Script ${i + 1}" }
+                val domain = obj.optString("domainPattern", "*").trim().ifEmpty { "*" }
+                val code = obj.optString("code", "").trim()
+                if (code.isEmpty()) continue
+                val enabled = obj.optBoolean("enabled", true)
+                val runAtEnd = obj.optBoolean("runAtDocumentEnd", true)
+                val approved = obj.optBoolean("approvedByUser", true)
+                result.add(
+                    UserScriptItem(
+                        id = id,
+                        name = name,
+                        domainPattern = domain,
+                        code = code,
+                        enabled = enabled,
+                        runAtDocumentEnd = runAtEnd,
+                        approvedByUser = approved
+                    )
+                )
+            }
+            result
+        }.getOrDefault(emptyList())
+    }
+
+    /**
+     * Parses external JSON script bundles safely.
+     * Imported scripts NEVER auto-execute without explicit user approval:
+     * unless `userExplicitlyApproved` is true, imported scripts default to `enabled = false` and `approvedByUser = false`.
+     */
+    fun parseImportedScripts(rawJson: String, userExplicitlyApproved: Boolean = false): List<UserScriptItem> {
+        val parsed = parseScripts(rawJson)
+        return parsed.map { item ->
+            item.copy(
+                enabled = if (userExplicitlyApproved) item.enabled else false,
+                approvedByUser = userExplicitlyApproved
+            )
+        }
+    }
+
+    fun serializeScripts(scripts: List<UserScriptItem>): String {
+        val arr = org.json.JSONArray()
+        for (item in scripts) {
+            val obj = org.json.JSONObject().apply {
+                put("id", item.id)
+                put("name", item.name)
+                put("domainPattern", item.domainPattern.ifBlank { "*" })
+                put("code", item.code)
+                put("enabled", item.enabled)
+                put("runAtDocumentEnd", item.runAtDocumentEnd)
+                put("approvedByUser", item.approvedByUser)
+            }
+            arr.put(obj)
+        }
+        return arr.toString()
+    }
+
+    fun matchesDomain(domainPattern: String, pageHost: String): Boolean {
+        val cleanHost = pageHost.trim().lowercase().removePrefix("www.")
+        if (cleanHost.isEmpty()) return false
+        val patterns = domainPattern.split(',')
+            .map { it.trim().lowercase().removePrefix("https://").removePrefix("http://").substringBefore('/').removePrefix("www.") }
+            .filter { it.isNotEmpty() }
+        if (patterns.isEmpty()) return false
+        for (pat in patterns) {
+            if (pat == "*" || pat == "*.*") return true
+            val stripped = pat.removePrefix("*.")
+            if (cleanHost == stripped || cleanHost.endsWith(".$stripped")) {
+                return true
+            }
+        }
+        return false
+    }
+}
+
 data class NyxoraSettingsState(
     // Appearance & Customization (Optional homepage sections default to false for clean fresh start)
     val themeMode: ThemeMode = ThemeMode.DARK,
@@ -80,8 +188,15 @@ data class NyxoraSettingsState(
     val homeLogoAnimationEnabled: Boolean = true,
     val globalTextZoom: Int = 100,
     val compactBottomToolbar: Boolean = false,
+    val addressBarShowReloadButton: Boolean = true,
+    val addressBarShowSecurityIcon: Boolean = true,
+    val addressBarSwipeToSwitchTabs: Boolean = true,
     val reducedMotion: Boolean = false,
     val preferredLanguage: String = "System Default",
+    val browserOrientationMode: BrowserOrientationMode = BrowserOrientationMode.SYSTEM,
+    // User Agent
+    val userAgentMode: UserAgentMode = UserAgentMode.DEFAULT,
+    val customUserAgent: String = "",
     // Search (Google is the default search engine; other engines stay selectable in Settings)
     val searchEngine: SearchEngine = SearchEngine.GOOGLE,
     val searchSuggestionsEnabled: Boolean = true,
@@ -91,6 +206,9 @@ data class NyxoraSettingsState(
     val javascriptEnabled: Boolean = true,
     val cookiesEnabled: Boolean = true,
     val doNotTrackEnabled: Boolean = true,
+    val webrtcLeakProtectionEnabled: Boolean = true,
+    val saveFormDataEnabled: Boolean = true,
+    val clearDataOnExit: Boolean = false,
     val clipboardAccessEnabled: Boolean = true,
     val defaultLocationPermission: String = "ASK",
     val defaultCameraPermission: String = "ASK",
@@ -131,6 +249,7 @@ data class NyxoraSettingsState(
     val pullToRefreshEnabled: Boolean = true,
     // Video Assistant & Playback
     val videoAssistantEnabled: Boolean = true,
+    val externalVideoPlayerEnabled: Boolean = false,
     val fullscreenOrientationMode: FullscreenOrientationMode = FullscreenOrientationMode.KEEP_CURRENT,
     val defaultVideoAspectMode: VideoAspectMode = VideoAspectMode.FIT,
     val pipEnabled: Boolean = true,
@@ -141,9 +260,16 @@ data class NyxoraSettingsState(
     val dataSaverBlockImages: Boolean = false,
     val forceDarkWebPages: Boolean = false,
     val hideCookieConsentBanners: Boolean = true,
+    // User Scripts (Category E: SCRIPTS)
+    val userScriptsEnabled: Boolean = true,
+    val userScriptsRequireApproval: Boolean = true,
+    val userScriptsJson: String = "[]",
     // NYXORA Connect Permanent Backend Configuration
     val connectBackendEndpoint: String = com.example.domain.connect.NyxoraConnectSecurity.DEFAULT_PRODUCTION_WSS_ENDPOINT
-)
+) {
+    val parsedUserScripts: List<UserScriptItem>
+        get() = UserScriptStorage.parseScripts(userScriptsJson)
+}
 
 class NyxoraSettingsDataStore(private val context: Context) {
 
@@ -165,8 +291,15 @@ class NyxoraSettingsDataStore(private val context: Context) {
         val HOME_LOGO_ANIMATION_ENABLED = booleanPreferencesKey("home_logo_animation_enabled")
         val GLOBAL_TEXT_ZOOM = intPreferencesKey("global_text_zoom")
         val COMPACT_TOOLBAR = booleanPreferencesKey("compact_toolbar")
+        val ADDRESS_BAR_SHOW_RELOAD = booleanPreferencesKey("address_bar_show_reload")
+        val ADDRESS_BAR_SHOW_SECURITY_ICON = booleanPreferencesKey("address_bar_show_security_icon")
+        val ADDRESS_BAR_SWIPE_TABS = booleanPreferencesKey("address_bar_swipe_tabs")
         val REDUCED_MOTION = booleanPreferencesKey("reduced_motion")
         val PREFERRED_LANGUAGE = stringPreferencesKey("preferred_language")
+        val BROWSER_ORIENTATION_MODE = stringPreferencesKey("browser_orientation_mode")
+
+        val USER_AGENT_MODE = stringPreferencesKey("user_agent_mode")
+        val CUSTOM_USER_AGENT = stringPreferencesKey("custom_user_agent")
 
         val SEARCH_ENGINE = stringPreferencesKey("search_engine")
         val SEARCH_SUGGESTIONS = booleanPreferencesKey("search_suggestions")
@@ -176,6 +309,9 @@ class NyxoraSettingsDataStore(private val context: Context) {
         val JAVASCRIPT_ENABLED = booleanPreferencesKey("javascript_enabled")
         val COOKIES_ENABLED = booleanPreferencesKey("cookies_enabled")
         val DO_NOT_TRACK_ENABLED = booleanPreferencesKey("do_not_track_enabled")
+        val WEBRTC_LEAK_PROTECTION = booleanPreferencesKey("webrtc_leak_protection")
+        val SAVE_FORM_DATA_ENABLED = booleanPreferencesKey("save_form_data_enabled")
+        val CLEAR_DATA_ON_EXIT = booleanPreferencesKey("clear_data_on_exit")
         val CLIPBOARD_ACCESS_ENABLED = booleanPreferencesKey("clipboard_access_enabled")
         val DEFAULT_LOCATION_PERMISSION = stringPreferencesKey("default_location_permission")
         val DEFAULT_CAMERA_PERMISSION = stringPreferencesKey("default_camera_permission")
@@ -216,6 +352,7 @@ class NyxoraSettingsDataStore(private val context: Context) {
         val PULL_TO_REFRESH = booleanPreferencesKey("pull_to_refresh")
 
         val VIDEO_ASSISTANT_ENABLED = booleanPreferencesKey("video_assistant_enabled")
+        val EXTERNAL_VIDEO_PLAYER_ENABLED = booleanPreferencesKey("external_video_player_enabled")
         val FULLSCREEN_ORIENTATION = stringPreferencesKey("fullscreen_orientation")
         val VIDEO_ASPECT_MODE = stringPreferencesKey("video_aspect_mode")
         val PIP_ENABLED = booleanPreferencesKey("pip_enabled")
@@ -226,6 +363,11 @@ class NyxoraSettingsDataStore(private val context: Context) {
         val DATA_SAVER = booleanPreferencesKey("data_saver")
         val FORCE_DARK_WEB = booleanPreferencesKey("force_dark_web")
         val HIDE_COOKIE_BANNERS = booleanPreferencesKey("hide_cookie_banners")
+
+        val USER_SCRIPTS_ENABLED = booleanPreferencesKey("user_scripts_enabled")
+        val USER_SCRIPTS_REQUIRE_APPROVAL = booleanPreferencesKey("user_scripts_require_approval")
+        val USER_SCRIPTS_JSON = stringPreferencesKey("user_scripts_json")
+
         val CONNECT_BACKEND_ENDPOINT = stringPreferencesKey("connect_backend_endpoint")
     }
 
@@ -261,6 +403,15 @@ class NyxoraSettingsDataStore(private val context: Context) {
                 .filter { it.isNotEmpty() }
                 .toSet()
         }
+        val defaultDesktop = prefs[Keys.DEFAULT_DESKTOP] ?: false
+        val savedUaMode = prefs[Keys.USER_AGENT_MODE]
+        val resolvedUaMode = if (savedUaMode != null) {
+            runCatching { UserAgentMode.valueOf(savedUaMode) }.getOrDefault(UserAgentMode.DEFAULT)
+        } else if (defaultDesktop) {
+            UserAgentMode.DESKTOP
+        } else {
+            UserAgentMode.DEFAULT
+        }
         return NyxoraSettingsState(
             themeMode = runCatching { ThemeMode.valueOf(prefs[Keys.THEME_MODE] ?: ThemeMode.DARK.name) }.getOrDefault(ThemeMode.DARK),
             homepageUrl = (prefs[Keys.HOMEPAGE_URL] ?: "nyxora://home").ifBlank { "nyxora://home" },
@@ -279,14 +430,25 @@ class NyxoraSettingsDataStore(private val context: Context) {
             homeLogoAnimationEnabled = prefs[Keys.HOME_LOGO_ANIMATION_ENABLED] ?: true,
             globalTextZoom = (prefs[Keys.GLOBAL_TEXT_ZOOM] ?: 100).coerceIn(50, 250),
             compactBottomToolbar = prefs[Keys.COMPACT_TOOLBAR] ?: false,
+            addressBarShowReloadButton = prefs[Keys.ADDRESS_BAR_SHOW_RELOAD] ?: true,
+            addressBarShowSecurityIcon = prefs[Keys.ADDRESS_BAR_SHOW_SECURITY_ICON] ?: true,
+            addressBarSwipeToSwitchTabs = prefs[Keys.ADDRESS_BAR_SWIPE_TABS] ?: true,
             reducedMotion = prefs[Keys.REDUCED_MOTION] ?: false,
             preferredLanguage = (prefs[Keys.PREFERRED_LANGUAGE] ?: "System Default").ifBlank { "System Default" },
+            browserOrientationMode = runCatching {
+                BrowserOrientationMode.valueOf(prefs[Keys.BROWSER_ORIENTATION_MODE] ?: BrowserOrientationMode.SYSTEM.name)
+            }.getOrDefault(BrowserOrientationMode.SYSTEM),
+            userAgentMode = resolvedUaMode,
+            customUserAgent = prefs[Keys.CUSTOM_USER_AGENT] ?: "",
             searchEngine = runCatching { SearchEngine.valueOf(prefs[Keys.SEARCH_ENGINE] ?: SearchEngine.GOOGLE.name) }.getOrDefault(SearchEngine.GOOGLE),
             searchSuggestionsEnabled = prefs[Keys.SEARCH_SUGGESTIONS] ?: true,
             cloudSyncEnabled = prefs[Keys.CLOUD_SYNC_ENABLED] ?: false,
             javascriptEnabled = prefs[Keys.JAVASCRIPT_ENABLED] ?: true,
             cookiesEnabled = prefs[Keys.COOKIES_ENABLED] ?: true,
             doNotTrackEnabled = prefs[Keys.DO_NOT_TRACK_ENABLED] ?: true,
+            webrtcLeakProtectionEnabled = prefs[Keys.WEBRTC_LEAK_PROTECTION] ?: true,
+            saveFormDataEnabled = prefs[Keys.SAVE_FORM_DATA_ENABLED] ?: true,
+            clearDataOnExit = prefs[Keys.CLEAR_DATA_ON_EXIT] ?: false,
             clipboardAccessEnabled = prefs[Keys.CLIPBOARD_ACCESS_ENABLED] ?: true,
             defaultLocationPermission = prefs[Keys.DEFAULT_LOCATION_PERMISSION] ?: "ASK",
             defaultCameraPermission = prefs[Keys.DEFAULT_CAMERA_PERMISSION] ?: "ASK",
@@ -322,6 +484,7 @@ class NyxoraSettingsDataStore(private val context: Context) {
             edgeSwipeBackForward = prefs[Keys.EDGE_SWIPE] ?: true,
             pullToRefreshEnabled = prefs[Keys.PULL_TO_REFRESH] ?: true,
             videoAssistantEnabled = prefs[Keys.VIDEO_ASSISTANT_ENABLED] ?: true,
+            externalVideoPlayerEnabled = prefs[Keys.EXTERNAL_VIDEO_PLAYER_ENABLED] ?: false,
             fullscreenOrientationMode = runCatching {
                 FullscreenOrientationMode.valueOf(prefs[Keys.FULLSCREEN_ORIENTATION] ?: FullscreenOrientationMode.KEEP_CURRENT.name)
             }.getOrDefault(FullscreenOrientationMode.KEEP_CURRENT),
@@ -331,10 +494,13 @@ class NyxoraSettingsDataStore(private val context: Context) {
             pipEnabled = prefs[Keys.PIP_ENABLED] ?: true,
             keepScreenOnWhilePlaying = prefs[Keys.KEEP_SCREEN_ON] ?: true,
             backgroundAudioEnabled = prefs[Keys.BG_AUDIO] ?: false,
-            defaultDesktopSite = prefs[Keys.DEFAULT_DESKTOP] ?: false,
+            defaultDesktopSite = defaultDesktop,
             dataSaverBlockImages = prefs[Keys.DATA_SAVER] ?: false,
             forceDarkWebPages = prefs[Keys.FORCE_DARK_WEB] ?: false,
             hideCookieConsentBanners = prefs[Keys.HIDE_COOKIE_BANNERS] ?: true,
+            userScriptsEnabled = prefs[Keys.USER_SCRIPTS_ENABLED] ?: true,
+            userScriptsRequireApproval = prefs[Keys.USER_SCRIPTS_REQUIRE_APPROVAL] ?: true,
+            userScriptsJson = prefs[Keys.USER_SCRIPTS_JSON] ?: "[]",
             connectBackendEndpoint = resolvedConnectEndpoint
         )
     }
@@ -360,14 +526,23 @@ class NyxoraSettingsDataStore(private val context: Context) {
             prefs[Keys.HOME_LOGO_ANIMATION_ENABLED] = updated.homeLogoAnimationEnabled
             prefs[Keys.GLOBAL_TEXT_ZOOM] = updated.globalTextZoom.coerceIn(50, 250)
             prefs[Keys.COMPACT_TOOLBAR] = updated.compactBottomToolbar
+            prefs[Keys.ADDRESS_BAR_SHOW_RELOAD] = updated.addressBarShowReloadButton
+            prefs[Keys.ADDRESS_BAR_SHOW_SECURITY_ICON] = updated.addressBarShowSecurityIcon
+            prefs[Keys.ADDRESS_BAR_SWIPE_TABS] = updated.addressBarSwipeToSwitchTabs
             prefs[Keys.REDUCED_MOTION] = updated.reducedMotion
             prefs[Keys.PREFERRED_LANGUAGE] = updated.preferredLanguage.ifBlank { "System Default" }
+            prefs[Keys.BROWSER_ORIENTATION_MODE] = updated.browserOrientationMode.name
+            prefs[Keys.USER_AGENT_MODE] = updated.userAgentMode.name
+            prefs[Keys.CUSTOM_USER_AGENT] = updated.customUserAgent.trim()
             prefs[Keys.SEARCH_ENGINE] = updated.searchEngine.name
             prefs[Keys.SEARCH_SUGGESTIONS] = updated.searchSuggestionsEnabled
             prefs[Keys.CLOUD_SYNC_ENABLED] = updated.cloudSyncEnabled
             prefs[Keys.JAVASCRIPT_ENABLED] = updated.javascriptEnabled
             prefs[Keys.COOKIES_ENABLED] = updated.cookiesEnabled
             prefs[Keys.DO_NOT_TRACK_ENABLED] = updated.doNotTrackEnabled
+            prefs[Keys.WEBRTC_LEAK_PROTECTION] = updated.webrtcLeakProtectionEnabled
+            prefs[Keys.SAVE_FORM_DATA_ENABLED] = updated.saveFormDataEnabled
+            prefs[Keys.CLEAR_DATA_ON_EXIT] = updated.clearDataOnExit
             prefs[Keys.CLIPBOARD_ACCESS_ENABLED] = updated.clipboardAccessEnabled
             prefs[Keys.DEFAULT_LOCATION_PERMISSION] = updated.defaultLocationPermission
             prefs[Keys.DEFAULT_CAMERA_PERMISSION] = updated.defaultCameraPermission
@@ -411,6 +586,7 @@ class NyxoraSettingsDataStore(private val context: Context) {
             prefs[Keys.EDGE_SWIPE] = updated.edgeSwipeBackForward
             prefs[Keys.PULL_TO_REFRESH] = updated.pullToRefreshEnabled
             prefs[Keys.VIDEO_ASSISTANT_ENABLED] = updated.videoAssistantEnabled
+            prefs[Keys.EXTERNAL_VIDEO_PLAYER_ENABLED] = updated.externalVideoPlayerEnabled
             prefs[Keys.FULLSCREEN_ORIENTATION] = updated.fullscreenOrientationMode.name
             prefs[Keys.VIDEO_ASPECT_MODE] = updated.defaultVideoAspectMode.name
             prefs[Keys.PIP_ENABLED] = updated.pipEnabled
@@ -420,6 +596,9 @@ class NyxoraSettingsDataStore(private val context: Context) {
             prefs[Keys.DATA_SAVER] = updated.dataSaverBlockImages
             prefs[Keys.FORCE_DARK_WEB] = updated.forceDarkWebPages
             prefs[Keys.HIDE_COOKIE_BANNERS] = updated.hideCookieConsentBanners
+            prefs[Keys.USER_SCRIPTS_ENABLED] = updated.userScriptsEnabled
+            prefs[Keys.USER_SCRIPTS_REQUIRE_APPROVAL] = updated.userScriptsRequireApproval
+            prefs[Keys.USER_SCRIPTS_JSON] = updated.userScriptsJson.ifBlank { "[]" }
             prefs[Keys.CONNECT_BACKEND_ENDPOINT] = updated.connectBackendEndpoint.ifBlank {
                 com.example.domain.connect.NyxoraConnectSecurity.configuredPublicWssEndpoint()
             }

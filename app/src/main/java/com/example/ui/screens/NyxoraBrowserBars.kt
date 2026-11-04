@@ -223,24 +223,26 @@ fun NyxoraTopAddressBar(
                             },
                             shape = RoundedCornerShape(10.dp)
                         )
-                        .pointerInput(currentModeTabs, activeTab.id) {
-                            detectHorizontalDragGestures(
-                                onDragStart = { horizontalSwipeDelta = 0f },
-                                onHorizontalDrag = { _, dragAmount ->
-                                    horizontalSwipeDelta += dragAmount
-                                },
-                                onDragEnd = {
-                                    val idx = currentModeTabs.indexOfFirst { it.id == activeTab.id }
-                                    if (idx != -1 && currentModeTabs.size > 1) {
-                                        if (horizontalSwipeDelta < -90f && idx < currentModeTabs.lastIndex) {
-                                            onSelectTab(currentModeTabs[idx + 1].id)
-                                        } else if (horizontalSwipeDelta > 90f && idx > 0) {
-                                            onSelectTab(currentModeTabs[idx - 1].id)
+                        .pointerInput(currentModeTabs, activeTab.id, settings.addressBarSwipeToSwitchTabs) {
+                            if (settings.addressBarSwipeToSwitchTabs) {
+                                detectHorizontalDragGestures(
+                                    onDragStart = { horizontalSwipeDelta = 0f },
+                                    onHorizontalDrag = { _, dragAmount ->
+                                        horizontalSwipeDelta += dragAmount
+                                    },
+                                    onDragEnd = {
+                                        val idx = currentModeTabs.indexOfFirst { it.id == activeTab.id }
+                                        if (idx != -1 && currentModeTabs.size > 1) {
+                                            if (horizontalSwipeDelta < -90f && idx < currentModeTabs.lastIndex) {
+                                                onSelectTab(currentModeTabs[idx + 1].id)
+                                            } else if (horizontalSwipeDelta > 90f && idx > 0) {
+                                                onSelectTab(currentModeTabs[idx - 1].id)
+                                            }
                                         }
+                                        horizontalSwipeDelta = 0f
                                     }
-                                    horizontalSwipeDelta = 0f
-                                }
-                            )
+                                )
+                            }
                         }
                         .padding(horizontal = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -253,6 +255,7 @@ fun NyxoraTopAddressBar(
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.size(16.dp)
                             )
+                            Spacer(modifier = Modifier.width(10.dp))
                         }
                         activeTab.isHomePage -> {
                             Icon(
@@ -261,8 +264,9 @@ fun NyxoraTopAddressBar(
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.size(16.dp)
                             )
+                            Spacer(modifier = Modifier.width(10.dp))
                         }
-                        activeTab.isSecureConnection -> {
+                        settings.addressBarShowSecurityIcon && activeTab.isSecureConnection -> {
                             Icon(
                                 imageVector = Icons.Outlined.Lock,
                                 contentDescription = "Secure HTTPS connection",
@@ -271,18 +275,18 @@ fun NyxoraTopAddressBar(
                                     .size(15.dp)
                                     .testTag("top_bar_secure_lock_icon")
                             )
+                            Spacer(modifier = Modifier.width(10.dp))
                         }
-                        else -> {
+                        settings.addressBarShowSecurityIcon -> {
                             Icon(
                                 imageVector = Icons.Outlined.WarningAmber,
                                 contentDescription = "Unencrypted or untrusted connection",
                                 tint = NyxoraWarningAmber,
                                 modifier = Modifier.size(15.dp)
                             )
+                            Spacer(modifier = Modifier.width(10.dp))
                         }
                     }
-
-                    Spacer(modifier = Modifier.width(10.dp))
 
                     val displayedText = when {
                         isEditingAddress -> addressInput
@@ -338,7 +342,7 @@ fun NyxoraTopAddressBar(
                                 modifier = Modifier.size(15.dp)
                             )
                         }
-                    } else if (!activeTab.isHomePage || activeTab.isLoading) {
+                    } else if (activeTab.isLoading || (!activeTab.isHomePage && settings.addressBarShowReloadButton)) {
                         IconButton(
                             onClick = onReloadOrStop,
                             modifier = Modifier

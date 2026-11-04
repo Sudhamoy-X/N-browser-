@@ -125,6 +125,23 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            // Apply browser orientation preference when not in immersive fullscreen video
+            LaunchedEffect(settings.browserOrientationMode) {
+                val targetOrientation = when (settings.browserOrientationMode) {
+                    com.example.data.local.BrowserOrientationMode.SYSTEM ->
+                        android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                    com.example.data.local.BrowserOrientationMode.PORTRAIT ->
+                        android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                    com.example.data.local.BrowserOrientationMode.LANDSCAPE ->
+                        android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                    com.example.data.local.BrowserOrientationMode.SENSOR ->
+                        android.content.pm.ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
+                }
+                if ((window.attributes.flags and WindowManager.LayoutParams.FLAG_FULLSCREEN) == 0) {
+                    requestedOrientation = targetOrientation
+                }
+            }
+
             NyxoraTheme(themeMode = settings.themeMode) {
                 if (!splashCompleted && settings.launchAnimationEnabled) {
                     NyxoraLaunchSplash(
@@ -166,6 +183,12 @@ class MainActivity : ComponentActivity() {
                 cm?.unregisterNetworkCallback(connectNetworkCallback)
             }
             networkCallbackRegistered = false
+        }
+        if (isFinishing) {
+            val vm = activeBrowserViewModel
+            if (vm?.settings?.value?.clearDataOnExit == true) {
+                vm.clearBrowsingData(clearHistory = true, clearCookiesAndStorage = true)
+            }
         }
         activeBrowserViewModel?.onAppBackgrounded(this)
         super.onStop()
@@ -217,7 +240,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         if (isFinishing) {
-            activeBrowserViewModel?.wipePrivateSessionData()
+            val vm = activeBrowserViewModel
+            if (vm?.settings?.value?.clearDataOnExit == true) {
+                vm.clearBrowsingData(clearHistory = true, clearCookiesAndStorage = true)
+            }
+            vm?.wipePrivateSessionData()
         }
         activeBrowserViewModel = null
         super.onDestroy()
