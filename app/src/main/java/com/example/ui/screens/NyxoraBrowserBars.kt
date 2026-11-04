@@ -5,7 +5,12 @@ import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -19,6 +24,7 @@ import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -30,6 +36,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
@@ -93,6 +100,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
@@ -174,43 +182,58 @@ fun NyxoraTopAddressBar(
         !hasErrorOrHome
 
     var isCompletingLoadFade by remember(activeTab.id) { mutableStateOf(false) }
+    val progressWidth = remember(activeTab.id) { Animatable(0f) }
+    val progressAlpha = remember(activeTab.id) { Animatable(0f) }
 
     LaunchedEffect(activeTab.id, activeTab.isLoading, activeTab.progress, hasErrorOrHome, settings.reducedMotion) {
-        if (hasErrorOrHome || (activeTab.progress == 0 && !activeTab.isLoading)) {
-            isCompletingLoadFade = false
-        } else if (activeTab.isLoading && activeTab.progress in 1..99) {
-            isCompletingLoadFade = true
-        } else if (!activeTab.isLoading && activeTab.progress == 100 && isCompletingLoadFade) {
-            if (!settings.reducedMotion) {
-                delay(180L)
+        when {
+            hasErrorOrHome || (activeTab.progress == 0 && !activeTab.isLoading) -> {
+                isCompletingLoadFade = false
+                progressWidth.snapTo(0f)
+                progressAlpha.animateTo(0f, tween(if (settings.reducedMotion) 0 else 180))
             }
-            isCompletingLoadFade = false
+            activeTab.isLoading -> {
+                isCompletingLoadFade = activeTab.progress in 1..99
+                progressAlpha.animateTo(1f, tween(if (settings.reducedMotion) 0 else 180))
+                val target = (activeTab.progress.coerceIn(3, 99) / 100f)
+                if (target >= progressWidth.value) {
+                    val distance = target - progressWidth.value
+                    progressWidth.animateTo(
+                        targetValue = target,
+                        animationSpec = tween(
+                            durationMillis = if (settings.reducedMotion) 0 else
+                                (260 + distance * 520).toInt().coerceIn(260, 620),
+                            easing = FastOutSlowInEasing
+                        )
+                    )
+                }
+            }
+            activeTab.progress >= 100 && isCompletingLoadFade -> {
+                progressWidth.animateTo(1f, tween(if (settings.reducedMotion) 0 else 360, easing = FastOutSlowInEasing))
+                if (!settings.reducedMotion) delay(220L)
+                progressAlpha.animateTo(0f, tween(if (settings.reducedMotion) 0 else 320))
+                progressWidth.snapTo(0f)
+                isCompletingLoadFade = false
+            }
+            else -> {
+                progressAlpha.animateTo(0f, tween(if (settings.reducedMotion) 0 else 180))
+                progressWidth.snapTo(0f)
+                isCompletingLoadFade = false
+            }
         }
     }
 
-    val targetProgressFraction = when {
-        hasErrorOrHome -> 0f
-        showProgressBar -> (activeTab.progress.coerceIn(8, 99) / 100f)
-        isCompletingLoadFade && activeTab.progress == 100 -> 1f
-        else -> 0f
-    }
-
-    val animatedProgressScale by animateFloatAsState(
-        targetValue = targetProgressFraction,
-        animationSpec = tween(
-            durationMillis = if (settings.reducedMotion) 0 else 160,
-            easing = FastOutSlowInEasing
+    val animatedProgressScale = progressWidth.value
+    val animatedProgressAlpha = progressAlpha.value
+    val shimmerTransition = rememberInfiniteTransition(label = "nyxora_progress_shimmer")
+    val shimmerPosition by shimmerTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1150, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
         ),
-        label = "nyxora_top_progress_scale"
-    )
-
-    val animatedProgressAlpha by animateFloatAsState(
-        targetValue = if (showProgressBar || isCompletingLoadFade) 1f else 0f,
-        animationSpec = tween(
-            durationMillis = if (settings.reducedMotion) 0 else 160,
-            easing = FastOutSlowInEasing
-        ),
-        label = "nyxora_top_progress_alpha"
+        label = "nyxora_progress_shimmer_position"
     )
 
     // Debounced DNS prefetch for typed host in address bar
@@ -446,13 +469,13 @@ fun NyxoraTopAddressBar(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(2.dp)
-                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f))
+                        .height(3.dp)
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.28f))
                         .let { base ->
                             if (showProgressBar) base.testTag("top_address_bar_progress") else base
                         }
                 ) {
-                    Box(
+                    BoxWithConstraints(
                         modifier = Modifier
                             .fillMaxSize()
                             .graphicsLayer {
@@ -460,8 +483,41 @@ fun NyxoraTopAddressBar(
                                 alpha = animatedProgressAlpha
                                 transformOrigin = TransformOrigin(0f, 0.5f)
                             }
-                            .background(MaterialTheme.colorScheme.primary)
-                    )
+                            .clip(RoundedCornerShape(3.dp))
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(
+                                    Brush.horizontalGradient(
+                                        listOf(
+                                            Color(0xFF2563EB),
+                                            Color(0xFF38BDF8),
+                                            Color(0xFF67E8F9)
+                                        )
+                                    )
+                                )
+                        )
+                        if (!settings.reducedMotion && showProgressBar) {
+                            Box(
+                                modifier = Modifier
+                                    .width(42.dp)
+                                    .fillMaxHeight()
+                                    .offset(x = (maxWidth + 42.dp) * shimmerPosition - 42.dp)
+                                    .background(
+                                        Brush.horizontalGradient(
+                                            listOf(
+                                                Color.Transparent,
+                                                Color.White.copy(alpha = 0.12f),
+                                                Color.White.copy(alpha = 0.82f),
+                                                Color.White.copy(alpha = 0.12f),
+                                                Color.Transparent
+                                            )
+                                        )
+                                    )
+                            )
+                        }
+                    }
                 }
             } else {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
