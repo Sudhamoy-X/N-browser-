@@ -485,6 +485,8 @@ class ExampleRobolectricTest {
         composeTestRule.mainClock.advanceTimeBy(80L)
 
         composeTestRule.onNodeWithTag("splash_official_icon", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("splash_wordmark_reveal").assertExists()
+        composeTestRule.onNodeWithTag("splash_brand_underline_track").assertExists()
         composeTestRule.onNodeWithTag("nyxora_logo_silhouette_glow", useUnmergedTree = true).assertIsDisplayed()
         assertTrue(
             composeTestRule.onAllNodesWithText("Browse Beyond Ordinary.", substring = false)
