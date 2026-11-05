@@ -49,12 +49,6 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        if (java.io.File("/dev/dri/renderD128").exists()) {
-            window.setFlags(
-                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
-                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
-            )
-        }
         super.onCreate(savedInstanceState)
         val darkWindowBg = AndroidColor.parseColor("#060E1B")
         val darkNavBarBg = AndroidColor.parseColor("#071222")
