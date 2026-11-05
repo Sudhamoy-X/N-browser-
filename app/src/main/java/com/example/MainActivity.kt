@@ -72,7 +72,8 @@ class MainActivity : ComponentActivity() {
         if (savedInstanceState == null && !initialIntentUrl.isNullOrBlank()) {
             pendingIntentUrl = initialIntentUrl
         }
-        val skipSplash = intent?.getBooleanExtra(EXTRA_SKIP_SPLASH, false) == true ||
+        val skipSplash = savedInstanceState != null ||
+            intent?.getBooleanExtra(EXTRA_SKIP_SPLASH, false) == true ||
             !initialIntentUrl.isNullOrBlank()
 
         setContent {

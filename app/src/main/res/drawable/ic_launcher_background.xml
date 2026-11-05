@@ -6,49 +6,132 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- Deep Midnight Navy to Sapphire Base Fill (full 108x108 bleed for all launcher masks) -->
+    <!-- 1. Deep Midnight Navy-Black Core Base (full 108x108 bleed for all adaptive launcher masks) -->
     <path android:pathData="M0,0h108v108h-108z">
         <aapt:attr name="android:fillColor">
             <gradient
-                android:startX="8"
-                android:startY="4"
-                android:endX="104"
-                android:endY="108"
+                android:startX="14"
+                android:startY="8"
+                android:endX="94"
+                android:endY="100"
                 android:type="linear">
-                <item android:offset="0.0" android:color="#FF07132B" />
-                <item android:offset="0.48" android:color="#FF081B3D" />
-                <item android:offset="1.0" android:color="#FF050A1A" />
+                <item android:offset="0.0" android:color="#FF020612" />
+                <item android:offset="0.48" android:color="#FF050E24" />
+                <item android:offset="1.0" android:color="#FF02050E" />
             </gradient>
         </aapt:attr>
     </path>
 
-    <!-- Ambient Sapphire-Cyan Radial Illumination Behind the 3D N Mark -->
+    <!-- 2. Controlled Subsurface Sapphire & Cyan Illumination Behind the 3D N Ribbon -->
     <path android:pathData="M0,0h108v108h-108z">
         <aapt:attr name="android:fillColor">
             <gradient
                 android:centerX="54"
-                android:centerY="52"
-                android:gradientRadius="46"
+                android:centerY="46"
+                android:gradientRadius="44"
                 android:type="radial">
-                <item android:offset="0.0" android:color="#7038BDF8" />
-                <item android:offset="0.38" android:color="#502563EB" />
-                <item android:offset="0.72" android:color="#303B22A8" />
-                <item android:offset="1.0" android:color="#00050D1C" />
+                <item android:offset="0.0" android:color="#4A1D4ED8" />
+                <item android:offset="0.50" android:color="#240EA5E9" />
+                <item android:offset="1.0" android:color="#00020612" />
             </gradient>
         </aapt:attr>
     </path>
 
-    <!-- Subtle Top-Left Atmospheric Specular Sheen -->
-    <path android:pathData="M0,0 C44,6 78,28 108,64 L108,0 Z">
+    <!-- 3. Top-Left Sweeping Glass-Ribbon Wave (Outer Sapphire-Cyan Layer) -->
+    <path android:pathData="M0,0 L74,0 C50,13 26,33 0,58 Z">
         <aapt:attr name="android:fillColor">
             <gradient
-                android:startX="18"
-                android:startY="6"
-                android:endX="76"
-                android:endY="54"
+                android:startX="4"
+                android:startY="4"
+                android:endX="58"
+                android:endY="42"
                 android:type="linear">
-                <item android:offset="0.0" android:color="#1E38BDF8" />
-                <item android:offset="1.0" android:color="#0038BDF8" />
+                <item android:offset="0.0" android:color="#5C2563EB" />
+                <item android:offset="0.55" android:color="#3B0EA5E9" />
+                <item android:offset="1.0" android:color="#0C38BDF8" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 4. Top-Left Sweeping Glass-Ribbon Wave (Inner Electric-Cyan Layer) -->
+    <path android:pathData="M0,0 L52,0 C34,13 16,28 0,44 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="0"
+                android:startY="2"
+                android:endX="42"
+                android:endY="34"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#7838BDF8" />
+                <item android:offset="0.55" android:color="#402563EB" />
+                <item android:offset="1.0" android:color="#0A1D4ED8" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Top-Left Glass-Ribbon Specular Rim Lines -->
+    <path
+        android:pathData="M0,44 C16,28 34,13 52,0"
+        android:strokeWidth="0.9"
+        android:strokeColor="#8C7DD3FC" />
+    <path
+        android:pathData="M0,58 C26,33 50,13 74,0"
+        android:strokeWidth="0.7"
+        android:strokeColor="#5438BDF8" />
+
+    <!-- 5. Bottom-Right Sweeping Blue-Violet & Electric-Blue Glass-Ribbon Wave -->
+    <path android:pathData="M24,108 C58,94 84,74 108,46 L108,108 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="34"
+                android:startY="104"
+                android:endX="104"
+                android:endY="56"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#1A0EA5E9" />
+                <item android:offset="0.48" android:color="#522563EB" />
+                <item android:offset="1.0" android:color="#6E4F46E5" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 6. Bottom-Right Inner Luminous Cyan-Blue Glass Ribbon -->
+    <path android:pathData="M38,108 C64,95 88,78 108,60 L108,88 C86,99 64,105 38,108 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="42"
+                android:startY="106"
+                android:endX="102"
+                android:endY="68"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#7038BDF8" />
+                <item android:offset="0.52" android:color="#482563EB" />
+                <item android:offset="1.0" android:color="#2E4F46E5" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Bottom-Right Glass-Ribbon Specular Rim Arcs -->
+    <path
+        android:pathData="M24,108 C58,94 84,74 108,46"
+        android:strokeWidth="0.75"
+        android:strokeColor="#5C60A5FA" />
+    <path
+        android:pathData="M38,108 C64,95 88,78 108,60"
+        android:strokeWidth="0.95"
+        android:strokeColor="#997DD3FC" />
+
+    <!-- 7. Subtle Bottom-Center Cyan Edge Horizon Glow -->
+    <path android:pathData="M0,76h108v32h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:centerX="52"
+                android:centerY="106"
+                android:gradientRadius="28"
+                android:type="radial">
+                <item android:offset="0.0" android:color="#4C38BDF8" />
+                <item android:offset="0.55" android:color="#1F2563EB" />
+                <item android:offset="1.0" android:color="#00020612" />
             </gradient>
         </aapt:attr>
     </path>

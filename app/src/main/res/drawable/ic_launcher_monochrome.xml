@@ -7,8 +7,16 @@
 
     <!-- Android 13+ Monochrome / Themed Launcher Icon Silhouette (Safe Zone 66dp) -->
     <path
-        android:pathData="M29.5,73.5 L41.5,34.5 L66.5,73.5 L78.5,34.5"
-        android:strokeWidth="12.0"
+        android:pathData="M33.5,58.5 L42.8,31.8 L65.5,58.5 L74.8,31.3"
+        android:strokeWidth="10.6"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+
+    <!-- NYXORA Wordmark Silhouette -->
+    <path
+        android:pathData="M31.8,77.2 L31.8,71.6 L35.6,77.2 L35.6,71.6 M39.4,71.6 L41.5,74.5 L43.6,71.6 M41.5,74.5 L41.5,77.2 M47.2,71.6 L51.0,77.2 M51.0,71.6 L47.2,77.2 M56.8,71.5 C58.5,71.5 59.7,72.7 59.7,74.4 C59.7,76.1 58.5,77.3 56.8,77.3 C55.1,77.3 53.9,76.1 53.9,74.4 C53.9,72.7 55.1,71.5 56.8,71.5 Z M63.5,77.2 L63.5,71.6 L66.0,71.6 C67.0,71.6 67.6,72.2 67.6,73.1 C67.6,74.0 67.0,74.5 66.0,74.5 L63.5,74.5 M65.7,74.5 L67.7,77.2 M71.4,77.2 L73.7,71.6 L76.0,77.2 M72.1,75.4 L75.3,75.4"
+        android:strokeWidth="1.35"
         android:strokeColor="#FFFFFFFF"
         android:strokeLineCap="round"
         android:strokeLineJoin="round" />

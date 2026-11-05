@@ -477,17 +477,36 @@ class ExampleRobolectricTest {
 
     @Test
     fun `opening splash animation displays Crafted by Sudhamoy and transitions cleanly`() {
-        assertEquals(2000L, com.example.ui.components.NYXORA_LAUNCH_ANIMATION_DURATION_MS)
+        assertEquals(1600L, com.example.ui.components.NYXORA_LAUNCH_ANIMATION_DURATION_MS)
         assertEquals("CRAFTED BY SUDHAMOY", com.example.ui.components.CRAFTED_BY_SUDHAMOY_BRAND)
+        assertEquals("BROWSE BEYOND", com.example.ui.components.BROWSE_BEYOND_SUBTITLE)
 
-        // Pause clock during initial splash window to inspect the glowing launch animation
+        // Pause clock during Phases 1–2 (0–650ms equivalent) to confirm the N monogram forms BEFORE the NYXORA wordmark reveals
         composeTestRule.mainClock.autoAdvance = false
-        composeTestRule.mainClock.advanceTimeBy(80L)
+        composeTestRule.mainClock.advanceTimeBy(40L)
 
         composeTestRule.onNodeWithTag("splash_official_icon", useUnmergedTree = true).assertIsDisplayed()
         composeTestRule.onNodeWithTag("splash_wordmark_reveal", useUnmergedTree = true).assertExists()
         composeTestRule.onNodeWithTag("splash_brand_underline_track", useUnmergedTree = true).assertExists()
         composeTestRule.onNodeWithTag("nyxora_logo_silhouette_glow", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("splash_phase_n_only_before_wordmark", useUnmergedTree = true).assertIsDisplayed()
+        assertEquals(
+            "NYXORA wordmark must not reveal simultaneously with the initial N monogram formation",
+            0,
+            composeTestRule.onAllNodesWithTag("splash_phase_wordmark_revealed", useUnmergedTree = true).fetchSemanticsNodes().size
+        )
+
+        // Advance into Phases 3–4 (650–1250ms equivalent) where NYXORA reveals left-to-right above the glowing laser underline
+        composeTestRule.mainClock.advanceTimeBy(120L)
+
+        composeTestRule.onNodeWithTag("splash_phase_wordmark_revealed", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("splash_brand_title_text", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("splash_laser_underline", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("splash_browse_beyond_subtitle", useUnmergedTree = true).assertIsDisplayed()
+        assertTrue(
+            composeTestRule.onAllNodesWithText("BROWSE BEYOND", substring = false)
+                .fetchSemanticsNodes().isNotEmpty()
+        )
         assertTrue(
             composeTestRule.onAllNodesWithText("Browse Beyond Ordinary.", substring = false)
                 .fetchSemanticsNodes().isNotEmpty()
@@ -503,6 +522,11 @@ class ExampleRobolectricTest {
 
         composeTestRule.onNodeWithTag("nyxora_main_browser_screen").assertIsDisplayed()
         composeTestRule.onNodeWithTag("home_creator_credit").performScrollTo().assertIsDisplayed()
+        assertEquals(
+            "Launch splash must not remain or replay after transitioning to the browser homepage",
+            0,
+            composeTestRule.onAllNodesWithTag("nyxora_launch_splash").fetchSemanticsNodes().size
+        )
     }
 
     @Test

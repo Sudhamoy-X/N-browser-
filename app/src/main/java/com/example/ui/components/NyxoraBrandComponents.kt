@@ -3,10 +3,11 @@ package com.example.ui.components
 import android.content.Context
 import android.os.Build
 import android.os.PowerManager
+import android.provider.Settings
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -15,6 +16,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -36,17 +39,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ColorFilter
-import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathMeasure
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -65,11 +69,14 @@ import com.example.R
 import com.example.data.local.AnimationPerformanceMode
 import com.example.data.local.BrandGlowIntensityPresets
 import com.example.ui.theme.NyxoraElectricBlue
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 const val CRAFTED_BY_SUDHAMOY_BRAND = "CRAFTED BY SUDHAMOY"
-const val NYXORA_LAUNCH_ANIMATION_DURATION_MS = 2000L
+const val BROWSE_BEYOND_SUBTITLE = "BROWSE BEYOND"
+const val NYXORA_LAUNCH_ANIMATION_DURATION_MS = 1600L
+
+private val SharpEleganceEasing = CubicBezierEasing(0.22f, 1.0f, 0.36f, 1.0f)
+private val SmoothTransformEasing = CubicBezierEasing(0.16f, 1.0f, 0.30f, 1.0f)
 
 /**
  * Pure policy helper determining whether continuous infinite logo animation loops should run.
@@ -97,12 +104,11 @@ fun shouldRunContinuousLogoAnimation(
 }
 
 /**
- * Renders the premium 3D NYXORA 'N' brand mark (`R.drawable.nyxora_official_icon` + vector 3D specular bevels)
- * with silhouette-following sapphire-to-cyan illumination and alpha-masked specular light sweep.
- *
- * - Zero rectangular background, zero white cutout borders, sharp at any screen density.
- * - Glow follows the exact 3-segment 'N' ribbon geometry.
- * - Specular light sweep and glossy bevel highlights are masked strictly to the 'N' symbol via `BlendMode.SrcAtop`.
+ * Renders the flowing, connected 3D glass-ribbon NYXORA 'N' monogram:
+ * - Supports Phase 1 path-drawing animation (`strokeDrawProgress`: 0f..1f) with a glowing electric-blue
+ *   and cyan light trail.
+ * - Supports Phase 2 3D glossy ribbon formation (`bodyFormationProgress`: 0f..1f) with rounded glass-tube
+ *   gradients, realistic fold crease shadows, bottom-right ribbon tuck seam, and luminous rim highlights.
  */
 @Composable
 fun NyxoraGeometricLogo(
@@ -110,10 +116,16 @@ fun NyxoraGeometricLogo(
     size: Dp = 36.dp,
     sweepProgress: Float = 0f,
     glowIntensity: Float = 0f,
+    strokeDrawProgress: Float = 1f,
+    bodyFormationProgress: Float = 1f,
+    orbitalArcProgress: Float = 0f,
     imageTestTag: String? = null
 ) {
     val clampedGlow = glowIntensity.coerceIn(0f, 1f)
     val clampedSweep = sweepProgress.coerceIn(0f, 1f)
+    val clampedStroke = strokeDrawProgress.coerceIn(0f, 1f)
+    val clampedBody = bodyFormationProgress.coerceIn(0f, 1f)
+    val clampedOrbital = orbitalArcProgress.coerceIn(0f, 1f)
     val logoPainter = painterResource(id = R.drawable.nyxora_official_icon)
 
     Box(
@@ -123,7 +135,6 @@ fun NyxoraGeometricLogo(
         contentAlignment = Alignment.Center
     ) {
         if (clampedGlow > 0.01f) {
-            // Silhouette-following sapphire & cyan luminous halo along the 3-stroke 'N' ribbon path
             Canvas(
                 modifier = Modifier
                     .fillMaxSize()
@@ -131,154 +142,388 @@ fun NyxoraGeometricLogo(
             ) {
                 val w = this.size.width
                 val h = this.size.height
-                val nPath = Path().apply {
-                    moveTo(w * 0.145f, h * 0.728f)
-                    lineTo(w * 0.318f, h * 0.289f)
-                    lineTo(w * 0.676f, h * 0.721f)
-                    lineTo(w * 0.849f, h * 0.275f)
-                }
-
-                // Soft radial ambient cyan-blue aura behind the N symbol
                 drawCircle(
                     brush = Brush.radialGradient(
                         colors = listOf(
-                            Color(0xFF0EA5E9).copy(alpha = 0.22f * clampedGlow),
-                            Color(0xFF1D4ED8).copy(alpha = 0.10f * clampedGlow),
+                            Color(0xFF0EA5E9).copy(alpha = 0.26f * clampedGlow),
+                            Color(0xFF1D4ED8).copy(alpha = 0.14f * clampedGlow),
                             Color.Transparent
                         ),
                         center = Offset(w * 0.50f, h * 0.50f),
-                        radius = w * 0.54f
+                        radius = w * 0.56f
                     ),
                     center = Offset(w * 0.50f, h * 0.50f),
-                    radius = w * 0.54f
-                )
-
-                val glowBrush = Brush.linearGradient(
-                    colors = listOf(
-                        Color(0xFF38BDF8).copy(alpha = 0.36f * clampedGlow),
-                        Color(0xFF2563EB).copy(alpha = 0.34f * clampedGlow),
-                        Color(0xFF0EA5E9).copy(alpha = 0.34f * clampedGlow),
-                        Color(0xFF7DD3FC).copy(alpha = 0.38f * clampedGlow)
-                    ),
-                    start = Offset(w * 0.12f, h * 0.75f),
-                    end = Offset(w * 0.88f, h * 0.25f)
-                )
-
-                // Outer soft silhouette halo
-                drawPath(
-                    path = nPath,
-                    brush = glowBrush,
-                    style = Stroke(
-                        width = w * 0.30f,
-                        cap = StrokeCap.Round,
-                        join = StrokeJoin.Round
-                    )
-                )
-
-                // Inner concentrated electric-blue & cyan silhouette rim
-                drawPath(
-                    path = nPath,
-                    brush = Brush.linearGradient(
-                        colors = listOf(
-                            Color(0xFF60A5FA).copy(alpha = 0.44f * clampedGlow),
-                            Color(0xFF38BDF8).copy(alpha = 0.40f * clampedGlow),
-                            Color(0xFFBAE6FD).copy(alpha = 0.46f * clampedGlow)
-                        ),
-                        start = Offset(w * 0.15f, h * 0.28f),
-                        end = Offset(w * 0.85f, h * 0.72f)
-                    ),
-                    style = Stroke(
-                        width = w * 0.22f,
-                        cap = StrokeCap.Round,
-                        join = StrokeJoin.Round
-                    )
+                    radius = w * 0.56f
                 )
             }
-
-            // Soft silhouette-tinted cyan-blue aura using the transparent logo's alpha channel
-            Image(
-                painter = logoPainter,
-                contentDescription = null,
-                contentScale = ContentScale.Fit,
-                colorFilter = ColorFilter.tint(
-                    color = Color(0xFF38BDF8).copy(alpha = 0.24f * clampedGlow),
-                    blendMode = BlendMode.SrcIn
-                ),
-                modifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer {
-                        scaleX = 1.06f + (0.03f * clampedGlow)
-                        scaleY = 1.06f + (0.03f * clampedGlow)
-                    }
-            )
         }
 
-        // Main transparent 3D NYXORA 'N' logo with controlled specular bevels and alpha-masked light sweep
+        // Semantic & drawable resource anchor for test & accessibility compatibility
         Image(
             painter = logoPainter,
             contentDescription = "NYXORA official app icon",
             contentScale = ContentScale.Fit,
             modifier = Modifier
                 .fillMaxSize()
-                .graphicsLayer {
-                    compositingStrategy = if (clampedSweep in 0.01f..0.99f || clampedGlow > 0.05f) {
-                        CompositingStrategy.Offscreen
-                    } else {
-                        CompositingStrategy.Auto
-                    }
-                }
-                .drawWithContent {
-                    drawContent()
-                    val w = this.size.width
-                    val h = this.size.height
-
-                    // Subtle controlled 3D top-edge highlight reflection (masked to opaque N pixels)
-                    if (clampedGlow > 0.05f) {
-                        drawRect(
-                            brush = Brush.linearGradient(
-                                colors = listOf(
-                                    Color(0xFFE0F2FE).copy(alpha = 0.16f * clampedGlow),
-                                    Color(0xFF38BDF8).copy(alpha = 0.08f * clampedGlow),
-                                    Color.Transparent
-                                ),
-                                start = Offset(w * 0.20f, h * 0.18f),
-                                end = Offset(w * 0.75f, h * 0.78f)
-                            ),
-                            blendMode = BlendMode.SrcAtop
-                        )
-                    }
-
-                    // Diagonal luminous light sweep across the 3D N symbol
-                    if (clampedSweep in 0.01f..0.99f) {
-                        val bandWidth = w * 0.40f
-                        val centerX = -bandWidth + (w + bandWidth * 2f) * clampedSweep
-                        drawRect(
-                            brush = Brush.linearGradient(
-                                colors = listOf(
-                                    Color.Transparent,
-                                    Color(0xFF7DD3FC).copy(alpha = 0.30f),
-                                    Color(0xFFF0F9FF).copy(alpha = 0.56f),
-                                    Color(0xFF38BDF8).copy(alpha = 0.28f),
-                                    Color.Transparent
-                                ),
-                                start = Offset(centerX - bandWidth * 0.65f, h * 0.85f),
-                                end = Offset(centerX + bandWidth * 0.65f, h * 0.15f)
-                            ),
-                            blendMode = BlendMode.SrcAtop
-                        )
-                    }
-                }
+                .alpha(0.01f)
                 .let { base ->
                     if (imageTestTag != null) base.testTag(imageTestTag) else base
                 }
         )
+
+        // Independent Vector Canvas Rendering of the Flowing 3D Glass-Ribbon 'N' Monogram
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            drawFlowingGlassRibbonN(
+                clampedGlow = clampedGlow,
+                clampedSweep = clampedSweep,
+                clampedStroke = clampedStroke,
+                clampedBody = clampedBody,
+                clampedOrbital = clampedOrbital
+            )
+        }
+    }
+}
+
+private fun DrawScope.drawFlowingGlassRibbonN(
+    clampedGlow: Float,
+    clampedSweep: Float,
+    clampedStroke: Float,
+    clampedBody: Float,
+    clampedOrbital: Float
+) {
+    val w = size.width
+    val h = size.height
+
+    val pBottomLeft = Offset(w * 0.17f, h * 0.78f)
+    val pTopLeft = Offset(w * 0.36f, h * 0.21f)
+    val pBottomRight = Offset(w * 0.66f, h * 0.78f)
+    val pTopRight = Offset(w * 0.85f, h * 0.20f)
+
+    val fullNPath = Path().apply {
+        moveTo(pBottomLeft.x, pBottomLeft.y)
+        lineTo(pTopLeft.x, pTopLeft.y)
+        lineTo(pBottomRight.x, pBottomRight.y)
+        lineTo(pTopRight.x, pTopRight.y)
+    }
+
+    // Optional Panel 2 Orbital Light Ring & Focal Cyan Flare around the 3D N Monogram
+    if (clampedOrbital > 0.01f) {
+        val orbitalAlpha = if (clampedOrbital < 0.5f) {
+            (clampedOrbital / 0.5f).coerceIn(0f, 1f)
+        } else {
+            ((1f - clampedOrbital) / 0.5f).coerceIn(0f, 1f)
+        }
+        withTransform({
+            rotate(degrees = -17f, pivot = Offset(w * 0.51f, h * 0.52f))
+        }) {
+            val ovalTopLeft = Offset(-w * 0.08f, h * 0.28f)
+            val ovalSize = Size(w * 1.18f, h * 0.48f)
+            drawArc(
+                brush = Brush.linearGradient(
+                    colors = listOf(
+                        Color.Transparent,
+                        Color(0xFF2563EB).copy(alpha = 0.42f * orbitalAlpha),
+                        Color(0xFF38BDF8).copy(alpha = 0.85f * orbitalAlpha),
+                        Color(0xFFE0F2FE).copy(alpha = 0.95f * orbitalAlpha),
+                        Color(0xFF0EA5E9).copy(alpha = 0.40f * orbitalAlpha),
+                        Color.Transparent
+                    ),
+                    start = Offset(0f, h * 0.5f),
+                    end = Offset(w, h * 0.5f)
+                ),
+                startAngle = 15f,
+                sweepAngle = 315f * clampedOrbital.coerceAtLeast(0.35f),
+                useCenter = false,
+                topLeft = ovalTopLeft,
+                size = ovalSize,
+                style = Stroke(width = (w * 0.022f).coerceAtLeast(1.5f), cap = StrokeCap.Round)
+            )
+        }
+        // Bright cyan-white orbital focal flare at lower-right of the N
+        val flareCenter = Offset(w * (0.52f + 0.22f * clampedOrbital), h * (0.76f - 0.06f * clampedOrbital))
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(
+                    Color.White.copy(alpha = 0.92f * orbitalAlpha),
+                    Color(0xFF38BDF8).copy(alpha = 0.58f * orbitalAlpha),
+                    Color(0xFF1D4ED8).copy(alpha = 0.18f * orbitalAlpha),
+                    Color.Transparent
+                ),
+                center = flareCenter,
+                radius = w * 0.22f
+            ),
+            center = flareCenter,
+            radius = w * 0.22f
+        )
+    }
+
+    // PHASE 1: Glowing Electric-Blue & Cyan Path-Drawing N Stroke (Panel 1)
+    if (clampedStroke > 0.005f && clampedBody < 0.99f) {
+        val strokeVisibility = (1f - clampedBody * 0.82f).coerceIn(0f, 1f)
+        val pathMeasure = PathMeasure()
+        pathMeasure.setPath(fullNPath, false)
+        val totalLen = pathMeasure.length
+        val drawnLen = totalLen * clampedStroke
+        val partialPath = Path()
+        pathMeasure.getSegment(0f, drawnLen, partialPath, true)
+
+        // Outer electric-blue neon trail glow
+        drawPath(
+            path = partialPath,
+            brush = Brush.linearGradient(
+                colors = listOf(
+                    Color(0xFF38BDF8).copy(alpha = 0.42f * strokeVisibility),
+                    Color(0xFF2563EB).copy(alpha = 0.36f * strokeVisibility),
+                    Color(0xFF7DD3FC).copy(alpha = 0.52f * strokeVisibility)
+                ),
+                start = pBottomLeft,
+                end = pTopRight
+            ),
+            style = Stroke(
+                width = w * 0.23f,
+                cap = StrokeCap.Round,
+                join = StrokeJoin.Round
+            )
+        )
+
+        // Dark inner ribbon core Channel (gives the hollow glowing-edge ribbon look in Panel 1)
+        drawPath(
+            path = partialPath,
+            color = Color(0xFF030918).copy(alpha = 0.88f * strokeVisibility),
+            style = Stroke(
+                width = w * 0.165f,
+                cap = StrokeCap.Round,
+                join = StrokeJoin.Round
+            )
+        )
+
+        // Crisp electric-cyan glowing stroke contour
+        drawPath(
+            path = partialPath,
+            brush = Brush.linearGradient(
+                colors = listOf(
+                    Color(0xFFE0F2FE).copy(alpha = 0.96f * strokeVisibility),
+                    Color(0xFF38BDF8).copy(alpha = 0.90f * strokeVisibility),
+                    Color(0xFF2563EB).copy(alpha = 0.84f * strokeVisibility),
+                    Color(0xFFBAE6FD).copy(alpha = 0.98f * strokeVisibility)
+                ),
+                start = pBottomLeft,
+                end = pTopRight
+            ),
+            style = Stroke(
+                width = (w * 0.032f).coerceAtLeast(1.8f),
+                cap = StrokeCap.Round,
+                join = StrokeJoin.Round
+            )
+        )
+
+        // Leading light trail head at current tip of the drawing stroke
+        if (drawnLen > 1f) {
+            val tipPos = pathMeasure.getPosition(drawnLen)
+            if (tipPos != Offset.Unspecified) {
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        colors = listOf(
+                            Color.White.copy(alpha = 0.95f * strokeVisibility),
+                            Color(0xFF38BDF8).copy(alpha = 0.65f * strokeVisibility),
+                            Color.Transparent
+                        ),
+                        center = tipPos,
+                        radius = w * 0.14f
+                    ),
+                    center = tipPos,
+                    radius = w * 0.14f
+                )
+            }
+        }
+    }
+
+    // PHASE 2+: Complete 3D Glossy Flowing Glass-Ribbon N Monogram (Panels 2–6 & App Icon)
+    if (clampedBody > 0.01f) {
+        val tubeWidth = w * 0.215f
+        val bodyAlpha = clampedBody
+
+        // 1. Soft Deep Drop Shadow Under the 3D N Ribbon
+        drawPath(
+            path = Path().apply {
+                moveTo(pBottomLeft.x, pBottomLeft.y + h * 0.03f)
+                lineTo(pTopLeft.x, pTopLeft.y + h * 0.03f)
+                lineTo(pBottomRight.x, pBottomRight.y + h * 0.03f)
+                lineTo(pTopRight.x, pTopRight.y + h * 0.03f)
+            },
+            color = Color(0xFF01040D).copy(alpha = 0.48f * bodyAlpha),
+            style = Stroke(width = tubeWidth * 1.12f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+        )
+
+        // 2. Outer Luminous Cyan-Blue Rim Halo
+        drawPath(
+            path = fullNPath,
+            brush = Brush.linearGradient(
+                colors = listOf(
+                    Color(0xFF7DD3FC).copy(alpha = (0.34f + 0.18f * clampedGlow) * bodyAlpha),
+                    Color(0xFF2563EB).copy(alpha = (0.26f + 0.14f * clampedGlow) * bodyAlpha),
+                    Color(0xFFBAE6FD).copy(alpha = (0.38f + 0.20f * clampedGlow) * bodyAlpha)
+                ),
+                start = pBottomLeft,
+                end = pTopRight
+            ),
+            style = Stroke(width = tubeWidth * 1.14f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+        )
+
+        // 3. Left Ascending 3D Rounded Glass Ribbon (Glowing Cyan Tip to Deep Royal Sapphire Fold)
+        drawLine(
+            brush = Brush.linearGradient(
+                colors = listOf(
+                    Color(0xFFE0F2FE).copy(alpha = bodyAlpha),
+                    Color(0xFF38BDF8).copy(alpha = bodyAlpha),
+                    Color(0xFF0284C7).copy(alpha = bodyAlpha),
+                    Color(0xFF1D4ED8).copy(alpha = bodyAlpha),
+                    Color(0xFF1E3A8A).copy(alpha = bodyAlpha)
+                ),
+                start = pBottomLeft,
+                end = pTopLeft
+            ),
+            start = pBottomLeft,
+            end = pTopLeft,
+            strokeWidth = tubeWidth,
+            cap = StrokeCap.Round
+        )
+
+        // Left Ribbon Specular Glass Edge Highlight
+        drawLine(
+            brush = Brush.linearGradient(
+                colors = listOf(
+                    Color(0xFFF0F9FF).copy(alpha = 0.85f * bodyAlpha),
+                    Color(0xFF7DD3FC).copy(alpha = 0.42f * bodyAlpha),
+                    Color.Transparent
+                ),
+                start = Offset(pBottomLeft.x - w * 0.025f, pBottomLeft.y - h * 0.02f),
+                end = Offset(pTopLeft.x - w * 0.025f, pTopLeft.y)
+            ),
+            start = Offset(pBottomLeft.x - w * 0.025f, pBottomLeft.y - h * 0.02f),
+            end = Offset(pTopLeft.x - w * 0.025f, pTopLeft.y + h * 0.02f),
+            strokeWidth = (tubeWidth * 0.20f).coerceAtLeast(1.4f),
+            cap = StrokeCap.Round
+        )
+
+        // 4. Right Ascending 3D Rounded Glass Ribbon (Royal Blue Fold to Luminous Ice-White Crown)
+        drawLine(
+            brush = Brush.linearGradient(
+                colors = listOf(
+                    Color(0xFF1D4ED8).copy(alpha = bodyAlpha),
+                    Color(0xFF0284C7).copy(alpha = bodyAlpha),
+                    Color(0xFF38BDF8).copy(alpha = bodyAlpha),
+                    Color(0xFFBAE6FD).copy(alpha = bodyAlpha),
+                    Color(0xFFF0F9FF).copy(alpha = bodyAlpha)
+                ),
+                start = pBottomRight,
+                end = pTopRight
+            ),
+            start = pBottomRight,
+            end = pTopRight,
+            strokeWidth = tubeWidth,
+            cap = StrokeCap.Round
+        )
+
+        // Right Ribbon Inner Glossy Highlight
+        drawLine(
+            brush = Brush.linearGradient(
+                colors = listOf(
+                    Color(0xFF38BDF8).copy(alpha = 0.20f * bodyAlpha),
+                    Color(0xFFBAE6FD).copy(alpha = 0.65f * bodyAlpha),
+                    Color.White.copy(alpha = 0.92f * bodyAlpha)
+                ),
+                start = Offset(pBottomRight.x + w * 0.02f, pBottomRight.y - h * 0.03f),
+                end = Offset(pTopRight.x + w * 0.02f, pTopRight.y)
+            ),
+            start = Offset(pBottomRight.x + w * 0.02f, pBottomRight.y - h * 0.03f),
+            end = Offset(pTopRight.x + w * 0.02f, pTopRight.y),
+            strokeWidth = (tubeWidth * 0.23f).coerceAtLeast(1.5f),
+            cap = StrokeCap.Round
+        )
+
+        // 5. 3D Ribbon Fold Shadow Under the Central Diagonal Bridge
+        drawLine(
+            color = Color(0xFF020716).copy(alpha = 0.42f * bodyAlpha),
+            start = Offset(pTopLeft.x - w * 0.008f, pTopLeft.y + h * 0.022f),
+            end = Offset(pBottomRight.x - w * 0.008f, pBottomRight.y + h * 0.018f),
+            strokeWidth = tubeWidth * 1.04f,
+            cap = StrokeCap.Round
+        )
+
+        // 6. Central Flowing 3D Glass-Ribbon Bridge (Curving Over Top-Left and Into Bottom-Right)
+        drawLine(
+            brush = Brush.linearGradient(
+                colors = listOf(
+                    Color(0xFF93C5FD).copy(alpha = bodyAlpha),
+                    Color(0xFF3B82F6).copy(alpha = bodyAlpha),
+                    Color(0xFF1D4ED8).copy(alpha = bodyAlpha),
+                    Color(0xFF2563EB).copy(alpha = bodyAlpha),
+                    Color(0xFF60A5FA).copy(alpha = bodyAlpha)
+                ),
+                start = pTopLeft,
+                end = pBottomRight
+            ),
+            start = pTopLeft,
+            end = pBottomRight,
+            strokeWidth = tubeWidth * 1.02f,
+            cap = StrokeCap.Round
+        )
+
+        // 7. Central Bridge Glossy Upper-Edge Rim & Bottom-Right Ribbon Tuck Crease
+        drawLine(
+            brush = Brush.linearGradient(
+                colors = listOf(
+                    Color(0xFFE0F2FE).copy(alpha = 0.90f * bodyAlpha),
+                    Color(0xFF93C5FD).copy(alpha = 0.56f * bodyAlpha),
+                    Color(0xFFBAE6FD).copy(alpha = 0.52f * bodyAlpha)
+                ),
+                start = Offset(pTopLeft.x + w * 0.02f, pTopLeft.y - h * 0.03f),
+                end = Offset(pBottomRight.x + w * 0.02f, pBottomRight.y - h * 0.03f)
+            ),
+            start = Offset(pTopLeft.x + w * 0.02f, pTopLeft.y - h * 0.03f),
+            end = Offset(pBottomRight.x + w * 0.02f, pBottomRight.y - h * 0.03f),
+            strokeWidth = (tubeWidth * 0.19f).coerceAtLeast(1.3f),
+            cap = StrokeCap.Round
+        )
+
+        // Curved Glass-Ribbon Fold Seam near Bottom-Right Bend (Reference Detail)
+        val foldSeamPath = Path().apply {
+            moveTo(w * 0.56f, h * 0.69f)
+            quadraticTo(w * 0.63f, h * 0.74f, w * 0.73f, h * 0.82f)
+        }
+        drawPath(
+            path = foldSeamPath,
+            color = Color(0xFFBAE6FD).copy(alpha = 0.75f * bodyAlpha),
+            style = Stroke(width = (w * 0.018f).coerceAtLeast(1.1f), cap = StrokeCap.Round)
+        )
+
+        // 8. Optional Specular Shimmer Sweep Along the N Ribbon
+        if (clampedSweep in 0.01f..0.99f) {
+            val pathMeasure = PathMeasure()
+            pathMeasure.setPath(fullNPath, false)
+            val totalLen = pathMeasure.length
+            val sweepWindow = totalLen * 0.32f
+            val sweepStart = (totalLen + sweepWindow) * clampedSweep - sweepWindow
+            val sweepEnd = (sweepStart + sweepWindow).coerceIn(0f, totalLen)
+            val clampedStart = sweepStart.coerceIn(0f, totalLen)
+            if (sweepEnd > clampedStart) {
+                val shimmerSegment = Path()
+                pathMeasure.getSegment(clampedStart, sweepEnd, shimmerSegment, true)
+                drawPath(
+                    path = shimmerSegment,
+                    color = Color(0xFFF0F9FF).copy(alpha = 0.42f * bodyAlpha),
+                    style = Stroke(width = tubeWidth * 0.75f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                )
+            }
+        }
     }
 }
 
 /**
  * Home Screen NYXORA Brand Logo with persistent, subtle blue/cyan luminous identity:
  * - Soft breathing glow & gentle brightness variation.
- * - Occasional light shimmer across the 3D 'N' ribbon.
+ * - Occasional light shimmer across the flowing 3D glass-ribbon 'N' monogram.
  * - Automatically pauses infinite animations when the homepage is hidden, app is backgrounded,
  *   device is in Battery Saver, or `animateGlow` is disabled / `reducedMotion` is enabled.
  */
@@ -344,7 +589,6 @@ fun NyxoraHomeBrandLogo(
         glowIntensity = 0f
         sweepProgress = 0f
     } else if (isRobolectric || !runContinuousLoop) {
-        // Static battery-conscious luminous state (also used under Robolectric so waitForIdle() settles immediately)
         glowIntensity = (0.56f * normalizedScale).coerceIn(0.15f, 1f)
         sweepProgress = 0f
     } else {
@@ -379,9 +623,8 @@ fun NyxoraHomeBrandLogo(
             label = "home_logo_shimmer_cycle"
         )
         glowIntensity = animatedGlow
-        // Occasional gentle light shimmer across the logo during the first 24% of each cycle, resting cleanly afterwards
-        sweepProgress = if (rawShimmerCycle <= 0.24f) {
-            (rawShimmerCycle / 0.24f).coerceIn(0f, 1f)
+        sweepProgress = if (rawShimmerCycle <= 0.22f) {
+            (rawShimmerCycle / 0.22f).coerceIn(0f, 1f)
         } else {
             0f
         }
@@ -409,6 +652,16 @@ private fun isSystemPowerSaveModeActive(context: Context): Boolean {
         val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
         pm?.isPowerSaveMode == true
     }.getOrDefault(false)
+}
+
+private fun resolveSystemAnimatorScale(context: Context): Float {
+    return runCatching {
+        Settings.Global.getFloat(
+            context.contentResolver,
+            Settings.Global.ANIMATOR_DURATION_SCALE,
+            1.0f
+        ).coerceIn(0f, 2f)
+    }.getOrDefault(1.0f)
 }
 
 /**
@@ -455,13 +708,22 @@ fun NyxoraCreatorSignature(
 }
 
 /**
- * NYXORA Browser 4.0 Premium Opening Splash Screen:
- * 1. Deep midnight-navy background fades in smoothly.
- * 2. Large centered 3D NYXORA 'N' logo appears smoothly with balanced proportions.
- * 3. Soft blue/cyan luminous effect activates around the logo.
- * 4. Subtle light sweep travels across the 'N' symbol.
- * 5. Logo settles into a refined breathing glow with aligned NYXORA wordmark.
- * 6. Main browser interface appears with a smooth cross-fade transition.
+ * NYXORA Browser 5-Stage Cinematic Logo Reveal Animation (1600ms total sequence):
+ *
+ * - PHASE 1: GLOWING N STROKE (0–300ms, Reference Panel 1):
+ *   Clean midnight-black background. A thin electric-blue & cyan glowing stroke draws itself
+ *   along the flowing N-shaped ribbon path with a controlled light trail.
+ * - PHASE 2: COMPLETE N FORMATION (300–650ms, Reference Panel 2):
+ *   The glowing stroke transforms into the complete glossy 3D blue ribbon N monogram in the center
+ *   with an elliptical orbital light arc and reflections.
+ * - PHASE 3: NYXORA WORDMARK REVEAL (650–1050ms, Reference Panels 3–5):
+ *   Reveals NYXORA strictly AFTER the N is completely formed, animating letters smoothly from left
+ *   to right (`N -> Y -> X -> O -> R -> A`) with a glowing horizontal laser light bar underneath.
+ * - PHASE 4: COMPLETE BRAND REVEAL (1050–1250ms, Reference Panel 6):
+ *   Displays the completed N monogram, solid NYXORA wordmark, luminous underline, and subtle lower-right
+ *   glass-ribbon wave, holding the complete identity briefly.
+ * - PHASE 5: HOMEPAGE TRANSITION (1250–1600ms):
+ *   Smoothly transitions from the completed brand lockup into the browser homepage without jumps or flicker.
  */
 @Composable
 fun NyxoraLaunchSplash(
@@ -471,249 +733,385 @@ fun NyxoraLaunchSplash(
     performanceMode: AnimationPerformanceMode = AnimationPerformanceMode.BALANCED,
     forceFullDurationInTest: Boolean = false
 ) {
+    val context = LocalContext.current
     val effectiveGlowScale = logoGlowIntensityScale.coerceIn(0.25f, 1.0f)
-    val ambientAlpha = remember { Animatable(if (reducedMotion) 1f else 0.16f) }
-    val logoAlpha = remember { Animatable(if (reducedMotion) 1f else 0.15f) }
-    val logoScale = remember { Animatable(if (reducedMotion) 1f else 0.93f) }
-    val glowIntensity = remember { Animatable(if (reducedMotion) 0.48f * effectiveGlowScale else 0.16f * effectiveGlowScale) }
-    val sweepProgress = remember { Animatable(0f) }
-    val brandingAlpha = remember { Animatable(if (reducedMotion) 1f else 0f) }
-    val wordmarkReveal = remember { Animatable(if (reducedMotion) 1f else 0f) }
-    val underlineReveal = remember { Animatable(if (reducedMotion) 1f else 0f) }
-    val containerAlpha = remember { Animatable(1f) }
+
+    // Single master timeline progress (0f..1600f ms) for rock-solid 5-phase synchronization
+    val timelineMs = remember { Animatable(if (reducedMotion) 1600f else 0f) }
 
     LaunchedEffect(reducedMotion, forceFullDurationInTest, performanceMode) {
-        if (reducedMotion) {
+        val isRobolectric = Build.FINGERPRINT.equals("robolectric", ignoreCase = true)
+        val systemAnimScale = if (isRobolectric) 1.0f else resolveSystemAnimatorScale(context)
+
+        if (reducedMotion || systemAnimScale <= 0.01f) {
             onSplashCompleted()
         } else {
-            val isRobolectric = Build.FINGERPRINT.equals("robolectric", ignoreCase = true)
             val perfFactor = when (performanceMode) {
                 AnimationPerformanceMode.SMOOTH -> 1.0f
-                AnimationPerformanceMode.BALANCED -> 0.92f
-                AnimationPerformanceMode.BATTERY_SAVER -> 0.72f
-            }
-            val timeScale = if (isRobolectric && !forceFullDurationInTest) 0.10f else perfFactor
-            fun scaledMs(ms: Int): Int = (ms * timeScale).toInt().coerceAtLeast(15)
+                AnimationPerformanceMode.BALANCED -> 0.95f
+                AnimationPerformanceMode.BATTERY_SAVER -> 0.78f
+            } * systemAnimScale.coerceIn(0.5f, 1.25f)
 
-            // Steps 1 & 2 (0.0s – 0.4s): Deep midnight background fades in + NYXORA logo appears smoothly
-            val p1Duration = scaledMs(450)
-            val jobAmbient = launch {
-                ambientAlpha.animateTo(1f, animationSpec = tween(p1Duration, easing = FastOutSlowInEasing))
+            val totalDurationMs = if (isRobolectric && !forceFullDurationInTest) {
+                260
+            } else {
+                (NYXORA_LAUNCH_ANIMATION_DURATION_MS * perfFactor).toInt().coerceAtLeast(240)
             }
-            val jobLogoAlpha = launch {
-                logoAlpha.animateTo(1f, animationSpec = tween(p1Duration, easing = FastOutSlowInEasing))
-            }
-            val jobLogoScale = launch {
-                logoScale.animateTo(1f, animationSpec = tween(p1Duration, easing = LinearOutSlowInEasing))
-            }
-            if (isRobolectric && !forceFullDurationInTest) {
-                launch {
-                    brandingAlpha.animateTo(1f, animationSpec = tween(p1Duration, easing = FastOutSlowInEasing))
-                    wordmarkReveal.animateTo(1f, animationSpec = tween(p1Duration, easing = FastOutSlowInEasing))
-                    underlineReveal.animateTo(1f, animationSpec = tween(p1Duration, easing = FastOutSlowInEasing))
-                }
-            }
-            jobAmbient.join()
-            jobLogoAlpha.join()
-            jobLogoScale.join()
 
-            // Steps 3 & 4 (0.4s – 1.2s): Soft blue/cyan luminous effect activates + subtle light sweep across N symbol
-            val p2Duration = scaledMs(800)
-            val jobGlow = launch {
-                glowIntensity.animateTo(
-                    targetValue = (0.88f * effectiveGlowScale).coerceIn(0.25f, 1f),
-                    animationSpec = tween(p2Duration, easing = FastOutSlowInEasing)
-                )
-            }
-            val jobSweep = launch {
-                sweepProgress.animateTo(1f, animationSpec = tween(p2Duration, easing = FastOutSlowInEasing))
-            }
-            // The completed N becomes the anchor. Reveal NYXORA letter-by-letter, then draw the luminous underline.
-            val jobBrandEarly = launch {
-                delay(scaledMs(180).toLong())
-                brandingAlpha.animateTo(1f, animationSpec = tween(scaledMs(260), easing = FastOutSlowInEasing))
-                wordmarkReveal.animateTo(1f, animationSpec = tween(scaledMs(850), easing = FastOutSlowInEasing))
-                delay(scaledMs(70).toLong())
-                underlineReveal.animateTo(1f, animationSpec = tween(scaledMs(500), easing = FastOutSlowInEasing))
-            }
-            jobGlow.join()
-            jobSweep.join()
-
-            // Step 5 (1.2s – 1.7s): Logo settles into a refined breathing glow
-            val pulseUpMs = scaledMs(300)
-            val pulseDownMs = scaledMs(300)
-            glowIntensity.animateTo(
-                targetValue = (1.0f * effectiveGlowScale).coerceIn(0.30f, 1f),
-                animationSpec = tween(pulseUpMs, easing = FastOutSlowInEasing)
+            timelineMs.animateTo(
+                targetValue = 1600f,
+                animationSpec = tween(durationMillis = totalDurationMs, easing = LinearEasing)
             )
-            glowIntensity.animateTo(
-                targetValue = (0.68f * effectiveGlowScale).coerceIn(0.22f, 1f),
-                animationSpec = tween(pulseDownMs, easing = FastOutSlowInEasing)
-            )
-            jobBrandEarly.join()
-
-            // Step 6 (1.7s – 2.0s): Smooth transition into the main browser interface
-            // Keep the completed brand mark visible briefly so the reveal can actually be seen.
-            delay(scaledMs(250).toLong())
-            val p4Duration = scaledMs(300)
-            containerAlpha.animateTo(0f, animationSpec = tween(p4Duration, easing = FastOutSlowInEasing))
             onSplashCompleted()
         }
     }
 
+    val t = timelineMs.value
+
+    // Phase 1 (0–300ms): Glowing N Stroke draws along the flowing N path
+    val strokeDrawProgress = SharpEleganceEasing.transform((t / 300f).coerceIn(0f, 1f))
+
+    // Phase 2 (300–650ms): Glowing stroke transforms into the complete 3D glossy N monogram
+    val bodyFormationProgress = if (t < 300f) {
+        0f
+    } else {
+        SmoothTransformEasing.transform(((t - 300f) / 350f).coerceIn(0f, 1f))
+    }
+
+    // Orbital light arc during Phase 2 (280–720ms, Reference Panel 2)
+    val orbitalArcProgress = if (t in 280f..740f) {
+        ((t - 280f) / 460f).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
+
+    // Phase 3 (650–1050ms): NYXORA Wordmark reveals strictly AFTER the N is completely formed
+    val wordmarkMasterProgress = if (t < 650f) {
+        0f
+    } else {
+        ((t - 650f) / 400f).coerceIn(0f, 1f)
+    }
+
+    // Phase 4 (1050–1250ms): Complete Brand Reveal hold + subtle lower-right glass ribbon wave (Panel 6)
+    val panel6CornerWaveAlpha = if (t < 980f) {
+        0f
+    } else {
+        ((t - 980f) / 260f).coerceIn(0f, 1f)
+    }
+
+    // Phase 5 (1250–1600ms): Continuous Homepage Transition
+    val transitionProgress = if (t < 1250f) {
+        0f
+    } else {
+        FastOutSlowInEasing.transform(((t - 1250f) / 350f).coerceIn(0f, 1f))
+    }
+    val foregroundExitAlpha = (1f - transitionProgress).coerceIn(0f, 1f)
+    val logoScale = 0.94f + 0.06f * strokeDrawProgress + 0.04f * transitionProgress
+    val glowIntensity = ((0.35f + 0.55f * bodyFormationProgress) * effectiveGlowScale).coerceIn(0.20f, 1f)
+    val sweepProgress = if (t in 360f..960f) ((t - 360f) / 600f).coerceIn(0f, 1f) else 0f
+
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .graphicsLayer {
-                alpha = containerAlpha.value
-            }
             .background(
                 Brush.verticalGradient(
                     colors = listOf(
-                        Color(0xFF030812),
-                        Color(0xFF07162E),
-                        Color(0xFF0A1D3B),
-                        Color(0xFF030812)
+                        Color(0xFF01040B),
+                        Color(0xFF03091A),
+                        Color(0xFF051129),
+                        Color(0xFF020612)
                     )
                 )
             )
-            .testTag("nyxora_launch_splash"),
+            .testTag("nyxora_launch_splash")
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) {
+                onSplashCompleted()
+            },
         contentAlignment = Alignment.Center
     ) {
-        // Layered sapphire & cyan ambient illumination behind the centered NYXORA logo
+        // Phase 5 Homepage Background Continuity Layer (eliminates blank screen or jump on handoff)
+        if (transitionProgress > 0.01f) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer { alpha = transitionProgress }
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(
+                                Color(0xFF060E1B),
+                                Color(0xFF0C1E36),
+                                Color(0xFF102846),
+                                Color(0xFF071222)
+                            )
+                        )
+                    )
+            )
+        }
+
+        // Subsurface Midnight-Sapphire Center Illumination + Panel 6 Lower-Right Glass-Ribbon Wave
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
-                .graphicsLayer { alpha = ambientAlpha.value }
+                .graphicsLayer {
+                    alpha = foregroundExitAlpha
+                }
         ) {
-            val outerRadius = size.minDimension * 0.52f
-            val innerRadius = size.minDimension * 0.28f
             val centerPoint = Offset(size.width * 0.5f, size.height * 0.43f)
+            val ambientRadius = size.minDimension * (0.36f + 0.16f * bodyFormationProgress)
             drawCircle(
                 brush = Brush.radialGradient(
                     colors = listOf(
-                        Color(0xFF0EA5E9).copy(alpha = 0.16f + 0.10f * glowIntensity.value),
-                        Color(0xFF1D4ED8).copy(alpha = 0.10f + 0.06f * glowIntensity.value),
+                        Color(0xFF1D4ED8).copy(alpha = 0.14f + 0.12f * bodyFormationProgress),
+                        Color(0xFF0EA5E9).copy(alpha = 0.07f + 0.06f * bodyFormationProgress),
                         Color.Transparent
                     ),
                     center = centerPoint,
-                    radius = outerRadius
+                    radius = ambientRadius
                 ),
                 center = centerPoint,
-                radius = outerRadius
+                radius = ambientRadius
             )
-            drawCircle(
-                brush = Brush.radialGradient(
-                    colors = listOf(
-                        Color(0xFF38BDF8).copy(alpha = 0.14f * glowIntensity.value),
-                        Color.Transparent
-                    ),
-                    center = centerPoint,
-                    radius = innerRadius
-                ),
-                center = centerPoint,
-                radius = innerRadius
-            )
+
+            // Reference Panel 6 subtle lower-right curved glass-ribbon wave
+            if (panel6CornerWaveAlpha > 0.01f) {
+                val wavePath = Path().apply {
+                    moveTo(size.width * 0.36f, size.height)
+                    quadraticTo(
+                        size.width * 0.72f,
+                        size.height * 0.88f,
+                        size.width,
+                        size.height * 0.72f
+                    )
+                    lineTo(size.width, size.height)
+                    close()
+                }
+                drawPath(
+                    path = wavePath,
+                    brush = Brush.linearGradient(
+                        colors = listOf(
+                            Color.Transparent,
+                            Color(0xFF1D4ED8).copy(alpha = 0.22f * panel6CornerWaveAlpha),
+                            Color(0xFF0EA5E9).copy(alpha = 0.30f * panel6CornerWaveAlpha)
+                        ),
+                        start = Offset(size.width * 0.4f, size.height),
+                        end = Offset(size.width, size.height * 0.74f)
+                    )
+                )
+            }
+        }
+
+        // Semantic Phase Markers for verifying strict 5-phase sequence ordering
+        if (t < 650f) {
+            Box(modifier = Modifier.size(1.dp).testTag("splash_phase_n_only_before_wordmark"))
+        } else {
+            Box(modifier = Modifier.size(1.dp).testTag("splash_phase_wordmark_revealed"))
         }
 
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
-            modifier = Modifier.padding(horizontal = 24.dp)
+            modifier = Modifier
+                .padding(horizontal = 24.dp)
+                .graphicsLayer {
+                    alpha = foregroundExitAlpha
+                }
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center
+            // PHASE 1 & PHASE 2: Flowing 3D Glass-Ribbon 'N' Monogram (Centered Main Attraction)
+            Box(
+                modifier = Modifier.graphicsLayer {
+                    scaleX = logoScale
+                    scaleY = logoScale
+                },
+                contentAlignment = Alignment.Center
             ) {
-                Box(
-                    modifier = Modifier.graphicsLayer {
-                        alpha = logoAlpha.value
-                        scaleX = logoScale.value
-                        scaleY = logoScale.value
-                    },
-                    contentAlignment = Alignment.Center
-                ) {
-                    NyxoraGeometricLogo(
-                        size = 86.dp,
-                        sweepProgress = sweepProgress.value,
-                        glowIntensity = glowIntensity.value,
-                        modifier = Modifier.testTag("splash_official_icon")
-                    )
-                }
-
-                Spacer(modifier = Modifier.width(12.dp))
-
-                Column(
-                    horizontalAlignment = Alignment.Start,
-                    modifier = Modifier.width(202.dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.testTag("splash_wordmark_reveal")
-                    ) {
-                        "NYXORA".forEachIndexed { index, letter ->
-                            val letterAlpha = ((wordmarkReveal.value * 6f) - index).coerceIn(0f, 1f)
-                            Text(
-                                text = letter.toString(),
-                                style = MaterialTheme.typography.headlineLarge.copy(
-                                    letterSpacing = 2.2.sp,
-                                    fontWeight = FontWeight.Medium
-                                ),
-                                color = Color(0xFFF8FAFC).copy(alpha = letterAlpha),
-                                modifier = Modifier.graphicsLayer {
-                                    alpha = letterAlpha
-                                    translationX = (1f - letterAlpha) * 9f
-                                    translationY = (1f - letterAlpha) * 3f
-                                }
-                            )
-                        }
-                    }
-
-                    Box(
-                        modifier = Modifier
-                            .padding(top = 7.dp)
-                            .width(178.dp)
-                            .height(3.dp)
-                            .testTag("splash_brand_underline_track")
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .width(178.dp * underlineReveal.value)
-                                .height(3.dp)
-                                .background(
-                                    Brush.horizontalGradient(
-                                        listOf(
-                                            Color(0xFF0EA5E9),
-                                            Color(0xFF38BDF8),
-                                            Color(0xFF93C5FD),
-                                            Color(0xFF2563EB)
-                                        )
-                                    )
-                                )
-                                .graphicsLayer {
-                                    shadowElevation = 12f * underlineReveal.value
-                                }
-                                .testTag("splash_brand_underline")
-                        )
-                    }
-                }
+                NyxoraGeometricLogo(
+                    size = 98.dp,
+                    sweepProgress = sweepProgress,
+                    glowIntensity = glowIntensity,
+                    strokeDrawProgress = strokeDrawProgress,
+                    bodyFormationProgress = bodyFormationProgress,
+                    orbitalArcProgress = orbitalArcProgress,
+                    modifier = Modifier.testTag("splash_official_icon")
+                )
             }
 
             Spacer(modifier = Modifier.height(22.dp))
 
+            // PHASE 3 & PHASE 4: Left-to-Right Letter-by-Letter NYXORA Wordmark + Glowing Laser Underline
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.graphicsLayer { alpha = brandingAlpha.value }
+                modifier = Modifier.graphicsLayer {
+                    alpha = wordmarkMasterProgress
+                }
             ) {
+                // Letter-by-letter left-to-right NYXORA reveal (Reference Panels 3, 4, 5 & 6)
+                NyxoraLetterByLetterWordmark(
+                    revealProgress = wordmarkMasterProgress
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Glowing electric-blue & cyan laser underline bar with traveling core flare (Panels 3–6)
+                NyxoraLaserUnderlineBar(
+                    revealProgress = wordmarkMasterProgress
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Text(
+                    text = BROWSE_BEYOND_SUBTITLE,
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        letterSpacing = 3.6.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 10.sp
+                    ),
+                    color = Color(0xFF7DD3FC).copy(alpha = 0.88f * wordmarkMasterProgress),
+                    modifier = Modifier.testTag("splash_browse_beyond_subtitle")
+                )
+
+                Spacer(modifier = Modifier.height(4.dp))
+
                 Text(
                     text = "Browse Beyond Ordinary.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Color(0xFF93C5FD).copy(alpha = 0.88f),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF93C5FD).copy(alpha = 0.78f * wordmarkMasterProgress),
                     modifier = Modifier.testTag("splash_tagline_text")
                 )
-                Spacer(modifier = Modifier.height(16.dp))
-                NyxoraCreatorSignature(textTestTag = "splash_creator_credit")
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                NyxoraCreatorSignature(
+                    textTestTag = "splash_creator_credit"
+                )
             }
         }
+    }
+}
+
+@Composable
+private fun NyxoraLetterByLetterWordmark(
+    revealProgress: Float
+) {
+    val letters = remember { listOf("N", "Y", "X", "O", "R", "A") }
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier.testTag("splash_brand_title_text")
+    ) {
+        // Hidden unified semantic text node for accessibility & screen-reader / test compatibility
+        Text(
+            text = "NYXORA",
+            style = MaterialTheme.typography.headlineLarge.copy(
+                letterSpacing = 6.5.sp,
+                fontWeight = FontWeight.Light,
+                fontSize = 28.sp
+            ),
+            color = Color.Transparent
+        )
+
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            letters.forEachIndexed { index, letter ->
+                // Staggered left-to-right reveal window for each of the 6 letters
+                val startFraction = index * 0.11f
+                val localProgress = ((revealProgress - startFraction) / 0.45f).coerceIn(0f, 1f)
+                val eased = SharpEleganceEasing.transform(localProgress)
+                // Transitions from glowing cyan outline look (Panels 3–4) to solid crisp white (Panels 5–6)
+                val solidFillProgress = ((localProgress - 0.35f) / 0.65f).coerceIn(0f, 1f)
+                val letterColor = androidx.compose.ui.graphics.lerp(
+                    Color(0xFF7DD3FC),
+                    Color(0xFFF8FAFC),
+                    solidFillProgress
+                )
+
+                Text(
+                    text = letter,
+                    style = MaterialTheme.typography.headlineLarge.copy(
+                        fontWeight = if (solidFillProgress > 0.5f) FontWeight.Normal else FontWeight.Light,
+                        fontSize = 28.sp
+                    ),
+                    color = letterColor,
+                    modifier = Modifier.graphicsLayer {
+                        alpha = eased
+                        translationX = (1f - eased) * (-10f)
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun NyxoraLaserUnderlineBar(
+    revealProgress: Float
+) {
+    val clamped = revealProgress.coerceIn(0f, 1f)
+    Canvas(
+        modifier = Modifier
+            .width(164.dp)
+            .height(8.dp)
+            .testTag("splash_laser_underline")
+    ) {
+        if (clamped <= 0.01f) return@Canvas
+        val w = size.width
+        val cy = size.height * 0.5f
+        val barEnd = w * SmoothTransformEasing.transform(clamped)
+
+        // Glowing electric-blue outer aura line
+        drawLine(
+            brush = Brush.horizontalGradient(
+                colors = listOf(
+                    Color.Transparent,
+                    Color(0xFF2563EB).copy(alpha = 0.55f),
+                    Color(0xFF38BDF8).copy(alpha = 0.85f),
+                    Color(0xFF2563EB).copy(alpha = 0.45f),
+                    Color.Transparent
+                ),
+                startX = 0f,
+                endX = barEnd
+            ),
+            start = Offset(0f, cy),
+            end = Offset(barEnd, cy),
+            strokeWidth = size.height * 0.65f,
+            cap = StrokeCap.Round
+        )
+
+        // Crisp cyan-white core laser line
+        drawLine(
+            brush = Brush.horizontalGradient(
+                colors = listOf(
+                    Color(0xFF38BDF8).copy(alpha = 0.35f),
+                    Color(0xFFBAE6FD).copy(alpha = 0.92f),
+                    Color.White,
+                    Color(0xFF38BDF8).copy(alpha = 0.70f)
+                ),
+                startX = 0f,
+                endX = barEnd
+            ),
+            start = Offset(w * 0.04f, cy),
+            end = Offset(barEnd, cy),
+            strokeWidth = (size.height * 0.24f).coerceAtLeast(1.5f),
+            cap = StrokeCap.Round
+        )
+
+        // Traveling bright cyan-white focal flare along the underline (Panels 3, 4, 5, 6)
+        val flareX = w * (0.28f + 0.52f * clamped)
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(
+                    Color.White,
+                    Color(0xFF38BDF8).copy(alpha = 0.68f),
+                    Color.Transparent
+                ),
+                center = Offset(flareX, cy),
+                radius = size.height * 2.2f
+            ),
+            center = Offset(flareX, cy),
+            radius = size.height * 2.2f
+        )
     }
 }
