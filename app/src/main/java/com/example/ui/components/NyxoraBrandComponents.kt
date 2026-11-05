@@ -943,9 +943,11 @@ fun NyxoraLaunchSplash(
             // PHASE 3 & PHASE 4: Left-to-Right Letter-by-Letter NYXORA Wordmark + Glowing Laser Underline
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.graphicsLayer {
-                    alpha = wordmarkMasterProgress
-                }
+                modifier = Modifier
+                    .graphicsLayer {
+                        alpha = wordmarkMasterProgress
+                    }
+                    .testTag("splash_wordmark_reveal")
             ) {
                 // Letter-by-letter left-to-right NYXORA reveal (Reference Panels 3, 4, 5 & 6)
                 NyxoraLetterByLetterWordmark(
@@ -955,9 +957,11 @@ fun NyxoraLaunchSplash(
                 Spacer(modifier = Modifier.height(8.dp))
 
                 // Glowing electric-blue & cyan laser underline bar with traveling core flare (Panels 3–6)
-                NyxoraLaserUnderlineBar(
-                    revealProgress = wordmarkMasterProgress
-                )
+                Box(modifier = Modifier.testTag("splash_brand_underline_track")) {
+                    NyxoraLaserUnderlineBar(
+                        revealProgress = wordmarkMasterProgress
+                    )
+                }
 
                 Spacer(modifier = Modifier.height(10.dp))
 
