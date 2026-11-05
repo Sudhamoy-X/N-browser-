@@ -79,11 +79,8 @@ jobs:
           chmod +x ./gradlew
           ./gradlew --version
       - name: Run unit tests and compile debug APK
-        run: |
-          ./gradlew clean :app:testDebugUnitTest :app:assembleDebug \\
-            -Drobolectric.enabledSdks=34 \\
-            -Drobolectric.dependency.repo.url=https://maven-central.storage-download.googleapis.com/maven2 \\
-            --stacktrace
+        shell: bash
+        run: ./gradlew clean :app:testDebugUnitTest :app:assembleDebug -Drobolectric.enabledSdks=34 -Drobolectric.dependency.repo.url=https://maven-central.storage-download.googleapis.com/maven2 --stacktrace
 
   build-and-release-apk:
     name: Test, Build Signed Release APK & Publish GitHub Release
