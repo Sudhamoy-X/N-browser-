@@ -531,7 +531,8 @@ class NyxoraWebSocketRelayServer {
                     val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: JSONObject()
                     if (!isHost) {
                         val perms = currentRoom.permissions
-                        val isUrlInputAction = envelope.type == RealtimeEventType.NAVIGATE_URL ||
+                        val isUrlInputAction = (envelope.type == RealtimeEventType.NAVIGATE_URL &&
+                            payload.optBoolean("isUrlInput", false)) ||
                             envelope.type == RealtimeEventType.NEW_PAGE_OPENED
                         when {
                             !perms.allowParticipantControls -> {

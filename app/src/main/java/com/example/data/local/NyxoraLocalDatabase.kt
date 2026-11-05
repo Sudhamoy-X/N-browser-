@@ -8,6 +8,8 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.data.model.BookmarkItem
 import com.example.data.model.CustomFilterRule
 import com.example.data.model.DownloadRecord
@@ -148,6 +150,40 @@ abstract class NyxoraLocalDatabase : RoomDatabase() {
     abstract fun filterRuleDao(): FilterRuleDao
 
     companion object {
+        val MIGRATION_1_2: Migration = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `downloads` (
+                        `id` TEXT NOT NULL,
+                        `fileName` TEXT NOT NULL,
+                        `url` TEXT NOT NULL,
+                        `mimeType` TEXT NOT NULL,
+                        `totalBytes` INTEGER NOT NULL,
+                        `downloadedBytes` INTEGER NOT NULL,
+                        `speedBytesPerSec` INTEGER NOT NULL,
+                        `status` TEXT NOT NULL,
+                        `localPath` TEXT NOT NULL,
+                        `isRisky` INTEGER NOT NULL,
+                        `createdAtMillis` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `custom_filter_rules` (
+                        `pattern` TEXT NOT NULL,
+                        `isAllowRule` INTEGER NOT NULL,
+                        `sourceList` TEXT NOT NULL,
+                        `addedAtMillis` INTEGER NOT NULL,
+                        PRIMARY KEY(`pattern`)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         @Volatile
         private var INSTANCE: NyxoraLocalDatabase? = null
 
@@ -157,7 +193,7 @@ abstract class NyxoraLocalDatabase : RoomDatabase() {
                     context.applicationContext,
                     NyxoraLocalDatabase::class.java,
                     "nyxora_local.db"
-                ).fallbackToDestructiveMigration(true).build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_1_2).build().also { INSTANCE = it }
             }
         }
 

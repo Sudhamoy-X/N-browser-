@@ -226,16 +226,6 @@ fun NyxoraTopAddressBar(
 
     val animatedProgressScale = progressWidth.value
     val animatedProgressAlpha = progressAlpha.value
-    val shimmerTransition = rememberInfiniteTransition(label = "nyxora_progress_shimmer")
-    val shimmerPosition by shimmerTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1150, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "nyxora_progress_shimmer_position"
-    )
 
     // Debounced DNS prefetch for typed host in address bar
     LaunchedEffect(isEditingAddress, addressInput, isPrivateMode, settings.dataSaverBlockImages) {
@@ -500,6 +490,16 @@ fun NyxoraTopAddressBar(
                                 )
                         )
                         if (!settings.reducedMotion && showProgressBar) {
+                            val shimmerTransition = rememberInfiniteTransition(label = "nyxora_progress_shimmer")
+                            val shimmerPosition by shimmerTransition.animateFloat(
+                                initialValue = 0f,
+                                targetValue = 1f,
+                                animationSpec = infiniteRepeatable(
+                                    animation = tween(durationMillis = 1150, easing = LinearEasing),
+                                    repeatMode = RepeatMode.Restart
+                                ),
+                                label = "nyxora_progress_shimmer_position"
+                            )
                             Box(
                                 modifier = Modifier
                                     .width(42.dp)

@@ -1017,7 +1017,8 @@ private fun NyxoraLetterByLetterWordmark(
 
         Row(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.testTag("splash_wordmark_reveal")
         ) {
             letters.forEachIndexed { index, letter ->
                 // Staggered left-to-right reveal window for each of the 6 letters
@@ -1054,14 +1055,18 @@ private fun NyxoraLaserUnderlineBar(
     revealProgress: Float
 ) {
     val clamped = revealProgress.coerceIn(0f, 1f)
-    Canvas(
-        modifier = Modifier
-            .width(164.dp)
-            .height(8.dp)
-            .testTag("splash_laser_underline")
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier.testTag("splash_brand_underline_track")
     ) {
-        if (clamped <= 0.01f) return@Canvas
-        val w = size.width
+        Canvas(
+            modifier = Modifier
+                .width(164.dp)
+                .height(8.dp)
+                .testTag("splash_laser_underline")
+        ) {
+            if (clamped <= 0.01f) return@Canvas
+            val w = size.width
         val cy = size.height * 0.5f
         val barEnd = w * SmoothTransformEasing.transform(clamped)
 
@@ -1102,20 +1107,21 @@ private fun NyxoraLaserUnderlineBar(
             cap = StrokeCap.Round
         )
 
-        // Traveling bright cyan-white focal flare along the underline (Panels 3, 4, 5, 6)
-        val flareX = w * (0.28f + 0.52f * clamped)
-        drawCircle(
-            brush = Brush.radialGradient(
-                colors = listOf(
-                    Color.White,
-                    Color(0xFF38BDF8).copy(alpha = 0.68f),
-                    Color.Transparent
+            // Traveling bright cyan-white focal flare along the underline (Panels 3, 4, 5, 6)
+            val flareX = w * (0.28f + 0.52f * clamped)
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(
+                        Color.White,
+                        Color(0xFF38BDF8).copy(alpha = 0.68f),
+                        Color.Transparent
+                    ),
+                    center = Offset(flareX, cy),
+                    radius = size.height * 2.2f
                 ),
                 center = Offset(flareX, cy),
                 radius = size.height * 2.2f
-            ),
-            center = Offset(flareX, cy),
-            radius = size.height * 2.2f
-        )
+            )
+        }
     }
 }
