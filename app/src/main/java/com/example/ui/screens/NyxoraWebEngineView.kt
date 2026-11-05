@@ -898,16 +898,32 @@ private class NyxoraConnectWebViewBridge(
         isPaused: Boolean,
         playbackRate: Double
     ) {
-        val safeCur = if (currentTimeSec.isNaN() || currentTimeSec < 0.0) 0.0 else currentTimeSec
-        val safeDur = if (durationSec.isNaN() || durationSec < 0.0) 0.0 else durationSec
-        val safeRate = if (playbackRate.isNaN()) 1.0 else playbackRate.coerceIn(0.25, 2.0)
-        controllerProvider().onLocalWatchTogetherEvent?.invoke(
+        // The bridge is exposed to page JavaScript, so accept only the small media-event
+        // vocabulary emitted by our injected hook and reject non-finite/unbounded values.
+        if (eventType !in ALLOWED_MEDIA_EVENTS) return
+        if (!currentTimeSec.isFinite() || !durationSec.isFinite() || !playbackRate.isFinite()) return
+        if (currentTimeSec < 0.0 || durationSec < 0.0 || durationSec > MAX_MEDIA_DURATION_SECONDS) return
+
+        val safeDuration = durationSec
+        val safeCurrentTime = if (safeDuration > 0.0) {
+            currentTimeSec.coerceAtMost(safeDuration)
+        } else {
+            currentTimeSec
+        }
+        val safeRate = playbackRate.coerceIn(0.25, 2.0)
+        val activeHandler = controllerProvider().onLocalWatchTogetherEvent ?: return
+        activeHandler.invoke(
             eventType,
-            safeCur,
-            safeDur,
+            safeCurrentTime,
+            safeDuration,
             isPaused,
             safeRate
         )
+    }
+
+    private companion object {
+        val ALLOWED_MEDIA_EVENTS = setOf("PLAY", "PAUSE", "SEEK", "RATE")
+        const val MAX_MEDIA_DURATION_SECONDS = 604800.0
     }
 }
 
