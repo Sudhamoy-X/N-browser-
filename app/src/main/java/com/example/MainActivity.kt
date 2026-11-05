@@ -11,7 +11,6 @@ import android.net.Network
 import android.os.Build
 import android.os.Bundle
 import android.util.Rational
-import android.view.WindowManager
 import android.webkit.CookieManager
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
