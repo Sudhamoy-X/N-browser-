@@ -957,7 +957,7 @@ fun NyxoraLaunchSplash(
                 Spacer(modifier = Modifier.height(8.dp))
 
                 // Glowing electric-blue & cyan laser underline bar with traveling core flare (Panels 3–6)
-                Box(modifier = Modifier.testTag("splash_brand_underline_track")) {
+                Box {
                     NyxoraLaserUnderlineBar(
                         revealProgress = wordmarkMasterProgress
                     )
