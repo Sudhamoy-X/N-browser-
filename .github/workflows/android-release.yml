@@ -46,6 +46,11 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - name: Create ephemeral debug signing key for PR validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          keytool -genkeypair -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
       - name: Install Android SDK components
         shell: bash
         run: |
