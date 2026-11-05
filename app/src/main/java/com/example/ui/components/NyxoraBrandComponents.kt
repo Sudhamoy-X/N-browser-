@@ -1018,7 +1018,7 @@ private fun NyxoraLetterByLetterWordmark(
         Row(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.testTag("splash_wordmark_reveal")
+            modifier = Modifier
         ) {
             letters.forEachIndexed { index, letter ->
                 // Staggered left-to-right reveal window for each of the 6 letters
