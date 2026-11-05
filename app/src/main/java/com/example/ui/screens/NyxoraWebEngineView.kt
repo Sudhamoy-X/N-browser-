@@ -898,16 +898,32 @@ private class NyxoraConnectWebViewBridge(
         isPaused: Boolean,
         playbackRate: Double
     ) {
-        val safeCur = if (currentTimeSec.isNaN() || currentTimeSec < 0.0) 0.0 else currentTimeSec
-        val safeDur = if (durationSec.isNaN() || durationSec < 0.0) 0.0 else durationSec
-        val safeRate = if (playbackRate.isNaN()) 1.0 else playbackRate.coerceIn(0.25, 2.0)
-        controllerProvider().onLocalWatchTogetherEvent?.invoke(
+        // The bridge is exposed to page JavaScript, so accept only the small media-event
+        // vocabulary emitted by our injected hook and reject non-finite/unbounded values.
+        if (eventType !in ALLOWED_MEDIA_EVENTS) return
+        if (!currentTimeSec.isFinite() || !durationSec.isFinite() || !playbackRate.isFinite()) return
+        if (currentTimeSec < 0.0 || durationSec < 0.0 || durationSec > MAX_MEDIA_DURATION_SECONDS) return
+
+        val safeDuration = durationSec
+        val safeCurrentTime = if (safeDuration > 0.0) {
+            currentTimeSec.coerceAtMost(safeDuration)
+        } else {
+            currentTimeSec
+        }
+        val safeRate = playbackRate.coerceIn(0.25, 2.0)
+        val activeHandler = controllerProvider().onLocalWatchTogetherEvent ?: return
+        activeHandler.invoke(
             eventType,
-            safeCur,
-            safeDur,
+            safeCurrentTime,
+            safeDuration,
             isPaused,
             safeRate
         )
+    }
+
+    private companion object {
+        val ALLOWED_MEDIA_EVENTS = setOf("PLAY", "PAUSE", "SEEK", "RATE")
+        const val MAX_MEDIA_DURATION_SECONDS = 604800.0
     }
 }
 
@@ -2314,11 +2330,11 @@ private fun createConfiguredTabWebView(
             textZoom = currentTabProvider().textZoom.coerceIn(50, 250)
             setSupportMultipleWindows(true)
             javaScriptCanOpenWindowsAutomatically = false
-            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
             allowContentAccess = false
             allowFileAccess = false
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                runCatching { safeBrowsingEnabled = false }
+                runCatching { safeBrowsingEnabled = true }
             }
         }
 
@@ -2798,7 +2814,15 @@ private fun createConfiguredTabWebView(
                     val cameraPreAllowed = "CAMERA" !in requestedTypes || effectiveCameraRule == "ALLOW"
                     val micPreAllowed = "MICROPHONE" !in requestedTypes || effectiveMicRule == "ALLOW"
                     if (cameraPreAllowed && micPreAllowed) {
-                        req.grant(req.resources)
+                        val approvedResources = req.resources.filter { resource ->
+                            resource == PermissionRequest.RESOURCE_VIDEO_CAPTURE ||
+                                resource == PermissionRequest.RESOURCE_AUDIO_CAPTURE
+                        }.toTypedArray()
+                        if (approvedResources.isNotEmpty()) {
+                            req.grant(approvedResources)
+                        } else {
+                            req.deny()
+                        }
                     } else {
                         onPromptSitePermission(
                             PendingSitePermissionPrompt(
