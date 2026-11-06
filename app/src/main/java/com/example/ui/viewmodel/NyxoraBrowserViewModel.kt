@@ -46,9 +46,12 @@ import com.example.domain.browser.ShieldFilterListId
 import com.example.domain.browser.ShieldProtectionConfig
 import com.example.domain.browser.SmartSearchSuggestionEngine
 import com.example.domain.browser.UrlAndSearchHandler
+import android.app.Activity
+import android.content.Intent
 import com.example.domain.connect.IncomingRemoteSyncCommand
 import com.example.domain.connect.NyxoraConnectSecurity
 import com.example.domain.connect.NyxoraConnectSessionManager
+import com.example.domain.connect.NyxoraLiveMirrorForegroundService
 import com.example.domain.connect.RealtimeEventType
 import com.example.domain.connect.VideoCompatibilityState
 import com.example.domain.update.ApkUpdateUiState
@@ -392,6 +395,9 @@ class NyxoraBrowserViewModel(
         )
         _multiTabState.value = nextState
         _activeTab.value = nextState.activeTab
+        connectManager.onHostPrivateTabVisibilityChanged(
+            isPrivateTabOrMode = nextState.isPrivateMode || nextState.activeTab.isPrivate
+        )
     }
 
     private fun syncShieldEngineConfig(
@@ -2709,7 +2715,68 @@ class NyxoraBrowserViewModel(
         }
     }
 
+    fun prepareHostLiveMirrorLaunch(context: Context? = null): Boolean {
+        if (context != null) {
+            connectManager.attachMirrorEngineContext(context.applicationContext)
+        }
+        val currentActive = activeTab.value
+        return connectManager.beginHostLiveMirrorRequest(
+            isPrivateTab = currentActive.isPrivate,
+            isPrivateMode = _isPrivateMode.value
+        )
+    }
+
+    fun onHostMediaProjectionResult(
+        context: Context?,
+        resultCode: Int,
+        data: Intent?
+    ): Boolean {
+        if (context != null) {
+            connectManager.attachMirrorEngineContext(context.applicationContext)
+        }
+        if (resultCode != Activity.RESULT_OK || data == null) {
+            connectManager.onHostMediaProjectionPermissionDenied("Screen capture permission was denied.")
+            emitToast("Live Mirror cancelled: Screen capture permission denied")
+            return false
+        }
+        val roomId = connectManager.roomState.value?.roomId.orEmpty()
+        val qualityLabel = connectManager.liveMirrorState.value.qualityProfile.label
+        val isAudioShared = connectManager.liveMirrorState.value.isAudioShared
+        if (context != null && roomId.isNotBlank()) {
+            NyxoraLiveMirrorForegroundService.startMirrorService(
+                context = context.applicationContext,
+                roomId = roomId,
+                qualityLabel = qualityLabel,
+                isAudioShared = isAudioShared
+            )
+        }
+        val currentActive = activeTab.value
+        val started = connectManager.onHostMediaProjectionPermissionGranted(
+            permissionResultData = data,
+            isPrivateTab = currentActive.isPrivate,
+            isPrivateMode = _isPrivateMode.value
+        )
+        if (started) {
+            emitToast("Live Mirror active ($qualityLabel)")
+        } else if (context != null) {
+            NyxoraLiveMirrorForegroundService.stopMirrorService(context.applicationContext)
+        }
+        return started
+    }
+
+    fun stopHostLiveMirror(context: Context? = null): Boolean {
+        val stopped = connectManager.stopHostLiveMirror()
+        if (context != null) {
+            NyxoraLiveMirrorForegroundService.stopMirrorService(context.applicationContext)
+        }
+        if (stopped) {
+            emitToast("Live Mirror stopped • Returned to Browse Together")
+        }
+        return stopped
+    }
+
     fun onAppForegrounded(context: Context) {
+        connectManager.attachMirrorEngineContext(context.applicationContext)
         connectManager.onAppForegrounded()
         if (connectManager.roomState.value == null) {
             runCatching {
@@ -2773,7 +2840,9 @@ class NyxoraBrowserViewModel(
                     settingsDataStore = settingsStore,
                     downloadEngine = dlEngine,
                     initialApkUpdateManager = updateMgr
-                )
+                ).also { vm ->
+                    vm.connectManager.attachMirrorEngineContext(app)
+                }
             }
         }
     }

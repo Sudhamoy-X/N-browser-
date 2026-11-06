@@ -336,6 +336,49 @@ jobs:
           sed -i "s/versionCode = [0-9]\+/versionCode = ${VERSION_CODE}/" app/build.gradle.kts
           sed -i "s/versionName = \"[^\"]\+\"/versionName = \"${VERSION_NAME}\"/" app/build.gradle.kts
 
+      - name: Configure WebRTC ICE Environment (.env) from GitHub Variables & Secrets
+        shell: bash
+        env:
+          CFG_WEBRTC_STUN_URLS: ${{ vars.NYXORA_WEBRTC_STUN_URLS || secrets.NYXORA_WEBRTC_STUN_URLS }}
+          CFG_WEBRTC_TURN_URLS: ${{ vars.NYXORA_WEBRTC_TURN_URLS || secrets.NYXORA_WEBRTC_TURN_URLS }}
+          CFG_WEBRTC_TURN_USERNAME: ${{ vars.NYXORA_WEBRTC_TURN_USERNAME || secrets.NYXORA_WEBRTC_TURN_USERNAME }}
+          CFG_WEBRTC_TURN_CREDENTIAL: ${{ secrets.NYXORA_WEBRTC_TURN_CREDENTIAL }}
+        run: |
+          set +x
+          set -euo pipefail
+          umask 077
+          if [ -n "${CFG_WEBRTC_TURN_CREDENTIAL:-}" ]; then
+            echo "::add-mask::${CFG_WEBRTC_TURN_CREDENTIAL}"
+          fi
+          cp "${GITHUB_WORKSPACE}/.env.example" "${GITHUB_WORKSPACE}/.env"
+          python3 -c '
+          import os, pathlib
+          env_path = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / ".env"
+          lines = env_path.read_text(encoding="utf-8").splitlines()
+          overrides = {
+              "NYXORA_WEBRTC_STUN_URLS": (os.environ.get("CFG_WEBRTC_STUN_URLS") or "").strip() or "stun:stun.l.google.com:19302",
+              "NYXORA_WEBRTC_TURN_URLS": (os.environ.get("CFG_WEBRTC_TURN_URLS") or "").strip() or "UNCONFIGURED",
+              "NYXORA_WEBRTC_TURN_USERNAME": (os.environ.get("CFG_WEBRTC_TURN_USERNAME") or "").strip() or "UNCONFIGURED",
+              "NYXORA_WEBRTC_TURN_CREDENTIAL": (os.environ.get("CFG_WEBRTC_TURN_CREDENTIAL") or "").strip() or "UNCONFIGURED",
+          }
+          updated = []
+          seen = set()
+          for line in lines:
+              stripped = line.strip()
+              if stripped and not stripped.startswith("#") and "=" in stripped:
+                  k = stripped.split("=", 1)[0].strip()
+                  if k in overrides:
+                      updated.append(f"{k}={overrides[k]}")
+                      seen.add(k)
+                      continue
+              updated.append(line)
+          for k, v in overrides.items():
+              if k not in seen:
+                  updated.append(f"{k}={v}")
+          env_path.write_text("\n".join(updated) + "\n", encoding="utf-8")
+          '
+          echo "Configured WebRTC ICE properties in .env (TURN credentials masked)."
+
       - name: Run Unit & Robolectric Verification Tests
         shell: bash
         env:
@@ -477,6 +520,7 @@ jobs:
         if: always()
         shell: bash
         run: |
+          rm -f "${GITHUB_WORKSPACE}/.env"
           rm -f "${GITHUB_WORKSPACE}/debug.keystore"
           rm -f "${GITHUB_WORKSPACE}/my-upload-key.jks"
 

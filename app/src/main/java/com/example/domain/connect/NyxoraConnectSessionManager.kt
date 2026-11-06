@@ -1,5 +1,7 @@
 package com.example.domain.connect
 
+import android.content.Context
+import android.content.Intent
 import android.os.Build
 import android.util.Log
 import java.util.UUID
@@ -7,6 +9,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -45,6 +48,11 @@ sealed class IncomingRemoteSyncCommand {
         val forceManualResync: Boolean,
         val isInitialJoinSnapshot: Boolean = false
     ) : IncomingRemoteSyncCommand()
+    data class ExecuteHostMirrorRemoteControl(
+        val actionType: String,
+        val seekDeltaSeconds: Double = 0.0,
+        val initiatedByDeviceId: String = ""
+    ) : IncomingRemoteSyncCommand()
 }
 
 /**
@@ -61,7 +69,8 @@ sealed class IncomingRemoteSyncCommand {
  * - Capped exponential-backoff reconnection with bounded retry exhaustion that cleanly transitions to `DISCONNECTED`
  * - Secret-redacted diagnostic logging (`diagnosticLogs`)
  * - Explicit user consent gating before sharing local browsing activity
- * - Bidirectional URL & navigation synchronization across connected devices
+ * - Bidirectional URL & navigation synchronization across connected devices (Mode A: Browse Together)
+ * - Real-time WebRTC + MediaProjection screen mirroring (Mode B: Live Mirror Mode)
  * - Heartbeats (`HEARTBEAT_PING` / `HEARTBEAT_PONG`)
  * - Strict Incognito isolation (never emits or applies sync events while in Private Mode)
  */
@@ -145,6 +154,9 @@ class NyxoraConnectSessionManager(
     @Volatile
     private var lastBeaconSentAtMillis: Long = 0L
 
+    @Volatile
+    private var lastViewerMirrorSessionId: String = ""
+
     private val _deviceDisplayName = MutableStateFlow(initialDeviceName)
     val deviceDisplayName: StateFlow<String> = _deviceDisplayName.asStateFlow()
 
@@ -196,6 +208,36 @@ class NyxoraConnectSessionManager(
     private val _participantControlsDisabledNotice = MutableStateFlow<String?>(null)
     val participantControlsDisabledNotice: StateFlow<String?> = _participantControlsDisabledNotice.asStateFlow()
 
+    // --- LIVE MIRROR MODE & WEBRTC STATE ---
+
+    private val _liveMirrorState = MutableStateFlow(LiveMirrorSessionMetadata())
+    val liveMirrorState: StateFlow<LiveMirrorSessionMetadata> = _liveMirrorState.asStateFlow()
+
+    private val _viewerMirrorConnectionState = MutableStateFlow(ViewerMirrorConnectionState.IDLE)
+    val viewerMirrorConnectionState: StateFlow<ViewerMirrorConnectionState> = _viewerMirrorConnectionState.asStateFlow()
+
+    private val _isViewerReturnedToBrowseTogether = MutableStateFlow(false)
+    val isViewerReturnedToBrowseTogether: StateFlow<Boolean> = _isViewerReturnedToBrowseTogether.asStateFlow()
+
+    private val _isViewerMirrorFullscreen = MutableStateFlow(false)
+    val isViewerMirrorFullscreen: StateFlow<Boolean> = _isViewerMirrorFullscreen.asStateFlow()
+
+    private val _allowPrivateTabMirroring = MutableStateFlow(false)
+    val allowPrivateTabMirroring: StateFlow<Boolean> = _allowPrivateTabMirroring.asStateFlow()
+
+    private val _isMirrorPausedForPrivateTab = MutableStateFlow(false)
+    val isMirrorPausedForPrivateTab: StateFlow<Boolean> = _isMirrorPausedForPrivateTab.asStateFlow()
+
+    private val _viewerRenderedFrameCount = MutableStateFlow(0L)
+    val viewerRenderedFrameCount: StateFlow<Long> = _viewerRenderedFrameCount.asStateFlow()
+
+    private val _hostExecutedRemoteControlHistory = MutableStateFlow<List<String>>(emptyList())
+    val hostExecutedRemoteControlHistory: StateFlow<List<String>> = _hostExecutedRemoteControlHistory.asStateFlow()
+
+    @Volatile
+    var webRtcMirrorEngine: NyxoraWebRtcMirrorEngine? = null
+        private set
+
     private val _remoteSyncCommands = MutableSharedFlow<IncomingRemoteSyncCommand>(extraBufferCapacity = 16)
     val remoteSyncCommands: SharedFlow<IncomingRemoteSyncCommand> = _remoteSyncCommands.asSharedFlow()
 
@@ -205,8 +247,45 @@ class NyxoraConnectSessionManager(
     val isCurrentDeviceHost: Boolean
         get() = _roomState.value?.hostDeviceId == localDeviceId
 
+    /**
+     * True when this device is a Participant (Viewer) in a room where the Host is actively streaming
+     * in Live Mirror Mode and the Viewer has not manually switched back to Browse Together.
+     */
+    val isViewerActivelyWatchingMirror: Boolean
+        get() = isInRoom &&
+            !isCurrentDeviceHost &&
+            _liveMirrorState.value.isMirrorLive &&
+            !_isViewerReturnedToBrowseTogether.value
+
     val configuredBackendEndpoint: String
         get() = resolveConfiguredProductionEndpoint()
+
+    /**
+     * Attaches the Android context to initialize the hardware-accelerated [NyxoraWebRtcMirrorEngine]
+     * and wire foreground service stop actions.
+     */
+    fun attachMirrorEngineContext(context: Context): NyxoraWebRtcMirrorEngine {
+        val existing = webRtcMirrorEngine
+        if (existing != null) return existing
+        val engine = NyxoraWebRtcMirrorEngine(
+            context = context.applicationContext,
+            sendSignalCallback = { eventType, signalPayload ->
+                sendSignedEvent(
+                    type = eventType,
+                    payloadJson = signalPayload.toJson().toString(),
+                    bypassRateLimit = true
+                )
+            },
+            onHostMirrorStoppedUnexpectedly = { reason ->
+                stopHostLiveMirror(reason = reason)
+            }
+        )
+        webRtcMirrorEngine = engine
+        NyxoraLiveMirrorForegroundService.onUserRequestedStopListener = {
+            stopHostLiveMirror(reason = "Stopped from notification")
+        }
+        return engine
+    }
 
     private fun resolveConfiguredProductionEndpoint(): String {
         val candidate = configuredEndpointProvider().trim()
@@ -555,6 +634,8 @@ class NyxoraConnectSessionManager(
         activeWebSocket = null
         activeConnectEndpoint = ""
         runCatching { ws?.close(1000, "Session ended") }
+        webRtcMirrorEngine?.releaseAll()
+        NyxoraWebRtcIceConfigProvider.clearCachedShortLivedTurnCredentials()
         activeAccessKey = ""
         activeInviteToken = ""
         lastGeneratedInviteToken = ""
@@ -569,12 +650,19 @@ class NyxoraConnectSessionManager(
         lastPublishedNavAtMillis = 0L
         lastBeaconPositionSec = -1.0
         lastBeaconSentAtMillis = 0L
+        lastViewerMirrorSessionId = ""
         pendingChatOutbox.clear()
         deduplicator.clear()
         outgoingRateLimiter.clear()
         _roomState.value = null
         _isFollowingPaused.value = false
         _videoCompatibility.value = VideoCompatibilityState.UNKNOWN
+        _liveMirrorState.value = LiveMirrorSessionMetadata()
+        _viewerMirrorConnectionState.value = ViewerMirrorConnectionState.IDLE
+        _isViewerReturnedToBrowseTogether.value = false
+        _isViewerMirrorFullscreen.value = false
+        _isMirrorPausedForPrivateTab.value = false
+        _viewerRenderedFrameCount.value = 0L
         _chatMessages.value = emptyList()
         _unreadChatCount.value = 0
         _isChatOverlayExpanded.value = false
@@ -1170,6 +1258,506 @@ class NyxoraConnectSessionManager(
         )
     }
 
+    // --- MODE B: LIVE MIRROR MODE (HOST CAPTURE + VIEWER WEBRTC STREAM + REMOTE CONTROLS) ---
+
+    fun setAllowPrivateTabMirroring(allowed: Boolean) {
+        _allowPrivateTabMirroring.value = allowed
+        if (allowed) {
+            _isMirrorPausedForPrivateTab.value = false
+        }
+    }
+
+    /**
+     * Step 1 of Host Live Mirror state machine (`BROWSING -> MIRROR_STARTING`):
+     * Validates Host authority and Private Tab protection before launching the official Android
+     * `MediaProjection` permission dialog.
+     */
+    fun beginHostLiveMirrorRequest(
+        isPrivateTab: Boolean = false,
+        isPrivateMode: Boolean = false,
+        qualityProfile: LiveMirrorQualityProfile = _liveMirrorState.value.qualityProfile,
+        shareAudio: Boolean = _liveMirrorState.value.isAudioShared
+    ): Boolean {
+        val current = _roomState.value ?: return false
+        if (current.hostDeviceId != localDeviceId) {
+            _participantControlsDisabledNotice.value = HOST_ONLY_MIRROR_MESSAGE
+            return false
+        }
+        if ((isPrivateTab || isPrivateMode) && !_allowPrivateTabMirroring.value) {
+            _isMirrorPausedForPrivateTab.value = true
+            _lastSyncError.value = PRIVATE_TAB_MIRROR_BLOCKED_MESSAGE
+            recordDiagnosticLog("MIRROR_BLOCKED_PRIVATE_TAB room=${current.roomId}")
+            return false
+        }
+        _isMirrorPausedForPrivateTab.value = false
+        _lastSyncError.value = null
+        val now = System.currentTimeMillis()
+        val startingMeta = _liveMirrorState.value.copy(
+            mirrorState = LiveMirrorSessionState.MIRROR_STARTING,
+            hostDeviceId = localDeviceId,
+            isAudioShared = shareAudio,
+            qualityProfile = qualityProfile,
+            streamWidth = qualityProfile.width,
+            streamHeight = qualityProfile.height,
+            targetFps = qualityProfile.fps,
+            maxBitrateKbps = qualityProfile.maxBitrateKbps,
+            updatedAtMillis = now
+        )
+        _liveMirrorState.value = startingMeta
+        _roomState.update { state ->
+            state?.copy(
+                mode = RoomSyncMode.LIVE_MIRROR,
+                liveMirrorState = startingMeta
+            )
+        }
+        sendSignedEvent(
+            type = RealtimeEventType.MIRROR_SESSION_STATE,
+            payloadJson = startingMeta.toJson().toString(),
+            bypassRateLimit = true
+        )
+        val cachedTurn = NyxoraWebRtcIceConfigProvider.getCachedShortLivedTurnCredentials()
+        if (cachedTurn == null || cachedTurn.isExpired(now)) {
+            scope.launch(Dispatchers.IO) {
+                refreshShortLivedTurnCredentials()
+            }
+        }
+        recordDiagnosticLog("HOST_MIRROR_STARTING room=${current.roomId} profile=${qualityProfile.name}")
+        return true
+    }
+
+    /**
+     * Fetches short-lived TURN credentials from the active NYXORA Connect backend relay endpoint
+     * and caches them in [NyxoraWebRtcIceConfigProvider].
+     */
+    fun refreshShortLivedTurnCredentials(
+        nowMillis: Long = System.currentTimeMillis()
+    ): Result<ShortLivedTurnCredentials> {
+        val current = _roomState.value
+            ?: return Result.failure(IllegalStateException("No active room session"))
+        val endpoint = activeConnectEndpoint.ifBlank { current.endpointUrl }
+        val signingSecret = activeAccessKey.ifBlank {
+            current.accessKey.ifBlank { NyxoraConnectSecurity.deriveRoomCodeHandshakeKey(current.roomId) }
+        }
+        val result = NyxoraWebRtcIceConfigProvider.fetchShortLivedTurnCredentials(
+            endpointUrl = endpoint,
+            roomId = current.roomId,
+            deviceId = localDeviceId,
+            signingKey = signingSecret,
+            nowMillis = nowMillis
+        )
+        result.onSuccess { creds ->
+            recordDiagnosticLog(
+                "WEBRTC_SHORT_LIVED_TURN_REFRESHED room=${current.roomId} urls=${creds.turnUrls.size} ttlSec=${creds.ttlSeconds}"
+            )
+        }
+        return result
+    }
+
+    /**
+     * Step 2 of Host Live Mirror state machine (`MIRROR_STARTING -> MIRROR_LIVE`):
+     * Called after the user grants Android `MediaProjection` permission and the foreground service is active.
+     */
+    fun onHostMediaProjectionPermissionGranted(
+        permissionResultData: Intent? = null,
+        qualityProfile: LiveMirrorQualityProfile = _liveMirrorState.value.qualityProfile,
+        shareAudio: Boolean = _liveMirrorState.value.isAudioShared,
+        isPrivateTab: Boolean = false,
+        isPrivateMode: Boolean = false
+    ): Boolean {
+        val current = _roomState.value ?: return false
+        if (current.hostDeviceId != localDeviceId) {
+            _participantControlsDisabledNotice.value = HOST_ONLY_MIRROR_MESSAGE
+            return false
+        }
+        if ((isPrivateTab || isPrivateMode) && !_allowPrivateTabMirroring.value) {
+            _isMirrorPausedForPrivateTab.value = true
+            _lastSyncError.value = PRIVATE_TAB_MIRROR_BLOCKED_MESSAGE
+            onHostMediaProjectionPermissionDenied(PRIVATE_TAB_MIRROR_BLOCKED_MESSAGE)
+            return false
+        }
+
+        val sessionId = "MIR-${UUID.randomUUID().toString().take(8).uppercase()}"
+        val engine = webRtcMirrorEngine
+        if (engine != null && permissionResultData != null) {
+            engine.startHostScreenCapture(
+                permissionResultData = permissionResultData,
+                qualityProfile = qualityProfile,
+                shareAudio = shareAudio,
+                existingSessionId = sessionId
+            )
+        }
+
+        val isDrmWarning = _videoCompatibility.value == VideoCompatibilityState.DRM_PROTECTED_UNSUPPORTED
+        val drmMessage = if (isDrmWarning) DRM_BLACK_SCREEN_WARNING_MESSAGE else ""
+        val now = System.currentTimeMillis()
+        val liveMeta = LiveMirrorSessionMetadata(
+            mirrorState = LiveMirrorSessionState.MIRROR_LIVE,
+            hostDeviceId = localDeviceId,
+            mirrorSessionId = sessionId,
+            isAudioShared = shareAudio,
+            qualityProfile = qualityProfile,
+            streamWidth = qualityProfile.width,
+            streamHeight = qualityProfile.height,
+            targetFps = qualityProfile.fps,
+            maxBitrateKbps = qualityProfile.maxBitrateKbps,
+            isProtectedContentWarning = isDrmWarning,
+            protectedContentMessage = drmMessage,
+            updatedAtMillis = now,
+            sequenceNumber = current.lastSequenceNumber + 1L
+        )
+        _liveMirrorState.value = liveMeta
+        _roomState.update { state ->
+            state?.copy(
+                mode = RoomSyncMode.LIVE_MIRROR,
+                liveMirrorState = liveMeta
+            )
+        }
+        sendSignedEvent(
+            type = RealtimeEventType.MIRROR_SESSION_STATE,
+            payloadJson = liveMeta.toJson().toString(),
+            bypassRateLimit = true
+        )
+        recordDiagnosticLog("HOST_MIRROR_LIVE room=${current.roomId} sessionId=$sessionId profile=${qualityProfile.name}")
+
+        // Immediately send WebRTC SDP Offers to all connected Viewers in the room
+        val viewers = (_roomState.value?.members ?: emptyList()).filter {
+            it.deviceId != localDeviceId && !it.status.isTerminalOrDisconnected
+        }
+        for (viewer in viewers) {
+            initiateOfferToViewer(viewer.deviceId, sessionId, qualityProfile, shareAudio)
+        }
+        return true
+    }
+
+    /**
+     * Handles `MediaProjection` permission denial cleanly (`MIRROR_STARTING -> MIRROR_STOPPING -> BROWSING`).
+     */
+    fun onHostMediaProjectionPermissionDenied(
+        reason: String = "Screen capture permission was denied."
+    ) {
+        val current = _roomState.value
+        _lastSyncError.value = reason
+        webRtcMirrorEngine?.stopHostScreenCapture()
+        val now = System.currentTimeMillis()
+        val resetMeta = LiveMirrorSessionMetadata(
+            mirrorState = LiveMirrorSessionState.BROWSING,
+            hostDeviceId = current?.hostDeviceId ?: localDeviceId,
+            isAudioShared = _liveMirrorState.value.isAudioShared,
+            qualityProfile = _liveMirrorState.value.qualityProfile,
+            updatedAtMillis = now
+        )
+        _liveMirrorState.value = resetMeta
+        if (current != null && current.hostDeviceId == localDeviceId) {
+            _roomState.update { state ->
+                state?.copy(
+                    mode = RoomSyncMode.BROWSE_TOGETHER,
+                    liveMirrorState = resetMeta
+                )
+            }
+            sendSignedEvent(
+                type = RealtimeEventType.MIRROR_SESSION_STATE,
+                payloadJson = resetMeta.toJson().toString(),
+                bypassRateLimit = true
+            )
+        }
+        recordDiagnosticLog("HOST_MIRROR_PERMISSION_DENIED reason=$reason")
+    }
+
+    /**
+     * Stops an active Host Live Mirror session (`MIRROR_LIVE -> MIRROR_STOPPING -> BROWSING`),
+     * releases `MediaProjection` & WebRTC resources, and returns all room devices to `Browse Together`.
+     */
+    fun stopHostLiveMirror(reason: String = "Host stopped Live Mirror"): Boolean {
+        val current = _roomState.value ?: return false
+        if (current.hostDeviceId != localDeviceId) {
+            _participantControlsDisabledNotice.value = HOST_ONLY_MIRROR_MESSAGE
+            return false
+        }
+        val stoppingMeta = _liveMirrorState.value.copy(
+            mirrorState = LiveMirrorSessionState.MIRROR_STOPPING,
+            updatedAtMillis = System.currentTimeMillis()
+        )
+        _liveMirrorState.value = stoppingMeta
+        webRtcMirrorEngine?.stopHostScreenCapture()
+
+        val browsingMeta = LiveMirrorSessionMetadata(
+            mirrorState = LiveMirrorSessionState.BROWSING,
+            hostDeviceId = localDeviceId,
+            mirrorSessionId = "",
+            isAudioShared = stoppingMeta.isAudioShared,
+            qualityProfile = stoppingMeta.qualityProfile,
+            streamWidth = stoppingMeta.qualityProfile.width,
+            streamHeight = stoppingMeta.qualityProfile.height,
+            targetFps = stoppingMeta.qualityProfile.fps,
+            maxBitrateKbps = stoppingMeta.qualityProfile.maxBitrateKbps,
+            updatedAtMillis = System.currentTimeMillis()
+        )
+        _liveMirrorState.value = browsingMeta
+        _roomState.update { state ->
+            state?.copy(
+                mode = RoomSyncMode.BROWSE_TOGETHER,
+                liveMirrorState = browsingMeta
+            )
+        }
+        val sent = sendSignedEvent(
+            type = RealtimeEventType.MIRROR_SESSION_STATE,
+            payloadJson = browsingMeta.toJson().toString(),
+            bypassRateLimit = true
+        )
+        recordDiagnosticLog("HOST_MIRROR_STOPPED room=${current.roomId} reason=$reason")
+        return sent
+    }
+
+    /**
+     * Automatically pauses/stops Live Mirror if the Host switches to a Private/Incognito tab
+     * without explicit session consent.
+     */
+    fun onHostPrivateTabVisibilityChanged(isPrivateTabOrMode: Boolean) {
+        if (!isCurrentDeviceHost) return
+        if (isPrivateTabOrMode && !_allowPrivateTabMirroring.value && _liveMirrorState.value.mirrorState.isMirrorActiveOrTransitioning) {
+            _isMirrorPausedForPrivateTab.value = true
+            _lastSyncError.value = PRIVATE_TAB_MIRROR_BLOCKED_MESSAGE
+            stopHostLiveMirror(reason = "Paused automatically because a Private tab was opened")
+        } else if (!isPrivateTabOrMode) {
+            _isMirrorPausedForPrivateTab.value = false
+        }
+    }
+
+    fun setMirrorAudioShared(enabled: Boolean): Boolean {
+        val current = _roomState.value
+        webRtcMirrorEngine?.setHostAudioShared(enabled)
+        val updated = _liveMirrorState.value.copy(
+            isAudioShared = enabled,
+            updatedAtMillis = System.currentTimeMillis()
+        )
+        _liveMirrorState.value = updated
+        if (current != null && current.hostDeviceId == localDeviceId && updated.isMirrorLive) {
+            _roomState.update { it?.copy(liveMirrorState = updated) }
+            return sendSignedEvent(
+                type = RealtimeEventType.MIRROR_SESSION_STATE,
+                payloadJson = updated.toJson().toString(),
+                bypassRateLimit = true
+            )
+        }
+        return true
+    }
+
+    fun setMirrorQualityProfile(profile: LiveMirrorQualityProfile): Boolean {
+        val current = _roomState.value
+        webRtcMirrorEngine?.updateHostQualityProfile(profile)
+        val updated = _liveMirrorState.value.copy(
+            qualityProfile = profile,
+            streamWidth = profile.width,
+            streamHeight = profile.height,
+            targetFps = profile.fps,
+            maxBitrateKbps = profile.maxBitrateKbps,
+            updatedAtMillis = System.currentTimeMillis()
+        )
+        _liveMirrorState.value = updated
+        if (current != null && current.hostDeviceId == localDeviceId && updated.isMirrorLive) {
+            _roomState.update { it?.copy(liveMirrorState = updated) }
+            return sendSignedEvent(
+                type = RealtimeEventType.MIRROR_SESSION_STATE,
+                payloadJson = updated.toJson().toString(),
+                bypassRateLimit = true
+            )
+        }
+        return true
+    }
+
+    fun setMirrorProtectedContentWarning(
+        isProtectedContent: Boolean,
+        message: String = if (isProtectedContent) DRM_BLACK_SCREEN_WARNING_MESSAGE else ""
+    ) {
+        val current = _roomState.value
+        val updated = _liveMirrorState.value.copy(
+            isProtectedContentWarning = isProtectedContent,
+            protectedContentMessage = message,
+            updatedAtMillis = System.currentTimeMillis()
+        )
+        _liveMirrorState.value = updated
+        if (current != null && current.hostDeviceId == localDeviceId && updated.isMirrorLive) {
+            _roomState.update { it?.copy(liveMirrorState = updated) }
+            sendSignedEvent(
+                type = RealtimeEventType.MIRROR_SESSION_STATE,
+                payloadJson = updated.toJson().toString(),
+                bypassRateLimit = true
+            )
+        }
+    }
+
+    /**
+     * Allows a Viewer to locally exit the Live Mirror stream view and return to `Browse Together`
+     * (or re-enter the Live Mirror stream when `returned = false`).
+     */
+    fun setViewerReturnToBrowseTogether(returned: Boolean) {
+        _isViewerReturnedToBrowseTogether.value = returned
+        if (returned) {
+            _isViewerMirrorFullscreen.value = false
+            webRtcMirrorEngine?.stopViewerStream(resetToIdle = true)
+            _viewerMirrorConnectionState.value = ViewerMirrorConnectionState.IDLE
+            val syncedUrl = _roomState.value?.currentSyncedUrl.orEmpty()
+            val syncedTitle = _roomState.value?.currentSyncedTitle.orEmpty()
+            if (syncedUrl.isNotBlank()) {
+                _remoteSyncCommands.tryEmit(
+                    IncomingRemoteSyncCommand.NavigateToUrl(
+                        url = syncedUrl,
+                        title = syncedTitle
+                    )
+                )
+            }
+        } else if (_liveMirrorState.value.isMirrorLive && !isCurrentDeviceHost) {
+            requestViewerMirrorReconnect()
+        }
+    }
+
+    fun setViewerMirrorFullscreen(fullscreen: Boolean) {
+        _isViewerMirrorFullscreen.value = fullscreen
+    }
+
+    /**
+     * Requests a fresh WebRTC SDP Offer from the Host when a Viewer joins or reconnects during `MIRROR_LIVE`.
+     */
+    fun requestViewerMirrorReconnect(): Boolean {
+        val current = _roomState.value ?: return false
+        if (current.hostDeviceId == localDeviceId || !_liveMirrorState.value.isMirrorLive) return false
+        _isViewerReturnedToBrowseTogether.value = false
+        _viewerMirrorConnectionState.value = ViewerMirrorConnectionState.CONNECTING
+        webRtcMirrorEngine?.markViewerConnecting()
+        val readySignal = WebRtcSignalPayload(
+            mirrorSessionId = _liveMirrorState.value.mirrorSessionId,
+            senderDeviceId = localDeviceId,
+            targetDeviceId = current.hostDeviceId
+        )
+        return sendSignedEvent(
+            type = RealtimeEventType.WEBRTC_VIEWER_READY,
+            payloadJson = readySignal.toJson().toString(),
+            bypassRateLimit = true
+        )
+    }
+
+    /**
+     * Sends a Host-routed playback command (`PLAY`, `PAUSE`, `PLAY_PAUSE`, `SEEK`, `REWIND`, `FORWARD`)
+     * from a Viewer to the Host while Live Mirror Mode is active.
+     * Viewers never execute playback locally while mirroring; the Host executes the command on the original
+     * browser page and streams the updated screen back.
+     */
+    fun sendViewerMirrorRemoteControl(
+        actionType: String,
+        seekDeltaSeconds: Double? = null
+    ): Boolean {
+        val current = _roomState.value ?: return false
+        val normalizedAction = actionType.trim().uppercase().ifBlank { "PLAY_PAUSE" }
+        val resolvedSeekDelta = seekDeltaSeconds ?: 0.0
+        val isHost = current.hostDeviceId == localDeviceId
+        if (!isHost) {
+            val perms = current.permissions
+            val isSeek = normalizedAction == "SEEK" || normalizedAction == "REWIND" || normalizedAction == "FORWARD"
+            val isPlayPause = normalizedAction == "PLAY" || normalizedAction == "PAUSE" || normalizedAction == "PLAY_PAUSE"
+            if (!perms.allowParticipantControls) {
+                _participantControlsDisabledNotice.value = PARTICIPANT_CONTROLS_DISABLED_MESSAGE
+                return false
+            }
+            if (!perms.allowParticipantPlaybackControl) {
+                _participantControlsDisabledNotice.value = PLAYBACK_RESTRICTED_MESSAGE
+                return false
+            }
+            if (isSeek && !perms.allowParticipantVideoSeek) {
+                _participantControlsDisabledNotice.value = VIDEO_SEEK_RESTRICTED_MESSAGE
+                return false
+            }
+            if (isPlayPause && !perms.allowParticipantVideoPlayPause) {
+                _participantControlsDisabledNotice.value = VIDEO_PLAY_PAUSE_RESTRICTED_MESSAGE
+                return false
+            }
+        }
+        val payload = JSONObject().apply {
+            put("controlActionType", normalizedAction)
+            put("seekDeltaSeconds", resolvedSeekDelta)
+            put("mirrorSessionId", _liveMirrorState.value.mirrorSessionId)
+        }
+        return sendSignedEvent(
+            type = RealtimeEventType.MIRROR_REMOTE_CONTROL,
+            payloadJson = payload.toString()
+        )
+    }
+
+    private fun initiateOfferToViewer(
+        viewerDeviceId: String,
+        sessionId: String,
+        profile: LiveMirrorQualityProfile,
+        shareAudio: Boolean
+    ) {
+        if (viewerDeviceId.isBlank() || viewerDeviceId == localDeviceId) return
+        val engine = webRtcMirrorEngine
+        if (engine != null && engine.isHostCapturing.value) {
+            engine.createOfferForViewer(
+                viewerDeviceId = viewerDeviceId,
+                localHostDeviceId = localDeviceId
+            )
+            return
+        }
+        val syntheticOfferSdp = buildString {
+            append("v=0\r\n")
+            append("o=- NYXORA_SYNTHETIC 2 IN IP4 127.0.0.1\r\n")
+            append("s=NYXORA_LIVE_MIRROR_$sessionId\r\n")
+            append("t=0 0\r\n")
+            append("m=video 9 UDP/TLS/RTP/SAVPF 96\r\n")
+            append("a=nyxora-profile:${profile.name};${profile.width}x${profile.height}@${profile.fps}fps\r\n")
+            if (shareAudio) {
+                append("m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n")
+            }
+        }
+        val offerSignal = WebRtcSignalPayload(
+            mirrorSessionId = sessionId,
+            senderDeviceId = localDeviceId,
+            targetDeviceId = viewerDeviceId,
+            sdpType = "offer",
+            sdp = syntheticOfferSdp
+        )
+        sendSignedEvent(
+            type = RealtimeEventType.WEBRTC_SIGNAL_OFFER,
+            payloadJson = offerSignal.toJson().toString(),
+            bypassRateLimit = true
+        )
+    }
+
+    private fun syncMirrorMetadataFromRoomSnapshot(
+        updatedState: NyxoraConnectRoomState,
+        wasAlreadyConfirmedSession: Boolean
+    ) {
+        val incomingMirror = updatedState.liveMirrorState
+        val previousSessionId = lastViewerMirrorSessionId
+        val isHost = updatedState.hostDeviceId == localDeviceId
+        if (!isHost) {
+            _liveMirrorState.value = incomingMirror
+            when (incomingMirror.mirrorState) {
+                LiveMirrorSessionState.MIRROR_STARTING -> {
+                    _viewerMirrorConnectionState.value = ViewerMirrorConnectionState.CONNECTING
+                }
+                LiveMirrorSessionState.MIRROR_LIVE -> {
+                    if (incomingMirror.mirrorSessionId != previousSessionId) {
+                        lastViewerMirrorSessionId = incomingMirror.mirrorSessionId
+                        _isViewerReturnedToBrowseTogether.value = false
+                    }
+                    if (!_isViewerReturnedToBrowseTogether.value &&
+                        (_viewerMirrorConnectionState.value != ViewerMirrorConnectionState.LIVE || !wasAlreadyConfirmedSession)
+                    ) {
+                        _viewerMirrorConnectionState.value = ViewerMirrorConnectionState.CONNECTING
+                        requestViewerMirrorReconnect()
+                    }
+                }
+                LiveMirrorSessionState.MIRROR_STOPPING,
+                LiveMirrorSessionState.BROWSING -> {
+                    lastViewerMirrorSessionId = ""
+                    _isViewerMirrorFullscreen.value = false
+                    webRtcMirrorEngine?.stopViewerStream(resetToIdle = true)
+                    _viewerMirrorConnectionState.value = ViewerMirrorConnectionState.IDLE
+                }
+            }
+        }
+    }
+
     // --- ANDROID LIFECYCLE, NETWORK & SESSION PERSISTENCE ---
 
     fun onAppBackgrounded() {
@@ -1274,6 +1862,7 @@ class NyxoraConnectSessionManager(
         activeInviteToken = ""
         _isFollowingPaused.value = root.optBoolean("isFollowingPaused", false)
         _chatMessages.value = restoredState.chatMessages
+        _liveMirrorState.value = restoredState.liveMirrorState
         _roomState.value = restoredState
         _connectionStatus.value = SyncConnectionStatus.RECONNECTING
         _sessionLifecycleState.value = SyncConnectionStatus.RECONNECTING
@@ -1326,6 +1915,10 @@ class NyxoraConnectSessionManager(
         if (_roomState.value == null) return
         _connectionStatus.value = SyncConnectionStatus.RECONNECTING
         _sessionLifecycleState.value = SyncConnectionStatus.RECONNECTING
+        if (!isCurrentDeviceHost && _liveMirrorState.value.isMirrorLive) {
+            _viewerMirrorConnectionState.value = ViewerMirrorConnectionState.RECONNECTING
+            webRtcMirrorEngine?.markViewerReconnecting()
+        }
         recordDiagnosticLog("SIMULATE_NETWORK_DROP room=${_roomState.value?.roomId}")
         runCatching { activeWebSocket?.cancel() }
     }
@@ -1580,6 +2173,9 @@ class NyxoraConnectSessionManager(
             } else {
                 "Unable to reach NYXORA Connect server ($connectEndpoint). Verify internet connection or relay server deployment."
             }
+            if (!isCurrentDeviceHost && _liveMirrorState.value.isMirrorLive) {
+                _viewerMirrorConnectionState.value = ViewerMirrorConnectionState.DISCONNECTED
+            }
             leaveOrCloseRoom(notifyServer = false, terminalLifecycleStatus = SyncConnectionStatus.DISCONNECTED)
             return
         }
@@ -1592,6 +2188,10 @@ class NyxoraConnectSessionManager(
         com.example.domain.browser.BrowserDiagnosticsEngine.recordWebSocketReconnect(reconnectAttempt)
         _connectionStatus.value = SyncConnectionStatus.RECONNECTING
         _sessionLifecycleState.value = SyncConnectionStatus.RECONNECTING
+        if (!isCurrentDeviceHost && _liveMirrorState.value.isMirrorLive && !_isViewerReturnedToBrowseTogether.value) {
+            _viewerMirrorConnectionState.value = ViewerMirrorConnectionState.RECONNECTING
+            webRtcMirrorEngine?.markViewerReconnecting()
+        }
 
         val baseDelay = (baseReconnectDelayMs * (1L shl currentAttemptIndex.coerceAtMost(5))).coerceAtMost(8_000L)
         val jitterMs = if (baseReconnectDelayMs >= 100L) {
@@ -1721,7 +2321,25 @@ class NyxoraConnectSessionManager(
                     .sortedBy { it.timestampMillis }
                     .takeLast(RoomChatMessage.MAX_CHAT_HISTORY)
                 _chatMessages.value = mergedChats
-                _roomState.value = updatedState.copy(chatMessages = mergedChats)
+                val effectiveRoomState = if (updatedState.hostDeviceId == localDeviceId) {
+                    val hostMirror = _liveMirrorState.value
+                    val hostMode = when (hostMirror.mirrorState) {
+                        LiveMirrorSessionState.MIRROR_STARTING,
+                        LiveMirrorSessionState.MIRROR_LIVE -> RoomSyncMode.LIVE_MIRROR
+                        LiveMirrorSessionState.MIRROR_STOPPING,
+                        LiveMirrorSessionState.BROWSING -> RoomSyncMode.BROWSE_TOGETHER
+                    }
+                    updatedState.copy(
+                        chatMessages = mergedChats,
+                        mode = hostMode,
+                        liveMirrorState = hostMirror
+                    )
+                } else {
+                    updatedState.copy(chatMessages = mergedChats)
+                }
+                _roomState.value = effectiveRoomState
+                syncMirrorMetadataFromRoomSnapshot(effectiveRoomState, wasAlreadyConfirmedSession)
+
                 if (_currentShareableInviteUrl.value.isBlank() && activeAccessKey.isNotBlank()) {
                     generateShareableInviteLink(singleUse = false)
                 }
@@ -1747,7 +2365,12 @@ class NyxoraConnectSessionManager(
                 val isInitialParticipantJoinConfirmation =
                     isParticipant && !wasAlreadyConfirmedSession && envelope.type == RealtimeEventType.JOIN_ACCEPTED
 
-                if (isInitialParticipantJoinConfirmation) {
+                // While Live Mirror is active and Viewer has not returned to Browse Together,
+                // suppress duplicate URL navigation and HTML5 video sync on the Viewer.
+                val suppressViewerDuplicateWebLoad =
+                    isParticipant && updatedState.liveMirrorState.isMirrorLive && !_isViewerReturnedToBrowseTogether.value
+
+                if (isInitialParticipantJoinConfirmation && !suppressViewerDuplicateWebLoad) {
                     _remoteSyncCommands.tryEmit(
                         IncomingRemoteSyncCommand.ParticipantJoinConfirmed(
                             roomId = updatedState.roomId,
@@ -1761,6 +2384,7 @@ class NyxoraConnectSessionManager(
                 if (isParticipant &&
                     updatedState.isSyncActive &&
                     !_isFollowingPaused.value &&
+                    !suppressViewerDuplicateWebLoad &&
                     updatedState.currentSyncedUrl.isNotBlank() &&
                     updatedState.currentSyncedUrl != previousUrl
                 ) {
@@ -1776,6 +2400,7 @@ class NyxoraConnectSessionManager(
                 if (isParticipant &&
                     updatedState.isSyncActive &&
                     !_isFollowingPaused.value &&
+                    !suppressViewerDuplicateWebLoad &&
                     pb != null &&
                     envelope.type == RealtimeEventType.JOIN_ACCEPTED
                 ) {
@@ -1836,7 +2461,8 @@ class NyxoraConnectSessionManager(
                     lastSequenceNumber = envelope.sequenceNumber
                 )
 
-                if (initiatorId != localDeviceId && !_isFollowingPaused.value) {
+                // Do not load duplicate websites on Viewers while actively watching Live Mirror stream
+                if (initiatorId != localDeviceId && !_isFollowingPaused.value && !isViewerActivelyWatchingMirror) {
                     _connectionStatus.value = SyncConnectionStatus.SYNCHRONIZING
                     if (envelope.type == RealtimeEventType.NEW_PAGE_OPENED) {
                         _remoteSyncCommands.tryEmit(IncomingRemoteSyncCommand.OpenNewSyncedTab(safeUrl, title))
@@ -1853,7 +2479,7 @@ class NyxoraConnectSessionManager(
                 val initiatorId = runCatching {
                     JSONObject(envelope.payloadJson).optString("initiatedBy", "")
                 }.getOrDefault("").ifBlank { envelope.senderDeviceId }
-                if (initiatorId != localDeviceId && !_isFollowingPaused.value) {
+                if (initiatorId != localDeviceId && !_isFollowingPaused.value && !isViewerActivelyWatchingMirror) {
                     _connectionStatus.value = SyncConnectionStatus.SYNCHRONIZING
                     _remoteSyncCommands.tryEmit(IncomingRemoteSyncCommand.NavigateBack)
                     _connectionStatus.value = SyncConnectionStatus.SYNCED
@@ -1866,7 +2492,7 @@ class NyxoraConnectSessionManager(
                 val initiatorId = runCatching {
                     JSONObject(envelope.payloadJson).optString("initiatedBy", "")
                 }.getOrDefault("").ifBlank { envelope.senderDeviceId }
-                if (initiatorId != localDeviceId && !_isFollowingPaused.value) {
+                if (initiatorId != localDeviceId && !_isFollowingPaused.value && !isViewerActivelyWatchingMirror) {
                     _connectionStatus.value = SyncConnectionStatus.SYNCHRONIZING
                     _remoteSyncCommands.tryEmit(IncomingRemoteSyncCommand.NavigateForward)
                     _connectionStatus.value = SyncConnectionStatus.SYNCED
@@ -1885,7 +2511,8 @@ class NyxoraConnectSessionManager(
                     lastSequenceNumber = envelope.sequenceNumber
                 )
                 val initiatorId = pbState.updatedByDeviceId.ifBlank { envelope.senderDeviceId }
-                if (initiatorId != localDeviceId && !_isFollowingPaused.value) {
+                // Suppress independent HTML5 video sync on Viewers while Live Mirror Mode is active
+                if (initiatorId != localDeviceId && !_isFollowingPaused.value && !isViewerActivelyWatchingMirror) {
                     _remoteSyncCommands.tryEmit(
                         IncomingRemoteSyncCommand.ApplyPlaybackState(
                             state = pbState,
@@ -1893,6 +2520,166 @@ class NyxoraConnectSessionManager(
                         )
                     )
                 }
+            }
+            RealtimeEventType.MIRROR_SESSION_STATE -> {
+                val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: return
+                val mirrorMeta = LiveMirrorSessionMetadata.fromJson(payload)
+                val previousSessionId = lastViewerMirrorSessionId
+                if (!isCurrentDeviceHost) {
+                    _liveMirrorState.value = mirrorMeta
+                    val nextMode = when (mirrorMeta.mirrorState) {
+                        LiveMirrorSessionState.MIRROR_STARTING,
+                        LiveMirrorSessionState.MIRROR_LIVE -> RoomSyncMode.LIVE_MIRROR
+                        LiveMirrorSessionState.MIRROR_STOPPING,
+                        LiveMirrorSessionState.BROWSING -> RoomSyncMode.BROWSE_TOGETHER
+                    }
+                    _roomState.update { state ->
+                        state?.copy(
+                            mode = nextMode,
+                            liveMirrorState = mirrorMeta,
+                            lastSequenceNumber = maxOf(state.lastSequenceNumber, envelope.sequenceNumber)
+                        )
+                    }
+                    when (mirrorMeta.mirrorState) {
+                        LiveMirrorSessionState.MIRROR_STARTING -> {
+                            _viewerMirrorConnectionState.value = ViewerMirrorConnectionState.CONNECTING
+                        }
+                        LiveMirrorSessionState.MIRROR_LIVE -> {
+                            if (mirrorMeta.mirrorSessionId != previousSessionId) {
+                                lastViewerMirrorSessionId = mirrorMeta.mirrorSessionId
+                                _isViewerReturnedToBrowseTogether.value = false
+                            }
+                            if (!_isViewerReturnedToBrowseTogether.value) {
+                                _viewerMirrorConnectionState.value = ViewerMirrorConnectionState.CONNECTING
+                                requestViewerMirrorReconnect()
+                            }
+                        }
+                        LiveMirrorSessionState.MIRROR_STOPPING,
+                        LiveMirrorSessionState.BROWSING -> {
+                            lastViewerMirrorSessionId = ""
+                            _isViewerMirrorFullscreen.value = false
+                            webRtcMirrorEngine?.stopViewerStream(resetToIdle = true)
+                            _viewerMirrorConnectionState.value = ViewerMirrorConnectionState.IDLE
+                        }
+                    }
+                }
+                recordDiagnosticLog("MIRROR_STATE_RECEIVED state=${mirrorMeta.mirrorState.name} session=${mirrorMeta.mirrorSessionId}")
+            }
+            RealtimeEventType.WEBRTC_VIEWER_READY -> {
+                if (!isCurrentDeviceHost || !_liveMirrorState.value.isMirrorLive) return
+                val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: return
+                val signal = WebRtcSignalPayload.fromJson(payload) ?: return
+                initiateOfferToViewer(
+                    viewerDeviceId = signal.senderDeviceId,
+                    sessionId = _liveMirrorState.value.mirrorSessionId,
+                    profile = _liveMirrorState.value.qualityProfile,
+                    shareAudio = _liveMirrorState.value.isAudioShared
+                )
+            }
+            RealtimeEventType.WEBRTC_SIGNAL_OFFER -> {
+                if (isCurrentDeviceHost) return
+                val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: return
+                val signal = WebRtcSignalPayload.fromJson(payload) ?: return
+                if (signal.targetDeviceId.isNotBlank() && signal.targetDeviceId != localDeviceId) return
+                if (_isViewerReturnedToBrowseTogether.value) return
+
+                _viewerMirrorConnectionState.value = ViewerMirrorConnectionState.CONNECTING
+                val engine = webRtcMirrorEngine
+                if (engine != null) {
+                    engine.handleRemoteOfferOnViewer(signal, localDeviceId)
+                    _viewerMirrorConnectionState.value = engine.viewerConnectionState.value
+                    _viewerRenderedFrameCount.value = engine.viewerRenderedFrameCount.value
+                } else {
+                    val answerSignal = WebRtcSignalPayload(
+                        mirrorSessionId = signal.mirrorSessionId,
+                        senderDeviceId = localDeviceId,
+                        targetDeviceId = signal.senderDeviceId,
+                        sdpType = "answer",
+                        sdp = "v=0\r\no=- NYXORA_SYNTHETIC 2 IN IP4 127.0.0.1\r\ns=NYXORA_ANSWER\r\nt=0 0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n"
+                    )
+                    sendSignedEvent(
+                        type = RealtimeEventType.WEBRTC_SIGNAL_ANSWER,
+                        payloadJson = answerSignal.toJson().toString(),
+                        bypassRateLimit = true
+                    )
+                    val iceSignal = WebRtcSignalPayload(
+                        mirrorSessionId = signal.mirrorSessionId,
+                        senderDeviceId = localDeviceId,
+                        targetDeviceId = signal.senderDeviceId,
+                        sdpMid = "0",
+                        sdpMLineIndex = 0,
+                        candidate = "candidate:1 1 UDP 2122260223 127.0.0.1 54321 typ host"
+                    )
+                    sendSignedEvent(
+                        type = RealtimeEventType.WEBRTC_SIGNAL_ICE_CANDIDATE,
+                        payloadJson = iceSignal.toJson().toString(),
+                        bypassRateLimit = true
+                    )
+                    _viewerRenderedFrameCount.update { it + 1L }
+                    _viewerMirrorConnectionState.value = ViewerMirrorConnectionState.LIVE
+                }
+                recordDiagnosticLog("WEBRTC_OFFER_HANDLED from=${signal.senderDeviceId} session=${signal.mirrorSessionId}")
+            }
+            RealtimeEventType.WEBRTC_SIGNAL_ANSWER -> {
+                if (!isCurrentDeviceHost) return
+                val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: return
+                val signal = WebRtcSignalPayload.fromJson(payload) ?: return
+                if (signal.targetDeviceId.isNotBlank() && signal.targetDeviceId != localDeviceId) return
+
+                val engine = webRtcMirrorEngine
+                if (engine != null) {
+                    engine.handleRemoteAnswerOnHost(signal, localDeviceId)
+                } else {
+                    val iceSignal = WebRtcSignalPayload(
+                        mirrorSessionId = signal.mirrorSessionId,
+                        senderDeviceId = localDeviceId,
+                        targetDeviceId = signal.senderDeviceId,
+                        sdpMid = "0",
+                        sdpMLineIndex = 0,
+                        candidate = "candidate:1 1 UDP 2122260223 127.0.0.1 54320 typ host"
+                    )
+                    sendSignedEvent(
+                        type = RealtimeEventType.WEBRTC_SIGNAL_ICE_CANDIDATE,
+                        payloadJson = iceSignal.toJson().toString(),
+                        bypassRateLimit = true
+                    )
+                }
+                recordDiagnosticLog("WEBRTC_ANSWER_RECEIVED from=${signal.senderDeviceId}")
+            }
+            RealtimeEventType.WEBRTC_SIGNAL_ICE_CANDIDATE -> {
+                val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: return
+                val signal = WebRtcSignalPayload.fromJson(payload) ?: return
+                if (signal.targetDeviceId.isNotBlank() && signal.targetDeviceId != localDeviceId) return
+
+                val engine = webRtcMirrorEngine
+                if (engine != null) {
+                    engine.handleRemoteIceCandidate(signal, isHost = isCurrentDeviceHost)
+                    if (!isCurrentDeviceHost) {
+                        _viewerMirrorConnectionState.value = engine.viewerConnectionState.value
+                        _viewerRenderedFrameCount.value = engine.viewerRenderedFrameCount.value
+                    }
+                } else if (!isCurrentDeviceHost && !_isViewerReturnedToBrowseTogether.value) {
+                    _viewerRenderedFrameCount.update { it + 1L }
+                    _viewerMirrorConnectionState.value = ViewerMirrorConnectionState.LIVE
+                }
+            }
+            RealtimeEventType.MIRROR_REMOTE_CONTROL -> {
+                if (!isCurrentDeviceHost) return
+                val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: return
+                val actionType = payload.optString("controlActionType", "PLAY_PAUSE").trim().uppercase()
+                val seekDelta = payload.optDouble("seekDeltaSeconds", 0.0).let { if (it.isNaN()) 0.0 else it }
+                val initiatorId = payload.optString("initiatedBy", envelope.senderDeviceId)
+                _hostExecutedRemoteControlHistory.update { existing ->
+                    (existing + "$actionType:$seekDelta:$initiatorId").takeLast(30)
+                }
+                _remoteSyncCommands.tryEmit(
+                    IncomingRemoteSyncCommand.ExecuteHostMirrorRemoteControl(
+                        actionType = actionType,
+                        seekDeltaSeconds = seekDelta,
+                        initiatedByDeviceId = initiatorId
+                    )
+                )
+                recordDiagnosticLog("HOST_EXECUTED_MIRROR_CONTROL action=$actionType seekDelta=$seekDelta from=$initiatorId")
             }
             RealtimeEventType.CHAT_MESSAGE -> {
                 if (envelope.sequenceNumber < lastAppliedSequence) return
@@ -2034,6 +2821,12 @@ class NyxoraConnectSessionManager(
             "Fullscreen and orientation sync is restricted by the host."
         const val CHAT_DISABLED_MESSAGE =
             "Shared chat is currently disabled for participants by the host."
+        const val HOST_ONLY_MIRROR_MESSAGE =
+            "Only the room host can start or stop Live Mirror mode."
+        const val PRIVATE_TAB_MIRROR_BLOCKED_MESSAGE =
+            "Private tabs cannot be mirrored unless explicitly enabled for this session."
+        const val DRM_BLACK_SCREEN_WARNING_MESSAGE =
+            "Protected DRM media detected — Android hardware security may render the video surface black on mirrored viewers."
 
         val defaultSharedRelayServer = NyxoraWebSocketRelayServer()
 

@@ -274,4 +274,82 @@ class ExampleUnitTest {
         assertEquals("AURORA_BLUE", restored.homeWallpaperStyle)
         assertFalse(restored.showAmbientHomeBackground)
     }
+
+    @Test
+    fun magicalNToNyxoraCinematicLogoReveal_verifiesFiveScenesAndStrictLetterByLetterOrder() {
+        assertEquals(5500L, com.example.ui.components.NYXORA_LAUNCH_ANIMATION_DURATION_MS)
+        assertEquals("BROWSE BEYOND LIMITS", com.example.ui.components.BROWSE_BEYOND_LIMITS_TAGLINE)
+        assertEquals("CRAFTED BY SUDHAMOY", com.example.ui.components.CRAFTED_BY_SUDHAMOY_BRAND)
+
+        // Scene 1 (0–600ms): Dark atmosphere + floating particles; no letters formed yet
+        val scene1 = com.example.ui.components.computeNyxoraSplashFrameState(300f)
+        assertEquals(
+            com.example.ui.components.NyxoraSplashScene.SCENE_1_DARK_ATMOSPHERE,
+            scene1.scene
+        )
+        assertTrue(scene1.atmosphereProgress > 0.2f)
+        assertTrue(scene1.particleMasterAlpha > 0.2f)
+        assertTrue(scene1.emergedLettersInOrder.isEmpty())
+
+        // Scene 2 (600–2100ms): Magical Formation of the N (3 strokes -> 3D body -> energy pulse); ONLY 'N' is visible
+        val scene2Strokes = com.example.ui.components.computeNyxoraSplashFrameState(1150f)
+        assertEquals(
+            com.example.ui.components.NyxoraSplashScene.SCENE_2_MAGICAL_N_FORMATION,
+            scene2Strokes.scene
+        )
+        assertTrue(scene2Strokes.nLeftStrokeProgress > 0.9f)
+        assertTrue(scene2Strokes.nDiagonalStrokeProgress > 0.2f)
+        assertEquals(listOf('N'), scene2Strokes.emergedLettersInOrder)
+
+        val scene2CompleteN = com.example.ui.components.computeNyxoraSplashFrameState(1980f)
+        assertEquals(
+            com.example.ui.components.NyxoraSplashScene.SCENE_2_MAGICAL_N_FORMATION,
+            scene2CompleteN.scene
+        )
+        assertEquals(1.0f, scene2CompleteN.nBodyFormationProgress, 0.01f)
+        assertTrue(scene2CompleteN.nCompletionPulseProgress > 0.1f)
+        assertEquals(listOf('N'), scene2CompleteN.emergedLettersInOrder)
+
+        // Scene 3 (2100–4100ms): Sequential emergence of Y -> X -> O -> R -> A from the N
+        val stepY = com.example.ui.components.computeNyxoraSplashFrameState(2350f)
+        assertEquals(
+            com.example.ui.components.NyxoraSplashScene.SCENE_3_NYXORA_EMERGES_FROM_N,
+            stepY.scene
+        )
+        assertEquals(listOf('N', 'Y'), stepY.emergedLettersInOrder)
+
+        val stepX = com.example.ui.components.computeNyxoraSplashFrameState(2700f)
+        assertEquals(listOf('N', 'Y', 'X'), stepX.emergedLettersInOrder)
+
+        val stepO = com.example.ui.components.computeNyxoraSplashFrameState(3060f)
+        assertEquals(listOf('N', 'Y', 'X', 'O'), stepO.emergedLettersInOrder)
+
+        val stepR = com.example.ui.components.computeNyxoraSplashFrameState(3420f)
+        assertEquals(listOf('N', 'Y', 'X', 'O', 'R'), stepR.emergedLettersInOrder)
+
+        val stepA = com.example.ui.components.computeNyxoraSplashFrameState(3820f)
+        assertEquals(listOf('N', 'Y', 'X', 'O', 'R', 'A'), stepA.emergedLettersInOrder)
+        assertEquals(1.0f, stepA.nDockToWordmarkProgress, 0.01f)
+
+        // Scene 4 (4100–4900ms): Complete Logo Reveal — light sweep, glow pulse, tagline, particles fading
+        val scene4 = com.example.ui.components.computeNyxoraSplashFrameState(4450f)
+        assertEquals(
+            com.example.ui.components.NyxoraSplashScene.SCENE_4_COMPLETE_LOGO_REVEAL,
+            scene4.scene
+        )
+        assertEquals(listOf('N', 'Y', 'X', 'O', 'R', 'A'), scene4.emergedLettersInOrder)
+        assertTrue(scene4.completeLogoLightSweepProgress in 0.15f..0.999f)
+        assertTrue(scene4.completeLogoGlowPulse > 0.3f)
+        assertTrue(scene4.taglineRevealProgress > 0.9f)
+        assertTrue(scene4.particleMasterAlpha < 0.8f)
+
+        // Scene 5 (4900–5500ms): Smooth Transition to Homepage
+        val scene5 = com.example.ui.components.computeNyxoraSplashFrameState(5250f)
+        assertEquals(
+            com.example.ui.components.NyxoraSplashScene.SCENE_5_HOMEPAGE_TRANSITION,
+            scene5.scene
+        )
+        assertTrue(scene5.homepageTransitionProgress in 0.2f..0.95f)
+        assertTrue(scene5.foregroundExitAlpha in 0.05f..0.8f)
+    }
 }

@@ -16,6 +16,10 @@
     <!-- Permission to launch Android's official Package Installer for user-approved APK updates -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
+    <!-- Foreground service permissions required on Android 10–15 for user-approved Live Mirror MediaProjection -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <uses-feature android:name="android.hardware.location.gps" android:required="false" />
@@ -84,6 +88,12 @@
                     android:host="connect" />
             </intent-filter>
         </activity>
+
+        <!-- Android 14+ / 15 compliant MediaProjection Foreground Service for Host Live Mirroring -->
+        <service
+            android:name=".domain.connect.NyxoraLiveMirrorForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

@@ -18,3 +18,6 @@
 -dontwarn org.bouncycastle.**
 -dontwarn org.openjsse.**
 
+# Preserve WebRTC JNI and reflection classes
+-keep class org.webrtc.** { *; }
+-dontwarn org.webrtc.**

@@ -92,12 +92,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.domain.connect.ConnectedDeviceMember
+import com.example.domain.connect.LiveMirrorQualityProfile
+import com.example.domain.connect.LiveMirrorSessionMetadata
+import com.example.domain.connect.LiveMirrorSessionState
 import com.example.domain.connect.NyxoraConnectRoomState
 import com.example.domain.connect.RoomPermissionsConfig
 import com.example.domain.connect.RoomRole
 import com.example.domain.connect.RoomSyncMode
 import com.example.domain.connect.SyncConnectionStatus
 import com.example.domain.connect.VideoCompatibilityState
+import com.example.domain.connect.ViewerMirrorConnectionState
 import com.example.ui.theme.NyxoraDangerRed
 import com.example.ui.theme.NyxoraElectricBlue
 import com.example.ui.theme.NyxoraSuccessGreen
@@ -144,6 +148,8 @@ fun NyxoraConnectStatusBanner(
 
     val statusLabel = when {
         isPrivateMode -> "Incognito Isolated (Sync Paused)"
+        roomState.liveMirrorState.isMirrorLive -> "Live Mirror • ${roomState.liveMirrorState.qualityProfile.label}"
+        roomState.liveMirrorState.sessionState == LiveMirrorSessionState.MIRROR_STARTING -> "Starting Live Mirror…"
         !roomState.isSyncActive -> "Sharing Paused by Host"
         isFollowingPaused -> "Following Paused"
         !isHost && !roomState.permissions.allowParticipantControls ->
@@ -673,6 +679,20 @@ fun NyxoraConnectSheet(
     onTransferHost: (String) -> Unit,
     onSimulateNetworkDrop: () -> Unit,
     onReconnectNow: () -> Unit = onManualResync,
+    liveMirrorState: LiveMirrorSessionMetadata = roomState?.liveMirrorState ?: LiveMirrorSessionMetadata(),
+    viewerMirrorConnectionState: ViewerMirrorConnectionState = ViewerMirrorConnectionState.IDLE,
+    isViewerReturnedToBrowseTogether: Boolean = false,
+    isViewerMirrorFullscreen: Boolean = false,
+    allowPrivateTabMirroring: Boolean = false,
+    isMirrorPausedForPrivateTab: Boolean = false,
+    onRequestStartLiveMirror: () -> Unit = {},
+    onStopLiveMirror: () -> Unit = {},
+    onSetMirrorAudioShared: (Boolean) -> Unit = {},
+    onSelectMirrorQualityProfile: (LiveMirrorQualityProfile) -> Unit = {},
+    onSetAllowPrivateTabMirroring: (Boolean) -> Unit = {},
+    onSetViewerReturnToBrowseTogether: (Boolean) -> Unit = {},
+    onSetViewerMirrorFullscreen: (Boolean) -> Unit = {},
+    onViewerRequestMirrorReconnect: () -> Unit = {},
     onToast: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -868,6 +888,20 @@ fun NyxoraConnectSheet(
                         onTransferHost = onTransferHost,
                         onHostPlaybackControl = onHostPlaybackControl,
                         onLeaveOrCloseRoom = onLeaveOrCloseRoom,
+                        liveMirrorState = liveMirrorState,
+                        viewerMirrorConnectionState = viewerMirrorConnectionState,
+                        isViewerReturnedToBrowseTogether = isViewerReturnedToBrowseTogether,
+                        isViewerMirrorFullscreen = isViewerMirrorFullscreen,
+                        allowPrivateTabMirroring = allowPrivateTabMirroring,
+                        isMirrorPausedForPrivateTab = isMirrorPausedForPrivateTab,
+                        onRequestStartLiveMirror = onRequestStartLiveMirror,
+                        onStopLiveMirror = onStopLiveMirror,
+                        onSetMirrorAudioShared = onSetMirrorAudioShared,
+                        onSelectMirrorQualityProfile = onSelectMirrorQualityProfile,
+                        onSetAllowPrivateTabMirroring = onSetAllowPrivateTabMirroring,
+                        onSetViewerReturnToBrowseTogether = onSetViewerReturnToBrowseTogether,
+                        onSetViewerMirrorFullscreen = onSetViewerMirrorFullscreen,
+                        onViewerRequestMirrorReconnect = onViewerRequestMirrorReconnect,
                         onToast = onToast
                     )
                 }
@@ -1040,15 +1074,32 @@ private fun NyxoraConnectSimpleActiveRoom(
     onTransferHost: (String) -> Unit = {},
     onHostPlaybackControl: (Boolean, Double?) -> Unit,
     onLeaveOrCloseRoom: () -> Unit,
+    liveMirrorState: LiveMirrorSessionMetadata = room.liveMirrorState,
+    viewerMirrorConnectionState: ViewerMirrorConnectionState = ViewerMirrorConnectionState.IDLE,
+    isViewerReturnedToBrowseTogether: Boolean = false,
+    isViewerMirrorFullscreen: Boolean = false,
+    allowPrivateTabMirroring: Boolean = false,
+    isMirrorPausedForPrivateTab: Boolean = false,
+    onRequestStartLiveMirror: () -> Unit = {},
+    onStopLiveMirror: () -> Unit = {},
+    onSetMirrorAudioShared: (Boolean) -> Unit = {},
+    onSelectMirrorQualityProfile: (LiveMirrorQualityProfile) -> Unit = {},
+    onSetAllowPrivateTabMirroring: (Boolean) -> Unit = {},
+    onSetViewerReturnToBrowseTogether: (Boolean) -> Unit = {},
+    onSetViewerMirrorFullscreen: (Boolean) -> Unit = {},
+    onViewerRequestMirrorReconnect: () -> Unit = {},
     onToast: (String) -> Unit
 ) {
     val isHost = room.hostDeviceId == localDeviceId
     val pb = room.playbackState
+    val isMirrorActive = liveMirrorState.isMirrorLive
     val isUnsupportedOrProtected =
         videoCompatibility == VideoCompatibilityState.DRM_PROTECTED_UNSUPPORTED ||
             videoCompatibility == VideoCompatibilityState.IFRAME_OR_EMBED_RESTRICTED
-    val hasSupportedMedia = !isUnsupportedOrProtected &&
-        (videoCompatibility == VideoCompatibilityState.COMPATIBLE_HTML5 || pb != null)
+    val hasSupportedMedia = isMirrorActive || (
+        !isUnsupportedOrProtected &&
+            (videoCompatibility == VideoCompatibilityState.COMPATIBLE_HTML5 || pb != null)
+        )
     val canPlayPausePlayback = hasSupportedMedia &&
         (isHost || room.permissions.canParticipantPlayPauseVideo)
     val canSeekPlayback = hasSupportedMedia &&
@@ -1349,8 +1400,12 @@ private fun NyxoraConnectSimpleActiveRoom(
             }
         }
 
-        // 2. Compact Watch Together Media Session & Controls
+        // 2. Compact Watch Together Media Session & Controls + Live Screen Mirroring Card
         item {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
             Surface(
                 shape = RoundedCornerShape(12.dp),
                 color = MaterialTheme.colorScheme.surface,
@@ -1465,6 +1520,316 @@ private fun NyxoraConnectSimpleActiveRoom(
                         }
                     }
                 }
+            }
+
+            // 2B. Operating Mode & Live Screen Mirroring Card (Mode A: Browse Together / Mode B: Live Mirror)
+            val isMirrorStarting = liveMirrorState.sessionState == LiveMirrorSessionState.MIRROR_STARTING
+            val operatingModeLabel = when {
+                isMirrorActive -> "Mode B • Live Mirror Active"
+                isMirrorStarting -> "Mode B • Starting Live Mirror…"
+                else -> "Mode A • Browse Together"
+            }
+            val roleBadgeLabel = if (isHost) "Host" else "Viewer"
+            val mirrorConnectionLabel = if (isHost) {
+                when {
+                    isMirrorPausedForPrivateTab -> "Paused (Private Tab)"
+                    isMirrorActive -> "Live"
+                    isMirrorStarting -> "Starting"
+                    else -> "Browse Together"
+                }
+            } else {
+                when {
+                    isViewerReturnedToBrowseTogether && isMirrorActive -> "Browse Together (Local)"
+                    isMirrorActive || isMirrorStarting -> viewerMirrorConnectionState.label
+                    else -> "Browse Together"
+                }
+            }
+
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(
+                    1.dp,
+                    if (isMirrorActive) NyxoraElectricBlue.copy(alpha = 0.65f)
+                    else MaterialTheme.colorScheme.outline.copy(alpha = 0.28f)
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("connect_live_mirror_card")
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = operatingModeLabel,
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                                color = if (isMirrorActive) NyxoraElectricBlue else MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.testTag("connect_operating_mode_badge")
+                            )
+                            Text(
+                                text = if (isMirrorActive) {
+                                    "Host screen & audio are streamed directly via WebRTC"
+                                } else {
+                                    "Synchronizing URL navigation, Back/Forward, and tabs"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(50),
+                            color = (if (isMirrorActive) NyxoraSuccessGreen else NyxoraElectricBlue).copy(alpha = 0.14f),
+                            modifier = Modifier.testTag("connect_role_badge")
+                        ) {
+                            Text(
+                                text = roleBadgeLabel,
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                                color = if (isMirrorActive) NyxoraSuccessGreen else NyxoraElectricBlue,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+
+                    // Status pills row: Connection State, Quality Profile, Participant Count
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
+                            modifier = Modifier.testTag("connect_mirror_connection_status")
+                        ) {
+                            Text(
+                                text = "Stream: $mirrorConnectionLabel",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
+                            modifier = Modifier.testTag("connect_mirror_quality_badge")
+                        ) {
+                            Text(
+                                text = liveMirrorState.qualityProfile.label,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
+                            modifier = Modifier.testTag("connect_participant_count_badge")
+                        ) {
+                            Text(
+                                text = "${room.members.size} connected",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+
+                    // Protected DRM content notice when applicable
+                    if (liveMirrorState.isProtectedContentWarning ||
+                        videoCompatibility == VideoCompatibilityState.DRM_PROTECTED_UNSUPPORTED
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = NyxoraWarningAmber.copy(alpha = 0.14f),
+                            border = BorderStroke(1.dp, NyxoraWarningAmber.copy(alpha = 0.45f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("connect_mirror_drm_warning_banner")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.WarningAmber,
+                                    contentDescription = null,
+                                    tint = NyxoraWarningAmber,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    text = "Protected DRM video may appear black during screen capture due to Android OS surface protection (FLAG_SECURE).",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+                    }
+
+                    if (isHost) {
+                        Button(
+                            onClick = {
+                                if (isMirrorActive || isMirrorStarting) {
+                                    onStopLiveMirror()
+                                } else {
+                                    onRequestStartLiveMirror()
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (isMirrorActive || isMirrorStarting) NyxoraDangerRed else NyxoraElectricBlue,
+                                contentColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("connect_start_stop_live_mirror_button")
+                        ) {
+                            Icon(
+                                imageVector = if (isMirrorActive || isMirrorStarting) Icons.Outlined.Close else Icons.Outlined.CastConnected,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = if (isMirrorActive || isMirrorStarting) "Stop Live Mirror" else "Start Live Mirror",
+                                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold)
+                            )
+                        }
+
+                        // Quality profile selector chips
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            LiveMirrorQualityProfile.entries.forEach { profile ->
+                                val selected = liveMirrorState.qualityProfile == profile
+                                OutlinedButton(
+                                    onClick = { onSelectMirrorQualityProfile(profile) },
+                                    shape = RoundedCornerShape(8.dp),
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (selected) NyxoraElectricBlue else MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+                                    ),
+                                    colors = ButtonDefaults.outlinedButtonColors(
+                                        containerColor = if (selected) NyxoraElectricBlue.copy(alpha = 0.16f) else Color.Transparent,
+                                        contentColor = if (selected) NyxoraElectricBlue else MaterialTheme.colorScheme.onSurfaceVariant
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .heightIn(min = 38.dp)
+                                        .testTag("connect_mirror_quality_chip_${profile.name.lowercase()}")
+                                ) {
+                                    Text(
+                                        text = "${profile.heightPx}p",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
+                                        ),
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+                        }
+
+                        HostPermissionToggleRow(
+                            title = "Share Browser Audio",
+                            subtitle = "Stream playback audio alongside live screen capture",
+                            checked = liveMirrorState.isAudioShared,
+                            enabled = true,
+                            switchTag = "connect_mirror_audio_switch",
+                            onCheckedChange = onSetMirrorAudioShared
+                        )
+
+                        HostPermissionToggleRow(
+                            title = "Allow Private Tab Mirroring",
+                            subtitle = "Off by default — automatically pauses Live Mirror on private tabs",
+                            checked = allowPrivateTabMirroring,
+                            enabled = true,
+                            switchTag = "connect_mirror_private_tab_switch",
+                            onCheckedChange = onSetAllowPrivateTabMirroring
+                        )
+                    } else if (isMirrorActive || isMirrorStarting) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Button(
+                                onClick = {
+                                    onSetViewerMirrorFullscreen(!isViewerMirrorFullscreen)
+                                    if (!isViewerMirrorFullscreen) {
+                                        onToast("Fullscreen Live Mirror active")
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = NyxoraElectricBlue,
+                                    contentColor = Color.White
+                                ),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .testTag("connect_viewer_fullscreen_button")
+                            ) {
+                                Text(
+                                    text = if (isViewerMirrorFullscreen) "Exit Fullscreen" else "Fullscreen Stream",
+                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+
+                            OutlinedButton(
+                                onClick = {
+                                    onSetViewerReturnToBrowseTogether(!isViewerReturnedToBrowseTogether)
+                                },
+                                shape = RoundedCornerShape(10.dp),
+                                border = BorderStroke(1.dp, NyxoraElectricBlue.copy(alpha = 0.65f)),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .testTag("connect_viewer_return_browse_button")
+                            ) {
+                                Text(
+                                    text = if (isViewerReturnedToBrowseTogether) "Watch Live Mirror" else "Return to Browse Together",
+                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+
+                        if (viewerMirrorConnectionState == ViewerMirrorConnectionState.RECONNECTING ||
+                            viewerMirrorConnectionState == ViewerMirrorConnectionState.DISCONNECTED
+                        ) {
+                            OutlinedButton(
+                                onClick = onViewerRequestMirrorReconnect,
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(44.dp)
+                                    .testTag("connect_viewer_reconnect_stream_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.Refresh,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text("Reconnect Live Stream")
+                            }
+                        }
+                    }
+                }
+            }
             }
         }
 

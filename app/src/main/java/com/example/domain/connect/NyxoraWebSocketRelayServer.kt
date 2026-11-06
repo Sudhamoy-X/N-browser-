@@ -22,6 +22,9 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -47,8 +50,17 @@ class NyxoraWebSocketRelayServer {
 
     private val rooms = ConcurrentHashMap<String, HostedRoomContext>()
     private val clients = CopyOnWriteArrayList<ClientSessionConnection>()
-    private val rateLimiter = SlidingWindowRateLimiter(maxEventsPerWindow = 30, windowMillis = 3000L)
+    private val rateLimiter = SlidingWindowRateLimiter(maxEventsPerWindow = 120, windowMillis = 3000L)
     private val deduplicator = BoundedEventDeduplicator(maxCapacity = 1024)
+
+    @Volatile
+    private var configuredShortLivedTurnUrls: List<String> = emptyList()
+
+    @Volatile
+    private var configuredTurnSharedSecret: String = ""
+
+    @Volatile
+    private var configuredTurnTtlSeconds: Long = 3600L
 
     val listeningPort: Int
         get() = serverSocket?.localPort ?: -1
@@ -171,6 +183,21 @@ class NyxoraWebSocketRelayServer {
         }
     }
 
+    /**
+     * Configures short-lived Coturn REST API credentials on this relay server.
+     */
+    fun configureShortLivedTurn(
+        turnUrls: List<String>,
+        sharedSecret: String,
+        ttlSeconds: Long = 3600L
+    ) {
+        configuredShortLivedTurnUrls = turnUrls.mapNotNull {
+            NyxoraWebRtcIceConfigProvider.validateIceServerUri(it, allowStun = false, allowTurn = true)
+        }.distinct()
+        configuredTurnSharedSecret = sharedSecret.trim()
+        configuredTurnTtlSeconds = ttlSeconds.coerceIn(60L, 86_400L)
+    }
+
     @Synchronized
     fun stopServer() {
         if (!running.compareAndSet(true, false)) return
@@ -245,8 +272,15 @@ class NyxoraWebSocketRelayServer {
         val envelope = RealtimeEventEnvelope.fromJsonString(rawText) ?: return
         val now = System.currentTimeMillis()
 
-        // Rate limit check per sender device
-        if (!rateLimiter.tryAcquire(envelope.senderDeviceId, now)) {
+        // Rate limit check per sender device (exempt WebRTC ICE/SDP signaling & session lifecycle frames)
+        val isRateLimitExempt = envelope.type == RealtimeEventType.JOIN_REQUEST ||
+            envelope.type == RealtimeEventType.HEARTBEAT_PING ||
+            envelope.type == RealtimeEventType.MIRROR_SESSION_STATE ||
+            envelope.type == RealtimeEventType.WEBRTC_VIEWER_READY ||
+            envelope.type == RealtimeEventType.WEBRTC_SIGNAL_OFFER ||
+            envelope.type == RealtimeEventType.WEBRTC_SIGNAL_ANSWER ||
+            envelope.type == RealtimeEventType.WEBRTC_SIGNAL_ICE_CANDIDATE
+        if (!isRateLimitExempt && !rateLimiter.tryAcquire(envelope.senderDeviceId, now)) {
             sendPermissionOrRateWarning(conn, envelope.roomId, "RATE_LIMITED", "Too many requests; slowing down")
             return
         }
@@ -484,9 +518,21 @@ class NyxoraWebSocketRelayServer {
                                     else -> m
                                 }
                             }
+                            val resetMode = if (currentRoom.mode == RoomSyncMode.LIVE_MIRROR) {
+                                RoomSyncMode.BROWSE_TOGETHER
+                            } else {
+                                currentRoom.mode
+                            }
                             roomCtx.state = currentRoom.copy(
                                 hostDeviceId = newHostId,
                                 authorityEpoch = nextEpoch,
+                                mode = resetMode,
+                                liveMirrorState = LiveMirrorSessionMetadata(
+                                    mirrorState = LiveMirrorSessionState.BROWSING,
+                                    hostDeviceId = newHostId,
+                                    updatedAtMillis = now,
+                                    sequenceNumber = nextSeq
+                                ),
                                 members = updatedMembers,
                                 lastSequenceNumber = nextSeq
                             )
@@ -732,6 +778,175 @@ class NyxoraWebSocketRelayServer {
                         )
                         broadcastToRoom(normalizedRoomId, broadcastEnv)
                     }
+                }
+                RealtimeEventType.MIRROR_SESSION_STATE -> {
+                    val isHost = envelope.senderDeviceId == currentRoom.hostDeviceId
+                    if (!isHost) {
+                        sendPermissionDenied(
+                            conn = conn,
+                            room = currentRoom,
+                            code = "HOST_ONLY_MIRROR",
+                            message = "Only the room host can start or stop Live Mirror mode."
+                        )
+                        return
+                    }
+                    val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: return
+                    val nextSeq = roomCtx.sequenceGenerator.incrementAndGet()
+                    val parsedMirror = LiveMirrorSessionMetadata.fromJson(payload).copy(
+                        hostDeviceId = currentRoom.hostDeviceId,
+                        updatedAtMillis = now,
+                        sequenceNumber = nextSeq
+                    )
+                    val nextMode = when (parsedMirror.mirrorState) {
+                        LiveMirrorSessionState.MIRROR_STARTING,
+                        LiveMirrorSessionState.MIRROR_LIVE -> RoomSyncMode.LIVE_MIRROR
+                        LiveMirrorSessionState.MIRROR_STOPPING,
+                        LiveMirrorSessionState.BROWSING -> {
+                            if (currentRoom.mode == RoomSyncMode.LIVE_MIRROR) {
+                                RoomSyncMode.BROWSE_TOGETHER
+                            } else {
+                                currentRoom.mode
+                            }
+                        }
+                    }
+                    roomCtx.state = currentRoom.copy(
+                        mode = nextMode,
+                        liveMirrorState = parsedMirror,
+                        lastSequenceNumber = nextSeq
+                    )
+                    val mirrorEnv = createServerSignedEnvelope(
+                        room = roomCtx.state,
+                        seq = nextSeq,
+                        type = RealtimeEventType.MIRROR_SESSION_STATE,
+                        senderId = currentRoom.hostDeviceId,
+                        senderRole = RoomRole.HOST,
+                        payloadJson = parsedMirror.toJson().toString()
+                    )
+                    broadcastToRoom(normalizedRoomId, mirrorEnv)
+                    broadcastSnapshotToRoom(roomCtx)
+                }
+                RealtimeEventType.WEBRTC_VIEWER_READY,
+                RealtimeEventType.WEBRTC_SIGNAL_OFFER,
+                RealtimeEventType.WEBRTC_SIGNAL_ANSWER,
+                RealtimeEventType.WEBRTC_SIGNAL_ICE_CANDIDATE -> {
+                    val isHost = envelope.senderDeviceId == currentRoom.hostDeviceId
+                    if (envelope.type == RealtimeEventType.WEBRTC_SIGNAL_OFFER && !isHost) {
+                        sendPermissionDenied(
+                            conn = conn,
+                            room = currentRoom,
+                            code = "HOST_ONLY_MIRROR",
+                            message = "Only the room host can publish a Live Mirror stream offer."
+                        )
+                        return
+                    }
+                    val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: return
+                    val signal = WebRtcSignalPayload.fromJson(payload)?.copy(
+                        senderDeviceId = envelope.senderDeviceId
+                    ) ?: WebRtcSignalPayload(
+                        mirrorSessionId = payload.optString("mirrorSessionId", currentRoom.liveMirrorState.mirrorSessionId),
+                        senderDeviceId = envelope.senderDeviceId,
+                        targetDeviceId = payload.optString("targetDeviceId", currentRoom.hostDeviceId)
+                    )
+                    val nextSeq = roomCtx.sequenceGenerator.incrementAndGet()
+                    roomCtx.state = currentRoom.copy(lastSequenceNumber = nextSeq)
+                    val signalEnv = createServerSignedEnvelope(
+                        room = roomCtx.state,
+                        seq = nextSeq,
+                        type = envelope.type,
+                        senderId = envelope.senderDeviceId,
+                        senderRole = if (isHost) RoomRole.HOST else RoomRole.PARTICIPANT,
+                        payloadJson = signal.toJson().toString()
+                    )
+                    if (signal.targetDeviceId.isNotBlank()) {
+                        sendToRoomMember(normalizedRoomId, signal.targetDeviceId, signalEnv)
+                    } else {
+                        broadcastToRoom(normalizedRoomId, signalEnv)
+                    }
+                }
+                RealtimeEventType.MIRROR_REMOTE_CONTROL -> {
+                    val isHost = envelope.senderDeviceId == currentRoom.hostDeviceId
+                    val payload = runCatching { JSONObject(envelope.payloadJson) }.getOrNull() ?: return
+                    val actionType = payload.optString("controlActionType", "PLAY_PAUSE").trim().uppercase()
+                    if (!isHost) {
+                        val perms = currentRoom.permissions
+                        val isSeekAction = actionType == "SEEK" || actionType == "REWIND" || actionType == "FORWARD"
+                        val isPlayPauseAction = actionType == "PLAY" || actionType == "PAUSE" || actionType == "PLAY_PAUSE"
+                        val isVolumeAction = actionType == "VOLUME" || actionType == "MUTE"
+                        val isFullscreenAction = actionType == "FULLSCREEN" || actionType == "ORIENTATION"
+                        when {
+                            !perms.allowParticipantControls -> {
+                                sendPermissionDenied(
+                                    conn = conn,
+                                    room = currentRoom,
+                                    code = "PARTICIPANT_CONTROLS_DISABLED",
+                                    message = "Shared controls are disabled by the host — only the host can control shared navigation and playback."
+                                )
+                                return
+                            }
+                            !perms.allowParticipantPlaybackControl -> {
+                                sendPermissionDenied(
+                                    conn = conn,
+                                    room = currentRoom,
+                                    code = "PLAYBACK_CONTROL_DISABLED",
+                                    message = "Shared playback controls are disabled by the host."
+                                )
+                                return
+                            }
+                            isSeekAction && !perms.allowParticipantVideoSeek -> {
+                                sendPermissionDenied(
+                                    conn = conn,
+                                    room = currentRoom,
+                                    code = "VIDEO_SEEK_DISABLED",
+                                    message = "Video seek controls are disabled by the host."
+                                )
+                                return
+                            }
+                            isPlayPauseAction && !perms.allowParticipantVideoPlayPause -> {
+                                sendPermissionDenied(
+                                    conn = conn,
+                                    room = currentRoom,
+                                    code = "VIDEO_PLAY_PAUSE_DISABLED",
+                                    message = "Video play and pause controls are disabled by the host."
+                                )
+                                return
+                            }
+                            isVolumeAction && !perms.allowParticipantVolumeControl -> {
+                                sendPermissionDenied(
+                                    conn = conn,
+                                    room = currentRoom,
+                                    code = "VOLUME_CONTROL_DISABLED",
+                                    message = "Volume control is disabled by the host."
+                                )
+                                return
+                            }
+                            isFullscreenAction && !perms.allowParticipantFullscreenControl -> {
+                                sendPermissionDenied(
+                                    conn = conn,
+                                    room = currentRoom,
+                                    code = "FULLSCREEN_CONTROL_DISABLED",
+                                    message = "Fullscreen and orientation controls are disabled by the host."
+                                )
+                                return
+                            }
+                        }
+                    }
+                    val nextSeq = roomCtx.sequenceGenerator.incrementAndGet()
+                    roomCtx.state = currentRoom.copy(lastSequenceNumber = nextSeq)
+                    val routedPayload = JSONObject(payload.toString()).apply {
+                        put("controlActionType", actionType)
+                        put("initiatedBy", envelope.senderDeviceId)
+                        put("targetHostDeviceId", currentRoom.hostDeviceId)
+                        put("timestampMillis", now)
+                    }
+                    val controlEnv = createServerSignedEnvelope(
+                        room = roomCtx.state,
+                        seq = nextSeq,
+                        type = RealtimeEventType.MIRROR_REMOTE_CONTROL,
+                        senderId = envelope.senderDeviceId,
+                        senderRole = if (isHost) RoomRole.HOST else RoomRole.PARTICIPANT,
+                        payloadJson = routedPayload.toString()
+                    )
+                    sendToRoomMember(normalizedRoomId, currentRoom.hostDeviceId, controlEnv)
                 }
                 RealtimeEventType.CHAT_MESSAGE -> {
                     val isHost = envelope.senderDeviceId == currentRoom.hostDeviceId
@@ -1143,6 +1358,24 @@ class NyxoraWebSocketRelayServer {
         }
     }
 
+    private fun sendToRoomMember(roomId: String, targetDeviceId: String, envelope: RealtimeEventEnvelope) {
+        val json = envelope.toJsonString()
+        var delivered = false
+        for (client in clients) {
+            if (client.authenticated &&
+                client.roomId.equals(roomId, ignoreCase = true) &&
+                client.deviceId == targetDeviceId
+            ) {
+                if (client.sendTextFrame(json)) {
+                    delivered = true
+                }
+            }
+        }
+        if (!delivered) {
+            broadcastToRoom(roomId, envelope)
+        }
+    }
+
     private fun sendRejectEvent(conn: ClientSessionConnection, roomId: String, errorCode: String, message: String) {
         val payload = JSONObject()
             .put("code", errorCode)
@@ -1212,6 +1445,7 @@ class NyxoraWebSocketRelayServer {
     private fun performWebSocketHandshake(input: InputStream, output: OutputStream): Boolean {
         val headers = mutableMapOf<String, String>()
         val lineBuffer = ByteArrayOutputStream()
+        var requestLine = ""
         var requestLineRead = false
         while (true) {
             val b = input.read()
@@ -1221,6 +1455,7 @@ class NyxoraWebSocketRelayServer {
                 lineBuffer.reset()
                 if (!requestLineRead) {
                     if (!line.startsWith("GET ", ignoreCase = true)) return false
+                    requestLine = line
                     requestLineRead = true
                 } else if (line.isEmpty()) {
                     break
@@ -1238,6 +1473,12 @@ class NyxoraWebSocketRelayServer {
             }
         }
 
+        val requestTarget = requestLine.substringAfter("GET ", "").substringBefore(' ').trim()
+        if (requestTarget.startsWith("/api/webrtc/ice-config")) {
+            handleHttpIceConfigRequest(requestTarget, headers, output)
+            return false
+        }
+
         val wsKey = headers["sec-websocket-key"] ?: return false
         val acceptConcat = wsKey + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
         val sha1 = MessageDigest.getInstance("SHA-1").digest(acceptConcat.toByteArray(Charsets.US_ASCII))
@@ -1253,6 +1494,92 @@ class NyxoraWebSocketRelayServer {
         output.write(response.toByteArray(Charsets.US_ASCII))
         output.flush()
         return true
+    }
+
+    private fun handleHttpIceConfigRequest(
+        requestTarget: String,
+        headers: Map<String, String>,
+        output: OutputStream
+    ) {
+        val roomId = headers["x-nyxora-room"]?.trim()?.uppercase().orEmpty()
+        val deviceId = headers["x-nyxora-device"]?.trim().orEmpty()
+        val tsMillis = headers["x-nyxora-timestamp"]?.trim()?.toLongOrNull() ?: 0L
+        val signature = headers["x-nyxora-signature"]?.trim()?.lowercase().orEmpty()
+
+        val roomCtx = rooms[roomId]
+        val derivedSecret = NyxoraConnectSecurity.deriveRoomCodeHandshakeKey(roomId)
+        val roomAccessKey = roomCtx?.state?.accessKey.orEmpty()
+
+        val expectedDerivedSig = if (derivedSecret.isNotBlank()) {
+            NyxoraWebRtcIceConfigProvider.computeTurnConfigRequestHmac(derivedSecret, roomId, deviceId, tsMillis)
+        } else ""
+        val expectedRoomSig = if (roomAccessKey.isNotBlank()) {
+            NyxoraWebRtcIceConfigProvider.computeTurnConfigRequestHmac(roomAccessKey, roomId, deviceId, tsMillis)
+        } else ""
+
+        val isAuthorized = roomId.isNotEmpty() &&
+            deviceId.isNotEmpty() &&
+            signature.length == 64 &&
+            ((expectedDerivedSig.isNotEmpty() && MessageDigest.isEqual(expectedDerivedSig.toByteArray(), signature.toByteArray())) ||
+                (expectedRoomSig.isNotEmpty() && MessageDigest.isEqual(expectedRoomSig.toByteArray(), signature.toByteArray())))
+
+        if (!isAuthorized) {
+            val errJson = JSONObject().put("error", "Unauthorized ICE configuration request").toString()
+            writeHttpJsonResponse(output, 401, "Unauthorized", errJson)
+            return
+        }
+
+        val now = System.currentTimeMillis()
+        val ttlSec = configuredTurnTtlSeconds
+        val expiresAtMillis = now + (ttlSec * 1000L)
+        val expiresAtEpochSec = expiresAtMillis / 1000L
+
+        val turnUrls = configuredShortLivedTurnUrls
+        val sharedSecret = configuredTurnSharedSecret
+        val stunArr = JSONArray().put(NyxoraWebRtcIceConfigProvider.DEFAULT_GOOGLE_STUN_URL)
+        val responseObj = JSONObject().apply {
+            put("stunUrls", stunArr)
+            if (turnUrls.isNotEmpty() && sharedSecret.isNotBlank()) {
+                val turnArr = JSONArray()
+                for (u in turnUrls) turnArr.put(u)
+                val ephemeralUsername = "$expiresAtEpochSec:$roomId:$deviceId"
+                val mac = Mac.getInstance("HmacSHA1")
+                mac.init(SecretKeySpec(sharedSecret.toByteArray(Charsets.UTF_8), "HmacSHA1"))
+                val ephemeralCredential = Base64.getEncoder().encodeToString(
+                    mac.doFinal(ephemeralUsername.toByteArray(Charsets.UTF_8))
+                )
+                put("turnUrls", turnArr)
+                put("turnUsername", ephemeralUsername)
+                put("turnCredential", ephemeralCredential)
+                put("ttlSeconds", ttlSec)
+                put("expiresAtMillis", expiresAtMillis)
+                put("turnConfigured", true)
+            } else {
+                put("turnUrls", JSONArray())
+                put("turnConfigured", false)
+            }
+        }
+        writeHttpJsonResponse(output, 200, "OK", responseObj.toString())
+    }
+
+    private fun writeHttpJsonResponse(
+        output: OutputStream,
+        statusCode: Int,
+        statusMessage: String,
+        bodyJson: String
+    ) {
+        val bodyBytes = bodyJson.toByteArray(Charsets.UTF_8)
+        val headerText = buildString {
+            append("HTTP/1.1 $statusCode $statusMessage\r\n")
+            append("Content-Type: application/json; charset=utf-8\r\n")
+            append("Cache-Control: no-store\r\n")
+            append("Content-Length: ${bodyBytes.size}\r\n")
+            append("Connection: close\r\n")
+            append("\r\n")
+        }
+        output.write(headerText.toByteArray(Charsets.US_ASCII))
+        output.write(bodyBytes)
+        output.flush()
     }
 
     private fun readWebSocketFrame(input: InputStream): WebSocketFrame? {
@@ -1277,7 +1604,7 @@ class NyxoraWebSocketRelayServer {
             payloadLen = length
         }
 
-        if (payloadLen < 0L || payloadLen > 16384L) {
+        if (payloadLen < 0L || payloadLen > 32768L) {
             return null
         }
 

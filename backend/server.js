@@ -23,8 +23,8 @@ function redactSecretsForLog(message) {
   if (!message) return '';
   return String(message)
     .replace(/(https?:\/\/)([^/\s:@]+:[^/\s@]+)@/gi, '$1[REDACTED]@')
-    .replace(/(inv|key|token|access_key|access_token|id_token|refresh_token|password|passwd|pwd|secret|client_secret|session_id|api_key|apikey|bearer)=([^&\s"']+)/gi, '$1=[REDACTED]')
-    .replace(/"(accessKey|inviteToken|hmacSignature|handshakeSecret|password|secret|token)"\s*:\s*"([^"]+)"/gi, '"$1":"[REDACTED]"')
+    .replace(/(inv|key|token|access_key|access_token|id_token|refresh_token|password|passwd|pwd|secret|client_secret|session_id|api_key|apikey|bearer|turn_credential|turncredential)=([^&\s"']+)/gi, '$1=[REDACTED]')
+    .replace(/"(accessKey|inviteToken|hmacSignature|handshakeSecret|password|secret|token|turnCredential|turnPassword|iceCredential)"\s*:\s*"([^"]+)"/gi, '"$1":"[REDACTED]"')
     .replace(/\bINV[A-Z0-9]{5,20}\.\d+\.[01]\.[0-9a-fA-F]{8,128}\b/gi, '[REDACTED_TOKEN]')
     .replace(/Bearer\s+[A-Za-z0-9\-_.=]+/gi, 'Bearer [REDACTED]')
     .replace(/\b[0-9a-fA-F]{64}\b/g, '[REDACTED_HMAC]')
@@ -430,6 +430,24 @@ function createNyxoraConnectServer(options = {}) {
     });
   }
 
+  function defaultLiveMirrorState(hostDeviceId = '') {
+    return {
+      mirrorState: 'BROWSING',
+      hostDeviceId: String(hostDeviceId || ''),
+      mirrorSessionId: '',
+      isAudioShared: true,
+      qualityProfile: 'HIGH_SMOOTH',
+      streamWidth: 1280,
+      streamHeight: 720,
+      targetFps: 30,
+      maxBitrateKbps: 1800,
+      isProtectedContentWarning: false,
+      protectedContentMessage: '',
+      updatedAtMillis: 0,
+      sequenceNumber: 0
+    };
+  }
+
   function toSnapshotObject(roomState, includeAccessKey = false) {
     const obj = {
       roomId: roomState.roomId,
@@ -443,6 +461,7 @@ function createNyxoraConnectServer(options = {}) {
       members: roomState.members || [],
       currentSyncedUrl: roomState.currentSyncedUrl || '',
       currentSyncedTitle: roomState.currentSyncedTitle || '',
+      liveMirrorState: roomState.liveMirrorState || defaultLiveMirrorState(roomState.hostDeviceId),
       chatMessages: Array.isArray(roomState.chatMessages) ? roomState.chatMessages.slice(-100) : [],
       createdAtMillis: roomState.createdAtMillis || Date.now(),
       expiresAtMillis: roomState.expiresAtMillis || (Date.now() + DEFAULT_ROOM_TTL_MS),
@@ -462,6 +481,19 @@ function createNyxoraConnectServer(options = {}) {
       if (client.roomId === roomId && client !== excludeClient) {
         client.sendText(textFrame);
       }
+    }
+  }
+
+  function sendToRoomMember(roomId, targetDeviceId, textFrame) {
+    let delivered = false;
+    for (const client of clients) {
+      if (client.roomId === roomId && client.deviceId === targetDeviceId) {
+        client.sendText(textFrame);
+        delivered = true;
+      }
+    }
+    if (!delivered) {
+      broadcastToRoom(roomId, textFrame, null);
     }
   }
 
@@ -538,7 +570,7 @@ function createNyxoraConnectServer(options = {}) {
   }
 
   function handleIncomingFrame(client, rawText) {
-    if (!rawText || rawText.length > 8192) return;
+    if (!rawText || rawText.length > 32768) return;
     let envelope;
     try {
       envelope = JSON.parse(rawText);
@@ -599,13 +631,14 @@ function createNyxoraConnectServer(options = {}) {
         if (candidateKey &&
             (timingSafeHexEqual(expectedHmac, envelope.hmacSignature) ||
              (expectedDerivedHmac && timingSafeHexEqual(expectedDerivedHmac, envelope.hmacSignature)))) {
+          const initialHostId = String(snap.hostDeviceId || envelope.senderDeviceId);
           roomCtx = {
             state: {
               roomId: normalizedRoomId,
               roomName: String(snap.roomName || 'NYXORA Room').slice(0, 48),
               accessKey: candidateKey,
               endpointUrl: String(snap.endpointUrl || ''),
-              hostDeviceId: String(snap.hostDeviceId || envelope.senderDeviceId),
+              hostDeviceId: initialHostId,
               authorityEpoch: Number(snap.authorityEpoch || 1),
               mode: snap.mode || 'BROWSE_TOGETHER',
               isSyncActive: snap.isSyncActive !== false,
@@ -614,6 +647,7 @@ function createNyxoraConnectServer(options = {}) {
               currentSyncedUrl: String(snap.currentSyncedUrl || ''),
               currentSyncedTitle: String(snap.currentSyncedTitle || ''),
               playbackState: snap.playbackState || null,
+              liveMirrorState: snap.liveMirrorState || defaultLiveMirrorState(initialHostId),
               chatMessages: Array.isArray(snap.chatMessages) ? snap.chatMessages.slice(-100) : [],
               createdAtMillis: Number(snap.createdAtMillis || now),
               expiresAtMillis: Math.max(Number(snap.expiresAtMillis || (now + DEFAULT_ROOM_TTL_MS)), now + 30 * 60 * 1000),
@@ -1154,12 +1188,145 @@ function createNyxoraConnectServer(options = {}) {
         if (targetId && (roomCtx.state.members || []).some((m) => m.deviceId === targetId)) {
           roomCtx.state.hostDeviceId = targetId;
           roomCtx.state.authorityEpoch = (roomCtx.state.authorityEpoch || 1) + 1;
+          if (roomCtx.state.mode === 'LIVE_MIRROR') {
+            roomCtx.state.mode = 'BROWSE_TOGETHER';
+          }
+          roomCtx.state.liveMirrorState = defaultLiveMirrorState(targetId);
           roomCtx.state.members = (roomCtx.state.members || []).map((m) => ({
             ...m,
             role: m.deviceId === targetId ? 'HOST' : 'PARTICIPANT'
           }));
           broadcastRoomSnapshot(roomCtx);
         }
+        break;
+      }
+      case 'MIRROR_SESSION_STATE': {
+        if (!isHostSender) {
+          const deniedFrame = createServerSignedEnvelope(roomCtx.state, 'PERMISSION_DENIED', {
+            code: 'HOST_ONLY_MIRROR',
+            message: 'Only the room host can start or stop Live Mirror mode.',
+            permissions: perms
+          });
+          client.sendText(deniedFrame);
+          break;
+        }
+        const mirrorStateStr = String(payloadObj.mirrorState || payloadObj.sessionState || 'BROWSING').toUpperCase();
+        const validStates = new Set(['BROWSING', 'MIRROR_STARTING', 'MIRROR_LIVE', 'MIRROR_STOPPING']);
+        const normalizedMirrorState = validStates.has(mirrorStateStr) ? mirrorStateStr : 'BROWSING';
+        const nextMirror = {
+          mirrorState: normalizedMirrorState,
+          sessionState: normalizedMirrorState,
+          hostDeviceId: roomCtx.state.hostDeviceId,
+          hostDeviceName: String(payloadObj.hostDeviceName || authenticatedMember.deviceName || 'Host').slice(0, 36),
+          mirrorSessionId: String(payloadObj.mirrorSessionId || ''),
+          isAudioShared: payloadObj.isAudioShared !== false,
+          qualityProfile: String(payloadObj.qualityProfile || 'HIGH_SMOOTH'),
+          streamWidth: Math.min(1920, Math.max(320, Number(payloadObj.streamWidth || 1280))),
+          streamHeight: Math.min(1920, Math.max(240, Number(payloadObj.streamHeight || 720))),
+          targetFps: Math.min(60, Math.max(10, Number(payloadObj.targetFps || 30))),
+          maxBitrateKbps: Math.min(4000, Math.max(250, Number(payloadObj.maxBitrateKbps || 1800))),
+          isProtectedContentWarning: Boolean(payloadObj.isProtectedContentWarning),
+          protectedContentMessage: String(payloadObj.protectedContentMessage || ''),
+          updatedAtMillis: now,
+          sequenceNumber: (roomCtx.state.lastSequenceNumber || 1) + 1
+        };
+        roomCtx.state.liveMirrorState = nextMirror;
+        if (normalizedMirrorState === 'MIRROR_STARTING' || normalizedMirrorState === 'MIRROR_LIVE') {
+          roomCtx.state.mode = 'LIVE_MIRROR';
+        } else if (roomCtx.state.mode === 'LIVE_MIRROR') {
+          roomCtx.state.mode = 'BROWSE_TOGETHER';
+        }
+        const mirrorFrame = createServerSignedEnvelope(roomCtx.state, 'MIRROR_SESSION_STATE', nextMirror);
+        broadcastToRoom(normalizedRoomId, mirrorFrame, null);
+        broadcastRoomSnapshot(roomCtx);
+        break;
+      }
+      case 'WEBRTC_VIEWER_READY':
+      case 'WEBRTC_SIGNAL_OFFER':
+      case 'WEBRTC_SIGNAL_ANSWER':
+      case 'WEBRTC_SIGNAL_ICE_CANDIDATE': {
+        if (envelope.type === 'WEBRTC_SIGNAL_OFFER' && !isHostSender) {
+          const deniedFrame = createServerSignedEnvelope(roomCtx.state, 'PERMISSION_DENIED', {
+            code: 'HOST_ONLY_MIRROR',
+            message: 'Only the room host can publish a Live Mirror stream offer.',
+            permissions: perms
+          });
+          client.sendText(deniedFrame);
+          break;
+        }
+        const targetDeviceId = String(payloadObj.targetDeviceId || '').trim();
+        const signalPayload = {
+          mirrorSessionId: String(payloadObj.mirrorSessionId || (roomCtx.state.liveMirrorState && roomCtx.state.liveMirrorState.mirrorSessionId) || ''),
+          senderDeviceId: envelope.senderDeviceId,
+          targetDeviceId,
+          sdpType: String(payloadObj.sdpType || ''),
+          sdp: String(payloadObj.sdp || ''),
+          sdpMid: String(payloadObj.sdpMid || ''),
+          sdpMLineIndex: Number(payloadObj.sdpMLineIndex || 0),
+          candidate: String(payloadObj.candidate || '')
+        };
+        const signalFrame = createServerSignedEnvelope(roomCtx.state, envelope.type, signalPayload);
+        if (targetDeviceId) {
+          sendToRoomMember(normalizedRoomId, targetDeviceId, signalFrame);
+        } else {
+          broadcastToRoom(normalizedRoomId, signalFrame, null);
+        }
+        break;
+      }
+      case 'MIRROR_REMOTE_CONTROL': {
+        const actionKind = String(payloadObj.controlActionType || payloadObj.actionType || 'PLAY_PAUSE').toUpperCase();
+        if (!isHostSender) {
+          const specificAllowed = (() => {
+            if (!perms.allowParticipantControls) return false;
+            switch (actionKind) {
+              case 'PLAY':
+              case 'PAUSE':
+              case 'PLAY_PAUSE':
+                return perms.allowParticipantPlaybackControl && perms.allowParticipantVideoPlayPause;
+              case 'SEEK':
+              case 'REWIND':
+              case 'FORWARD':
+                return perms.allowParticipantPlaybackControl && perms.allowParticipantVideoSeek;
+              case 'VOLUME':
+              case 'MUTE':
+                return perms.allowParticipantPlaybackControl && perms.allowParticipantVolumeControl;
+              case 'FULLSCREEN':
+              case 'ORIENTATION':
+                return perms.allowParticipantPlaybackControl && perms.allowParticipantFullscreenControl;
+              default:
+                return perms.allowParticipantPlaybackControl;
+            }
+          })();
+          if (!specificAllowed) {
+            const denyCode = !perms.allowParticipantControls
+              ? 'PARTICIPANT_CONTROLS_DISABLED'
+              : (!perms.allowParticipantPlaybackControl
+                  ? 'PLAYBACK_CONTROL_DISABLED'
+                  : (actionKind === 'SEEK' || actionKind === 'REWIND' || actionKind === 'FORWARD'
+                      ? 'VIDEO_SEEK_DISABLED'
+                      : (actionKind === 'VOLUME' || actionKind === 'MUTE'
+                          ? 'VOLUME_CONTROL_DISABLED'
+                          : (actionKind === 'FULLSCREEN' || actionKind === 'ORIENTATION'
+                              ? 'FULLSCREEN_CONTROL_DISABLED'
+                              : 'VIDEO_PLAY_PAUSE_DISABLED'))));
+            const deniedFrame = createServerSignedEnvelope(roomCtx.state, 'PERMISSION_DENIED', {
+              code: denyCode,
+              message: 'Shared playback control is restricted by the host.',
+              permissions: perms
+            });
+            client.sendText(deniedFrame);
+            break;
+          }
+        }
+        const routedPayload = {
+          ...payloadObj,
+          controlActionType: actionKind,
+          initiatedBy: envelope.senderDeviceId,
+          targetHostDeviceId: roomCtx.state.hostDeviceId,
+          timestampMillis: now
+        };
+        const controlFrame = createServerSignedEnvelope(roomCtx.state, 'MIRROR_REMOTE_CONTROL', routedPayload);
+        sendToRoomMember(normalizedRoomId, roomCtx.state.hostDeviceId, controlFrame);
         break;
       }
       case 'PARTICIPANT_FOLLOW_STATE': {
@@ -1212,6 +1379,79 @@ function createNyxoraConnectServer(options = {}) {
       ];
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify(assetLinks, null, 2));
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/api/webrtc/ice-config') {
+      const roomParam = String(req.headers['x-nyxora-room'] || reqUrl.searchParams.get('room') || '').trim().toUpperCase();
+      const deviceParam = String(req.headers['x-nyxora-device'] || reqUrl.searchParams.get('device') || '').trim();
+      const tsMillis = Number(req.headers['x-nyxora-timestamp'] || reqUrl.searchParams.get('ts') || 0);
+      const signature = String(req.headers['x-nyxora-signature'] || '').trim().toLowerCase();
+
+      if (!ROOM_ID_REGEX.test(roomParam) || !deviceParam || !Number.isFinite(tsMillis) || !HEX_64_REGEX.test(signature)) {
+        res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ error: 'Unauthorized ICE configuration request' }));
+        return;
+      }
+
+      const activeRoom = rooms.get(roomParam);
+      const derivedKey = deriveRoomCodeHandshakeKey(roomParam);
+      const roomAccessKey = activeRoom && activeRoom.state ? String(activeRoom.state.accessKey || '') : '';
+      const canonical = `NYXORA_TURN_CRED_V1|${roomParam}|${deviceParam}|${tsMillis}`;
+
+      const expectedDerived = derivedKey
+        ? crypto.createHmac('sha256', Buffer.from(derivedKey, 'utf8')).update(canonical, 'utf8').digest('hex')
+        : '';
+      const expectedRoom = roomAccessKey
+        ? crypto.createHmac('sha256', Buffer.from(roomAccessKey.trim().toUpperCase(), 'utf8')).update(canonical, 'utf8').digest('hex')
+        : '';
+
+      const authorized = (expectedDerived && timingSafeHexEqual(expectedDerived, signature)) ||
+        (expectedRoom && timingSafeHexEqual(expectedRoom, signature));
+      if (!authorized) {
+        res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ error: 'Invalid ICE configuration signature' }));
+        return;
+      }
+
+      const rawStunCsv = String(options.stunUrls || process.env.NYXORA_WEBRTC_STUN_URLS || 'stun:stun.l.google.com:19302');
+      const stunUrls = rawStunCsv.split(/[,;]/).map((s) => s.trim()).filter((s) => /^stuns?:[^/\s]+$/i.test(s));
+      const effectiveStunUrls = stunUrls.length > 0 ? stunUrls : ['stun:stun.l.google.com:19302'];
+
+      const rawTurnCsv = String(options.turnUrls || process.env.NYXORA_WEBRTC_TURN_URLS || '');
+      const turnUrls = rawTurnCsv.split(/[,;]/).map((s) => s.trim()).filter((s) => /^turns?:[^/\s]+$/i.test(s) && !/^unconfigured$/i.test(s));
+      const turnSharedSecret = String(options.turnSharedSecret || process.env.NYXORA_WEBRTC_TURN_SHARED_SECRET || '').trim();
+      const staticTurnUser = String(options.turnUsername || process.env.NYXORA_WEBRTC_TURN_USERNAME || '').trim();
+      const staticTurnCred = String(options.turnCredential || process.env.NYXORA_WEBRTC_TURN_CREDENTIAL || '').trim();
+      const ttlSeconds = Math.min(86400, Math.max(60, Number(options.turnTtlSeconds || process.env.NYXORA_WEBRTC_TURN_TTL_SECONDS || 3600)));
+      const now = Date.now();
+      const expiresAtMillis = now + ttlSeconds * 1000;
+      const expiresAtEpochSec = Math.floor(expiresAtMillis / 1000);
+
+      let turnUsername = '';
+      let turnCredential = '';
+      if (turnUrls.length > 0 && turnSharedSecret) {
+        turnUsername = `${expiresAtEpochSec}:${roomParam}:${deviceParam}`;
+        turnCredential = crypto.createHmac('sha1', Buffer.from(turnSharedSecret, 'utf8'))
+          .update(turnUsername, 'utf8')
+          .digest('base64');
+      } else if (turnUrls.length > 0 && staticTurnUser && staticTurnCred &&
+                 !/^unconfigured$/i.test(staticTurnUser) && !/^unconfigured$/i.test(staticTurnCred)) {
+        turnUsername = staticTurnUser;
+        turnCredential = staticTurnCred;
+      }
+
+      const isTurnConfigured = turnUrls.length > 0 && Boolean(turnUsername) && Boolean(turnCredential);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({
+        stunUrls: effectiveStunUrls,
+        turnUrls: isTurnConfigured ? turnUrls : [],
+        turnUsername: isTurnConfigured ? turnUsername : '',
+        turnCredential: isTurnConfigured ? turnCredential : '',
+        ttlSeconds,
+        expiresAtMillis,
+        turnConfigured: isTurnConfigured
+      }));
       return;
     }
 

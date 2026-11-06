@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
@@ -63,6 +64,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarData
 import androidx.compose.material3.SnackbarDuration
@@ -106,17 +108,34 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import android.media.projection.MediaProjectionManager
+import androidx.compose.material.icons.outlined.CastConnected
+import androidx.compose.material.icons.outlined.Forward10
+import androidx.compose.material.icons.outlined.Fullscreen
+import androidx.compose.material.icons.outlined.FullscreenExit
+import androidx.compose.material.icons.outlined.Pause
+import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Replay10
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.domain.connect.IncomingRemoteSyncCommand
+import com.example.domain.connect.LiveMirrorSessionMetadata
 import com.example.domain.connect.NyxoraConnectNotificationHelper
+import com.example.domain.connect.NyxoraWebRtcMirrorEngine
 import com.example.domain.connect.PlaybackCorrectionDecision
 import com.example.domain.connect.RoomSyncMode
 import com.example.domain.connect.SyncConnectionStatus
+import com.example.domain.connect.VideoCompatibilityState
+import com.example.domain.connect.ViewerMirrorConnectionState
 import com.example.domain.connect.WatchTogetherMediaBridge
 import com.example.domain.update.ApkUpdateUiState
 import com.example.ui.components.rememberNyxoraBrowserMomentumConnection
+import com.example.ui.theme.NyxoraDangerRed
 import com.example.ui.theme.NyxoraElectricBlue
 import com.example.ui.theme.NyxoraIncognitoPurple
+import com.example.ui.theme.NyxoraSuccessGreen
+import com.example.ui.theme.NyxoraWarningAmber
 import com.example.ui.viewmodel.NyxoraBrowserViewModel
 import com.example.ui.viewmodel.OverlaySheet
 import kotlin.math.abs
@@ -183,6 +202,13 @@ fun NyxoraMainBrowserScreen(
     val isChatOverlayExpanded by viewModel.connectManager.isChatOverlayExpanded.collectAsStateWithLifecycle()
     val isChatBubbleDismissed by viewModel.connectManager.isChatBubbleDismissed.collectAsStateWithLifecycle()
     val participantControlsDisabledNotice by viewModel.connectManager.participantControlsDisabledNotice.collectAsStateWithLifecycle()
+    val liveMirrorState by viewModel.connectManager.liveMirrorState.collectAsStateWithLifecycle()
+    val viewerMirrorConnectionState by viewModel.connectManager.viewerMirrorConnectionState.collectAsStateWithLifecycle()
+    val isViewerReturnedToBrowseTogether by viewModel.connectManager.isViewerReturnedToBrowseTogether.collectAsStateWithLifecycle()
+    val isViewerMirrorFullscreen by viewModel.connectManager.isViewerMirrorFullscreen.collectAsStateWithLifecycle()
+    val allowPrivateTabMirroring by viewModel.connectManager.allowPrivateTabMirroring.collectAsStateWithLifecycle()
+    val isMirrorPausedForPrivateTab by viewModel.connectManager.isMirrorPausedForPrivateTab.collectAsStateWithLifecycle()
+    val viewerRenderedFrameCount by viewModel.connectManager.viewerRenderedFrameCount.collectAsStateWithLifecycle()
 
     val updateMgr = viewModel.apkUpdateManager
     val apkUpdateState by if (updateMgr != null) {
@@ -232,6 +258,33 @@ fun NyxoraMainBrowserScreen(
     ) { uri: Uri? ->
         if (uri != null) {
             viewModel.openLocalUriInBrowser(context, uri, null)
+        }
+    }
+
+    val mediaProjectionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        viewModel.onHostMediaProjectionResult(
+            context = context,
+            resultCode = result.resultCode,
+            data = result.data
+        )
+    }
+
+    val requestStartHostLiveMirror: () -> Unit = {
+        val ready = viewModel.prepareHostLiveMirrorLaunch(context)
+        if (ready) {
+            val projectionMgr = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
+            val captureIntent = runCatching { projectionMgr?.createScreenCaptureIntent() }.getOrNull()
+            if (captureIntent != null) {
+                runCatching {
+                    mediaProjectionLauncher.launch(captureIntent)
+                }.onFailure {
+                    viewModel.onHostMediaProjectionResult(context, android.app.Activity.RESULT_CANCELED, null)
+                }
+            } else {
+                viewModel.onHostMediaProjectionResult(context, android.app.Activity.RESULT_OK, Intent())
+            }
         }
     }
 
@@ -298,22 +351,29 @@ fun NyxoraMainBrowserScreen(
         val room = connectRoomState
         if (room != null && !isPrivateMode && !activeTab.isHomePage) {
             while (isActive) {
-                primaryController.probeWatchTogetherMedia { compat, curTime, dur, isPaused, rate ->
-                    viewModel.connectManager.updateVideoCompatibility(compat)
-                    if (compat.supportsDirectSync &&
-                        room.hostDeviceId == viewModel.connectManager.localDeviceId &&
-                        room.isSyncActive
-                    ) {
-                        viewModel.connectManager.publishPlaybackEvent(
-                            pageUrl = activeTab.url,
-                            isPlaying = !isPaused,
-                            positionSeconds = curTime,
-                            durationSeconds = dur,
-                            playbackRate = rate,
-                            isBeacon = true,
-                            isPrivateTab = activeTab.isPrivate,
-                            isPrivateMode = isPrivateMode
-                        )
+                if (!viewModel.connectManager.isViewerActivelyWatchingMirror) {
+                    primaryController.probeWatchTogetherMedia { compat, curTime, dur, isPaused, rate ->
+                        viewModel.connectManager.updateVideoCompatibility(compat)
+                        if (room.hostDeviceId == viewModel.connectManager.localDeviceId) {
+                            viewModel.connectManager.setMirrorProtectedContentWarning(
+                                compat == VideoCompatibilityState.DRM_PROTECTED_UNSUPPORTED
+                            )
+                        }
+                        if (compat.supportsDirectSync &&
+                            room.hostDeviceId == viewModel.connectManager.localDeviceId &&
+                            room.isSyncActive
+                        ) {
+                            viewModel.connectManager.publishPlaybackEvent(
+                                pageUrl = activeTab.url,
+                                isPlaying = !isPaused,
+                                positionSeconds = curTime,
+                                durationSeconds = dur,
+                                playbackRate = rate,
+                                isBeacon = true,
+                                isPrivateTab = activeTab.isPrivate,
+                                isPrivateMode = isPrivateMode
+                            )
+                        }
                     }
                 }
                 delay(2500L)
@@ -423,6 +483,47 @@ fun NyxoraMainBrowserScreen(
                         }
                     }
                 }
+                is IncomingRemoteSyncCommand.ExecuteHostMirrorRemoteControl -> {
+                    val currentRoom = viewModel.connectManager.roomState.value
+                    val currentPb = currentRoom?.playbackState
+                    val isSeek = cmd.actionType in setOf("SEEK", "REWIND", "FORWARD")
+                    val shouldPlay = when (cmd.actionType) {
+                        "PLAY" -> true
+                        "PAUSE" -> false
+                        "PLAY_PAUSE" -> !(currentPb?.isPlaying ?: false)
+                        else -> currentPb?.isPlaying ?: true
+                    }
+                    val seekDelta = when (cmd.actionType) {
+                        "REWIND" -> cmd.seekDeltaSeconds ?: -10.0
+                        "FORWARD" -> cmd.seekDeltaSeconds ?: 10.0
+                        "SEEK" -> cmd.seekDeltaSeconds ?: 0.0
+                        else -> null
+                    }
+                    val currentCompat = viewModel.connectManager.videoCompatibility.value
+                    primaryController.executeWatchTogetherControl(
+                        shouldPlay = shouldPlay,
+                        seekDeltaSeconds = seekDelta,
+                        currentRoomPlayback = currentPb,
+                        currentCompatibility = currentCompat
+                    ) { result ->
+                        viewModel.connectManager.updateVideoCompatibility(result.compatibility)
+                        val targetPageUrl = currentTab.url.takeIf { !currentTab.isHomePage && it.isNotBlank() }
+                            ?: currentPb?.pageUrl?.takeIf { it.isNotBlank() }
+                            ?: currentRoom?.currentSyncedUrl?.takeIf { it.isNotBlank() }
+                            ?: "https://example.com/watch"
+                        viewModel.connectManager.publishPlaybackEvent(
+                            pageUrl = targetPageUrl,
+                            isPlaying = result.isPlaying,
+                            positionSeconds = result.positionSeconds,
+                            durationSeconds = result.durationSeconds,
+                            playbackRate = result.playbackRate,
+                            isBeacon = false,
+                            isPrivateTab = currentTab.isPrivate,
+                            isPrivateMode = viewModel.isPrivateMode.value,
+                            controlActionType = if (isSeek) "SEEK" else "PLAY_PAUSE"
+                        )
+                    }
+                }
             }
         }
     }
@@ -461,7 +562,15 @@ fun NyxoraMainBrowserScreen(
         currentModeTabs.size.coerceAtLeast(1)
     }
 
-    val isFullscreenVideo = primaryController.isFullscreen || splitController.isFullscreen
+    val isViewerWatchingLiveMirror = connectRoomState != null &&
+        connectRoomState?.hostDeviceId != viewModel.connectManager.localDeviceId &&
+        liveMirrorState.isMirrorLive &&
+        !isViewerReturnedToBrowseTogether &&
+        !isPrivateMode
+
+    val isFullscreenVideo = primaryController.isFullscreen ||
+        splitController.isFullscreen ||
+        (isViewerWatchingLiveMirror && isViewerMirrorFullscreen)
 
     LaunchedEffect(isFullscreenVideo) {
         if (isFullscreenVideo && isConnectBannerExpanded) {
@@ -553,7 +662,9 @@ fun NyxoraMainBrowserScreen(
         viewModel.handleSystemBack(
             isFullscreenVideo = isFullscreenVideo,
             onExitFullscreen = {
-                if (!primaryController.exitFullscreen()) {
+                if (isViewerMirrorFullscreen) {
+                    viewModel.connectManager.setViewerMirrorFullscreen(false)
+                } else if (!primaryController.exitFullscreen()) {
                     splitController.exitFullscreen()
                 }
             },
@@ -859,6 +970,55 @@ fun NyxoraMainBrowserScreen(
                 PrivatePinLockView(
                     onVerifyPin = { pin -> viewModel.unlockPrivateTabsWithPin(pin) },
                     onExitPrivate = { viewModel.switchBrowsingMode(false) }
+                )
+            } else if (isViewerWatchingLiveMirror) {
+                val activeRoomRef = connectRoomState
+                val canViewerPlayPause = activeRoomRef?.permissions?.canParticipantPlayPauseVideo == true
+                val canViewerSeek = activeRoomRef?.permissions?.canParticipantSeekVideo == true
+                val isPlayingOnHost = activeRoomRef?.playbackState?.isPlaying == true
+                NyxoraLiveMirrorViewerViewport(
+                    mirrorEngine = viewModel.connectManager.webRtcMirrorEngine,
+                    liveMirrorState = liveMirrorState,
+                    connectionState = viewerMirrorConnectionState,
+                    renderedFrameCount = viewerRenderedFrameCount,
+                    isFullscreen = isViewerMirrorFullscreen,
+                    isHostPlaying = isPlayingOnHost,
+                    canPlayPause = canViewerPlayPause,
+                    canSeek = canViewerSeek,
+                    onToggleFullscreen = {
+                        viewModel.connectManager.setViewerMirrorFullscreen(!isViewerMirrorFullscreen)
+                    },
+                    onReturnToBrowseTogether = {
+                        viewModel.connectManager.setViewerReturnToBrowseTogether(true)
+                        viewModel.emitToast("Returned to Browse Together mode")
+                    },
+                    onReconnectStream = {
+                        viewModel.connectManager.requestViewerMirrorReconnect()
+                        viewModel.emitToast("Reconnecting to Host live stream…")
+                    },
+                    onRemotePlayPause = {
+                        val ok = viewModel.connectManager.sendViewerMirrorRemoteControl(
+                            actionType = if (isPlayingOnHost) "PAUSE" else "PLAY"
+                        )
+                        if (!ok) {
+                            viewModel.emitToast(
+                                viewModel.connectManager.participantControlsDisabledNotice.value
+                                    ?: "Video play/pause controls are disabled by the host"
+                            )
+                        }
+                    },
+                    onRemoteSeekDelta = { deltaSec ->
+                        val ok = viewModel.connectManager.sendViewerMirrorRemoteControl(
+                            actionType = if (deltaSec < 0) "REWIND" else "FORWARD",
+                            seekDeltaSeconds = deltaSec
+                        )
+                        if (!ok) {
+                            viewModel.emitToast(
+                                viewModel.connectManager.participantControlsDisabledNotice.value
+                                    ?: "Video seek controls are disabled by the host"
+                            )
+                        }
+                    }
                 )
             } else if (activeTab.isHomePage && !isFullscreenVideo) {
                 NyxoraHomePage(
@@ -1542,6 +1702,23 @@ fun NyxoraMainBrowserScreen(
                         )
                         return@NyxoraConnectSheet
                     }
+                    if (!isHost && viewModel.connectManager.isViewerActivelyWatchingMirror) {
+                        val actionType = when {
+                            seekDelta != null && seekDelta < 0 -> "REWIND"
+                            seekDelta != null && seekDelta > 0 -> "FORWARD"
+                            seekDelta != null -> "SEEK"
+                            shouldPlay -> "PLAY"
+                            else -> "PAUSE"
+                        }
+                        val sent = viewModel.connectManager.sendViewerMirrorRemoteControl(
+                            actionType = actionType,
+                            seekDeltaSeconds = seekDelta
+                        )
+                        if (sent) {
+                            viewModel.emitToast("Sent playback command to Host")
+                        }
+                        return@NyxoraConnectSheet
+                    }
                     val currentCompat = viewModel.connectManager.videoCompatibility.value
                     primaryController.executeWatchTogetherControl(
                         shouldPlay = shouldPlay,
@@ -1599,6 +1776,36 @@ fun NyxoraMainBrowserScreen(
                     viewModel.connectManager.reconnectNowIfNeeded()
                     viewModel.emitToast("Reconnecting to room…")
                 },
+                liveMirrorState = liveMirrorState,
+                viewerMirrorConnectionState = viewerMirrorConnectionState,
+                isViewerReturnedToBrowseTogether = isViewerReturnedToBrowseTogether,
+                isViewerMirrorFullscreen = isViewerMirrorFullscreen,
+                allowPrivateTabMirroring = allowPrivateTabMirroring,
+                isMirrorPausedForPrivateTab = isMirrorPausedForPrivateTab,
+                onRequestStartLiveMirror = requestStartHostLiveMirror,
+                onStopLiveMirror = {
+                    viewModel.stopHostLiveMirror(context)
+                },
+                onSetMirrorAudioShared = { shared ->
+                    viewModel.connectManager.setMirrorAudioShared(shared)
+                },
+                onSelectMirrorQualityProfile = { profile ->
+                    viewModel.connectManager.setMirrorQualityProfile(profile)
+                    viewModel.emitToast("Mirror quality set to ${profile.label}")
+                },
+                onSetAllowPrivateTabMirroring = { allowed ->
+                    viewModel.connectManager.setAllowPrivateTabMirroring(allowed)
+                },
+                onSetViewerReturnToBrowseTogether = { returned ->
+                    viewModel.connectManager.setViewerReturnToBrowseTogether(returned)
+                },
+                onSetViewerMirrorFullscreen = { fullscreen ->
+                    viewModel.connectManager.setViewerMirrorFullscreen(fullscreen)
+                },
+                onViewerRequestMirrorReconnect = {
+                    viewModel.connectManager.requestViewerMirrorReconnect()
+                    viewModel.emitToast("Reconnecting live stream…")
+                },
                 onToast = viewModel::emitToast,
                 onDismiss = { viewModel.setOverlaySheet(OverlaySheet.NONE) }
             )
@@ -1626,11 +1833,325 @@ fun NyxoraMainBrowserScreen(
             viewModel.handleSystemBack(
                 isFullscreenVideo = isFullscreenVideo,
                 onExitFullscreen = {
-                    if (!primaryController.exitFullscreen()) {
+                    if (isViewerMirrorFullscreen) {
+                        viewModel.connectManager.setViewerMirrorFullscreen(false)
+                    } else if (!primaryController.exitFullscreen()) {
                         splitController.exitFullscreen()
                     }
                 }
             )
+        }
+    }
+}
+
+@Composable
+private fun NyxoraLiveMirrorViewerViewport(
+    mirrorEngine: NyxoraWebRtcMirrorEngine?,
+    liveMirrorState: LiveMirrorSessionMetadata,
+    connectionState: ViewerMirrorConnectionState,
+    renderedFrameCount: Long,
+    isFullscreen: Boolean,
+    isHostPlaying: Boolean,
+    canPlayPause: Boolean,
+    canSeek: Boolean,
+    onToggleFullscreen: () -> Unit,
+    onReturnToBrowseTogether: () -> Unit,
+    onReconnectStream: () -> Unit,
+    onRemotePlayPause: () -> Unit,
+    onRemoteSeekDelta: (Double) -> Unit
+) {
+    val context = LocalContext.current
+    val surfaceRenderer = remember(context) {
+        runCatching { org.webrtc.SurfaceViewRenderer(context) }.getOrNull()
+    }
+
+    DisposableEffect(surfaceRenderer, mirrorEngine) {
+        if (surfaceRenderer != null && mirrorEngine != null) {
+            mirrorEngine.bindViewerRenderer(surfaceRenderer)
+        }
+        onDispose {
+            if (surfaceRenderer != null && mirrorEngine != null) {
+                mirrorEngine.unbindViewerRenderer(surfaceRenderer)
+            }
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .testTag("nyxora_live_mirror_viewer_viewport")
+    ) {
+        // Hardware-accelerated WebRTC SurfaceViewRenderer
+        if (surfaceRenderer != null) {
+            AndroidView(
+                factory = { surfaceRenderer },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag("mirror_viewport_webrtc_surface")
+            )
+        }
+
+        // Top Live Mirror Stream Status Header
+        Surface(
+            color = Color(0xCC060E1B),
+            shape = RoundedCornerShape(bottomStart = 14.dp, bottomEnd = 14.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.TopCenter)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = if (connectionState == ViewerMirrorConnectionState.LIVE) {
+                            NyxoraDangerRed.copy(alpha = 0.22f)
+                        } else {
+                            NyxoraWarningAmber.copy(alpha = 0.22f)
+                        },
+                        border = BorderStroke(
+                            1.dp,
+                            if (connectionState == ViewerMirrorConnectionState.LIVE) NyxoraDangerRed else NyxoraWarningAmber
+                        ),
+                        modifier = Modifier.testTag("mirror_viewport_live_badge")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .background(
+                                        color = if (connectionState == ViewerMirrorConnectionState.LIVE) {
+                                            NyxoraDangerRed
+                                        } else {
+                                            NyxoraWarningAmber
+                                        },
+                                        shape = CircleShape
+                                    )
+                            )
+                            Spacer(Modifier.width(5.dp))
+                            Text(
+                                text = "LIVE MIRROR",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = Color.White
+                            )
+                        }
+                    }
+
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "${liveMirrorState.hostDeviceName.ifBlank { "Host" }} • ${liveMirrorState.qualityProfile.label}",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                            color = Color.White,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = "${connectionState.label}${if (renderedFrameCount > 0) " • $renderedFrameCount frames" else ""}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (connectionState == ViewerMirrorConnectionState.LIVE) {
+                                NyxoraSuccessGreen
+                            } else {
+                                NyxoraWarningAmber
+                            },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.testTag("mirror_viewport_status_text")
+                        )
+                    }
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    IconButton(
+                        onClick = onToggleFullscreen,
+                        modifier = Modifier
+                            .size(38.dp)
+                            .testTag("mirror_viewport_fullscreen_button")
+                    ) {
+                        Icon(
+                            imageVector = if (isFullscreen) Icons.Outlined.FullscreenExit else Icons.Outlined.Fullscreen,
+                            contentDescription = if (isFullscreen) "Exit Fullscreen" else "Fullscreen Stream",
+                            tint = Color.White
+                        )
+                    }
+
+                    OutlinedButton(
+                        onClick = onReturnToBrowseTogether,
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, NyxoraElectricBlue.copy(alpha = 0.7f)),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = NyxoraElectricBlue.copy(alpha = 0.16f),
+                            contentColor = Color.White
+                        ),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        modifier = Modifier
+                            .heightIn(min = 36.dp)
+                            .testTag("mirror_viewport_return_browse_button")
+                    ) {
+                        Text(
+                            text = "Browse Together",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
+        }
+
+        // Center Connection / Reconnect State Card when waiting for frames or reconnecting
+        if (connectionState != ViewerMirrorConnectionState.LIVE || renderedFrameCount == 0L) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = Color(0xD90A1424),
+                border = BorderStroke(1.dp, NyxoraElectricBlue.copy(alpha = 0.45f)),
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(horizontal = 24.dp)
+                    .widthIn(max = 420.dp)
+                    .testTag("mirror_viewport_connection_card")
+            ) {
+                Column(
+                    modifier = Modifier.padding(18.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.CastConnected,
+                        contentDescription = null,
+                        tint = NyxoraElectricBlue,
+                        modifier = Modifier.size(28.dp)
+                    )
+                    Text(
+                        text = when (connectionState) {
+                            ViewerMirrorConnectionState.CONNECTING -> "Connecting to Host Live Mirror…"
+                            ViewerMirrorConnectionState.LIVE -> "Receiving Host Live Stream (${liveMirrorState.qualityProfile.label})"
+                            ViewerMirrorConnectionState.RECONNECTING -> "Stream Interrupted • Reconnecting…"
+                            ViewerMirrorConnectionState.DISCONNECTED -> "Live Stream Disconnected"
+                            ViewerMirrorConnectionState.IDLE -> "Preparing Live Mirror Stream…"
+                        },
+                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                        color = Color.White
+                    )
+                    Text(
+                        text = "Duplicate webpage loading is paused while watching the Host's live browser stream.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.White.copy(alpha = 0.78f)
+                    )
+                    if (connectionState == ViewerMirrorConnectionState.RECONNECTING ||
+                        connectionState == ViewerMirrorConnectionState.DISCONNECTED
+                    ) {
+                        Button(
+                            onClick = onReconnectStream,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = NyxoraElectricBlue,
+                                contentColor = Color.White
+                            ),
+                            modifier = Modifier.testTag("mirror_viewport_reconnect_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.Refresh,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("Reconnect Stream")
+                        }
+                    }
+                }
+            }
+        }
+
+        // Bottom Host-Routed Remote Playback Control Bar
+        Surface(
+            color = Color(0xCC060E1B),
+            shape = RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.BottomCenter)
+                .testTag("mirror_viewport_controls_bar")
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedButton(
+                    onClick = { onRemoteSeekDelta(-10.0) },
+                    enabled = canSeek,
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(44.dp)
+                        .testTag("mirror_viewport_rewind_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Replay10,
+                        contentDescription = "Rewind Host Video 10s",
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text("-10s")
+                }
+
+                Button(
+                    onClick = onRemotePlayPause,
+                    enabled = canPlayPause,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = NyxoraElectricBlue,
+                        contentColor = Color.White
+                    ),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .weight(1.3f)
+                        .height(44.dp)
+                        .testTag("mirror_viewport_play_pause_button")
+                ) {
+                    Icon(
+                        imageVector = if (isHostPlaying) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
+                        contentDescription = if (isHostPlaying) "Pause Host Video" else "Play Host Video",
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(if (isHostPlaying) "Pause Host" else "Play Host")
+                }
+
+                OutlinedButton(
+                    onClick = { onRemoteSeekDelta(10.0) },
+                    enabled = canSeek,
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(44.dp)
+                        .testTag("mirror_viewport_forward_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Forward10,
+                        contentDescription = "Forward Host Video 10s",
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text("+10s")
+                }
+            }
         }
     }
 }

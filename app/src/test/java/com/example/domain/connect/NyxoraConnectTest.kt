@@ -1627,6 +1627,467 @@ class NyxoraConnectTest {
             hostManager.leaveOrCloseRoom()
         }
     }
+
+    @Test
+    fun testLiveMirrorStateMachineWebRtcSignalingRemoteControlsAndSecurity() {
+        val hostManager = NyxoraConnectSessionManager(
+            scope = testScope,
+            localDeviceId = "dev_mirror_host",
+            initialDeviceName = "Mirror Host Phone",
+            sharedRelayServer = relayServer
+        )
+        val viewerManager = NyxoraConnectSessionManager(
+            scope = testScope,
+            localDeviceId = "dev_mirror_viewer",
+            initialDeviceName = "Mirror Viewer Phone",
+            sharedRelayServer = relayServer
+        )
+
+        val hostCommands = CopyOnWriteArrayList<IncomingRemoteSyncCommand>()
+        val viewerCommands = CopyOnWriteArrayList<IncomingRemoteSyncCommand>()
+        val hostJob = testScope.launch {
+            hostManager.remoteSyncCommands.collect { hostCommands.add(it) }
+        }
+        val viewerJob = testScope.launch {
+            viewerManager.remoteSyncCommands.collect { viewerCommands.add(it) }
+        }
+
+        try {
+            // 1 & 2. Room creation & Room join
+            val room = hostManager.createRoom(
+                roomName = "WebRTC Live Mirror Room",
+                mode = RoomSyncMode.BROWSE_TOGETHER,
+                initialUrl = "https://example.com/browse",
+                initialTitle = "Browse Page"
+            )
+            assertTrue(awaitCondition { hostManager.connectionStatus.value == SyncConnectionStatus.SYNCED })
+            assertTrue(viewerManager.joinRoom(room.roomId))
+            assertTrue(
+                awaitCondition {
+                    viewerManager.connectionStatus.value == SyncConnectionStatus.SYNCED &&
+                        (hostManager.roomState.value?.members?.size ?: 0) == 2
+                }
+            )
+
+            // 3 & 4. Browse Together URL sync & Back/Forward sync
+            viewerCommands.clear()
+            assertTrue(
+                hostManager.publishUrlNavigation(
+                    url = "https://example.com/article-1",
+                    title = "Article 1",
+                    isPrivateTab = false,
+                    isPrivateMode = false
+                )
+            )
+            assertTrue(
+                awaitCondition {
+                    viewerCommands.any {
+                        it is IncomingRemoteSyncCommand.NavigateToUrl &&
+                            it.url == "https://example.com/article-1"
+                    }
+                }
+            )
+            assertTrue(
+                hostManager.publishBackForwardAction(
+                    isBack = true,
+                    isPrivateTab = false,
+                    isPrivateMode = false
+                )
+            )
+            assertTrue(
+                awaitCondition {
+                    viewerCommands.any { it === IncomingRemoteSyncCommand.NavigateBack }
+                }
+            )
+
+            // 7. MediaProjection denial handling: Host requests Live Mirror -> MIRROR_STARTING, then denies permission -> returns to BROWSING
+            assertEquals(LiveMirrorSessionState.BROWSING, hostManager.liveMirrorState.value.mirrorState)
+            assertTrue(hostManager.beginHostLiveMirrorRequest(isPrivateTab = false, isPrivateMode = false))
+            assertEquals(LiveMirrorSessionState.MIRROR_STARTING, hostManager.liveMirrorState.value.mirrorState)
+
+            hostManager.onHostMediaProjectionPermissionDenied("User cancelled capture prompt")
+            assertEquals(LiveMirrorSessionState.BROWSING, hostManager.liveMirrorState.value.mirrorState)
+            assertTrue(
+                hostManager.lastSyncError.value?.contains("cancelled", ignoreCase = true) == true
+            )
+            hostManager.clearSyncError()
+
+            // 5, 6, 9, 10, 11. Host starts Live Mirror mode, grants MediaProjection permission, exchanges WebRTC SDP Offer/Answer + ICE, and Viewer enters LIVE state
+            assertTrue(hostManager.beginHostLiveMirrorRequest(isPrivateTab = false, isPrivateMode = false))
+            assertTrue(
+                hostManager.onHostMediaProjectionPermissionGranted(
+                    permissionResultData = null,
+                    isPrivateTab = false,
+                    isPrivateMode = false
+                )
+            )
+            assertTrue(
+                "Host and Viewer must transition to MIRROR_LIVE and complete WebRTC offer/answer/ICE signaling",
+                awaitCondition(timeoutMs = 5000L) {
+                    hostManager.liveMirrorState.value.mirrorState == LiveMirrorSessionState.MIRROR_LIVE &&
+                        viewerManager.liveMirrorState.value.mirrorState == LiveMirrorSessionState.MIRROR_LIVE &&
+                        viewerManager.viewerMirrorConnectionState.value == ViewerMirrorConnectionState.LIVE &&
+                        viewerManager.isViewerActivelyWatchingMirror
+                }
+            )
+
+            // Verify duplicate webpage URL loading and independent HTML5 playback sync are suppressed on Viewer during Live Mirror Mode
+            viewerCommands.clear()
+            hostManager.publishUrlNavigation(
+                url = "https://example.com/streaming-movie",
+                title = "Streaming Movie",
+                isPrivateTab = false,
+                isPrivateMode = false
+            )
+            Thread.sleep(120L)
+            assertFalse(
+                "Viewer must NOT load duplicate URLs in WebView while actively watching Host Live Mirror stream",
+                viewerCommands.any {
+                    it is IncomingRemoteSyncCommand.NavigateToUrl &&
+                        it.url == "https://example.com/streaming-movie"
+                }
+            )
+
+            // Verify Host quality profile & audio sharing updates propagate to Viewer
+            assertTrue(hostManager.setMirrorQualityProfile(LiveMirrorQualityProfile.BALANCED))
+            assertTrue(hostManager.setMirrorAudioShared(false))
+            assertTrue(
+                awaitCondition {
+                    viewerManager.liveMirrorState.value.qualityProfile == LiveMirrorQualityProfile.BALANCED &&
+                        !viewerManager.liveMirrorState.value.isAudioShared
+                }
+            )
+
+            // Verify Host-authoritative remote controls in Live Mirror mode:
+            // Viewer sends PLAY and SEEK (-10s) -> routed to Host as ExecuteHostMirrorRemoteControl
+            hostCommands.clear()
+            assertTrue(viewerManager.sendViewerMirrorRemoteControl(actionType = "PLAY"))
+            assertTrue(viewerManager.sendViewerMirrorRemoteControl(actionType = "REWIND", seekDeltaSeconds = -10.0))
+            assertTrue(
+                awaitCondition {
+                    hostCommands.any {
+                        it is IncomingRemoteSyncCommand.ExecuteHostMirrorRemoteControl &&
+                            it.actionType == "PLAY"
+                    } &&
+                        hostCommands.any {
+                            it is IncomingRemoteSyncCommand.ExecuteHostMirrorRemoteControl &&
+                                it.actionType == "REWIND"
+                        }
+                }
+            )
+
+            // 15. Unauthorized participant control rejection:
+            // Non-host cannot spoof MIRROR_SESSION_STATE or WEBRTC_SIGNAL_OFFER
+            assertFalse(viewerManager.beginHostLiveMirrorRequest(isPrivateTab = false, isPrivateMode = false))
+            assertTrue(
+                viewerManager.sendControlFrameBypassingClientCheckForTest(
+                    type = RealtimeEventType.MIRROR_SESSION_STATE,
+                    payloadJson = """{"mirrorState":"BROWSING"}"""
+                )
+            )
+            assertTrue(
+                awaitCondition {
+                    viewerManager.diagnosticLogs.value.any { it.contains("HOST_ONLY_MIRROR") }
+                }
+            )
+            // And when Host disables participant video seek, Viewer remote seek is rejected
+            hostManager.setAllowParticipantVideoSeek(false)
+            assertTrue(
+                awaitCondition {
+                    viewerManager.roomState.value?.permissions?.allowParticipantVideoSeek == false
+                }
+            )
+            assertFalse(viewerManager.sendViewerMirrorRemoteControl(actionType = "SEEK", seekDeltaSeconds = 15.0))
+
+            // 14. Reconnection after temporary stream/network interruption
+            assertTrue(viewerManager.requestViewerMirrorReconnect())
+            assertTrue(
+                awaitCondition {
+                    viewerManager.viewerMirrorConnectionState.value == ViewerMirrorConnectionState.LIVE
+                }
+            )
+
+            // Private tab protection: switching Host to a Private tab automatically pauses Live Mirror
+            hostManager.onHostPrivateTabVisibilityChanged(isPrivateTabOrMode = true)
+            assertTrue(hostManager.isMirrorPausedForPrivateTab.value)
+            assertTrue(
+                awaitCondition {
+                    hostManager.liveMirrorState.value.mirrorState == LiveMirrorSessionState.BROWSING &&
+                        viewerManager.liveMirrorState.value.mirrorState == LiveMirrorSessionState.BROWSING
+                }
+            )
+            hostManager.onHostPrivateTabVisibilityChanged(isPrivateTabOrMode = false)
+            assertFalse(hostManager.isMirrorPausedForPrivateTab.value)
+
+            // Restart Live Mirror and verify 12 & 13: Host stopping Live Mirror automatically returns room to Browse Together mode
+            assertTrue(hostManager.beginHostLiveMirrorRequest(isPrivateTab = false, isPrivateMode = false))
+            assertTrue(
+                hostManager.onHostMediaProjectionPermissionGranted(
+                    permissionResultData = null,
+                    isPrivateTab = false,
+                    isPrivateMode = false
+                )
+            )
+            assertTrue(
+                awaitCondition {
+                    viewerManager.liveMirrorState.value.isMirrorLive &&
+                        viewerManager.viewerMirrorConnectionState.value == ViewerMirrorConnectionState.LIVE
+                }
+            )
+
+            // Viewer can also locally toggle "Return to Browse Together" and back to "Watch Live Mirror"
+            viewerManager.setViewerReturnToBrowseTogether(true)
+            assertFalse(viewerManager.isViewerActivelyWatchingMirror)
+            viewerManager.setViewerReturnToBrowseTogether(false)
+            assertTrue(viewerManager.isViewerActivelyWatchingMirror)
+
+            // Host stops Live Mirror -> both Host and Viewer return to BROWSING (Mode A: Browse Together)
+            assertTrue(hostManager.stopHostLiveMirror())
+            assertTrue(
+                awaitCondition {
+                    hostManager.liveMirrorState.value.mirrorState == LiveMirrorSessionState.BROWSING &&
+                        viewerManager.liveMirrorState.value.mirrorState == LiveMirrorSessionState.BROWSING &&
+                        viewerManager.roomState.value?.mode == RoomSyncMode.BROWSE_TOGETHER &&
+                        !viewerManager.isViewerActivelyWatchingMirror
+                }
+            )
+
+            // Verify normal Browse Together URL sync resumes immediately after Live Mirror stops
+            viewerCommands.clear()
+            assertTrue(
+                hostManager.publishUrlNavigation(
+                    url = "https://example.com/back-to-browsing",
+                    title = "Back to Browsing",
+                    isPrivateTab = false,
+                    isPrivateMode = false
+                )
+            )
+            assertTrue(
+                awaitCondition {
+                    viewerCommands.any {
+                        it is IncomingRemoteSyncCommand.NavigateToUrl &&
+                            it.url == "https://example.com/back-to-browsing"
+                    }
+                }
+            )
+        } finally {
+            hostJob.cancel()
+            viewerJob.cancel()
+            viewerManager.leaveOrCloseRoom()
+            hostManager.leaveOrCloseRoom()
+        }
+    }
+
+    @Test
+    fun testWebRtcIceConfigProviderValidationMalformedUrlsTurnAndShortLivedBackendCredentials() {
+        NyxoraWebRtcIceConfigProvider.clearCachedShortLivedTurnCredentials()
+
+        // 1. Missing, blank, or UNCONFIGURED values fall back to Google STUN default and optional TURN disabled
+        val missingSnapshot = NyxoraWebRtcIceConfigProvider.resolveFromValues(
+            rawStunUrls = null,
+            rawTurnUrls = null,
+            rawTurnUsername = null,
+            rawTurnCredential = null
+        )
+        assertEquals(
+            listOf(NyxoraWebRtcIceConfigProvider.DEFAULT_GOOGLE_STUN_URL),
+            missingSnapshot.stunUrls
+        )
+        assertTrue(missingSnapshot.turnUrls.isEmpty())
+        assertFalse(missingSnapshot.isTurnConfigured)
+        assertFalse(missingSnapshot.isShortLivedTurnActive)
+        assertTrue(missingSnapshot.usedDefaultStunFallback)
+        assertEquals(1, missingSnapshot.iceServers.size)
+        assertEquals(
+            listOf("stun:stun.l.google.com:19302"),
+            missingSnapshot.iceServers.first().urls
+        )
+
+        val unconfiguredPlaceholderSnapshot = NyxoraWebRtcIceConfigProvider.resolveIceConfiguration(
+            overrides = mapOf(
+                NyxoraWebRtcIceConfigProvider.KEY_WEBRTC_STUN_URLS to "UNCONFIGURED",
+                NyxoraWebRtcIceConfigProvider.KEY_WEBRTC_TURN_URLS to "UNCONFIGURED",
+                NyxoraWebRtcIceConfigProvider.KEY_WEBRTC_TURN_USERNAME to "UNCONFIGURED",
+                NyxoraWebRtcIceConfigProvider.KEY_WEBRTC_TURN_CREDENTIAL to "UNCONFIGURED"
+            )
+        )
+        assertEquals(
+            listOf("stun:stun.l.google.com:19302"),
+            unconfiguredPlaceholderSnapshot.stunUrls
+        )
+        assertFalse(unconfiguredPlaceholderSnapshot.isTurnConfigured)
+
+        // 2. Malformed ICE server URLs are safely rejected with detailed diagnostic warnings
+        val malformedSnapshot = NyxoraWebRtcIceConfigProvider.resolveFromValues(
+            rawStunUrls = listOf(
+                "http://stun.l.google.com:19302",
+                "stun://stun.l.google.com:19302",
+                "stun::19302",
+                "stun:stun.l.google.com:0",
+                "stun:stun.l.google.com:70000",
+                "stun:stun.l.google.com:notaport",
+                "stun:999.999.999.999:19302",
+                "stun:user:pass@stun.l.google.com:19302",
+                "turn:turn.example.com:3478" // TURN URI placed inside STUN list must be rejected
+            ).joinToString(","),
+            rawTurnUrls = listOf(
+                "https://turn.example.com:3478",
+                "turn://turn.example.com:3478",
+                "turn:user:secret@turn.example.com:3478",
+                "turn:turn.example.com:3478?transport=sctp",
+                "turn:turn.example.com:99999",
+                "stun:stun.l.google.com:19302" // STUN URI placed inside TURN list must be rejected
+            ).joinToString(","),
+            rawTurnUsername = "turn-user",
+            rawTurnCredential = "turn-secret"
+        )
+        // Because all STUN entries were malformed, provider falls back cleanly to Google STUN
+        assertEquals(
+            listOf("stun:stun.l.google.com:19302"),
+            malformedSnapshot.stunUrls
+        )
+        assertTrue(malformedSnapshot.usedDefaultStunFallback)
+        // Because all TURN entries were malformed, TURN is not configured
+        assertTrue(malformedSnapshot.turnUrls.isEmpty())
+        assertFalse(malformedSnapshot.isTurnConfigured)
+        assertTrue(malformedSnapshot.validationWarnings.isNotEmpty())
+
+        // 3. Multiple comma-separated STUN URLs (including IPv4, domain, stuns, and deduplication)
+        val multiStunSnapshot = NyxoraWebRtcIceConfigProvider.resolveFromValues(
+            rawStunUrls = " stun:stun.l.google.com:19302 , stun:stun1.l.google.com:19302 , stuns:stun.example.org:5349 , stun:stun.l.google.com:19302 ",
+            rawTurnUrls = "",
+            rawTurnUsername = "",
+            rawTurnCredential = ""
+        )
+        assertEquals(
+            listOf(
+                "stun:stun.l.google.com:19302",
+                "stun:stun1.l.google.com:19302",
+                "stuns:stun.example.org:5349"
+            ),
+            multiStunSnapshot.stunUrls
+        )
+        assertFalse(multiStunSnapshot.isTurnConfigured)
+        assertEquals(1, multiStunSnapshot.iceServers.size)
+        assertEquals(3, multiStunSnapshot.iceServers.first().urls.size)
+
+        // 4. Optional TURN configuration: incomplete vs complete + credential redaction in toString()
+        val incompleteTurnSnapshot = NyxoraWebRtcIceConfigProvider.resolveFromValues(
+            rawStunUrls = "stun:stun.l.google.com:19302",
+            rawTurnUrls = "turn:turn.example.com:3478?transport=udp,turns:turn.example.com:5349?transport=tcp",
+            rawTurnUsername = "nyxora-user",
+            rawTurnCredential = "" // Missing credential -> TURN must be disabled
+        )
+        assertFalse(incompleteTurnSnapshot.isTurnConfigured)
+        assertEquals(1, incompleteTurnSnapshot.iceServers.size)
+        assertTrue(
+            incompleteTurnSnapshot.validationWarnings.any {
+                it.contains("Incomplete optional TURN configuration")
+            }
+        )
+
+        val validTurnSnapshot = NyxoraWebRtcIceConfigProvider.resolveFromValues(
+            rawStunUrls = "stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302",
+            rawTurnUrls = "turn:turn.example.com:3478?transport=udp, turns:turn.example.com:5349?transport=tcp",
+            rawTurnUsername = "nyxora-turn-user",
+            rawTurnCredential = "super-secret-turn-credential-value"
+        )
+        assertTrue(validTurnSnapshot.isTurnConfigured)
+        assertFalse(validTurnSnapshot.isShortLivedTurnActive)
+        assertEquals(2, validTurnSnapshot.iceServers.size)
+        val turnServerConfig = validTurnSnapshot.iceServers[1]
+        assertEquals(
+            listOf(
+                "turn:turn.example.com:3478?transport=udp",
+                "turns:turn.example.com:5349?transport=tcp"
+            ),
+            turnServerConfig.urls
+        )
+        assertEquals("nyxora-turn-user", turnServerConfig.username)
+        assertEquals("super-secret-turn-credential-value", turnServerConfig.credential)
+        // Ensure credential is never leaked via WebRtcIceServerConfig.toString()
+        assertFalse(turnServerConfig.toString().contains("super-secret-turn-credential-value"))
+        assertTrue(turnServerConfig.toString().contains("[REDACTED]"))
+
+        // 5. Short-lived TURN credentials fetched securely from the backend (/api/webrtc/ice-config)
+        val hostManager = NyxoraConnectSessionManager(
+            scope = testScope,
+            localDeviceId = "dev_ice_host",
+            initialDeviceName = "ICE Host Phone",
+            sharedRelayServer = relayServer
+        )
+        try {
+            val room = hostManager.createRoom(
+                roomName = "Short-Lived TURN Room",
+                mode = RoomSyncMode.BROWSE_TOGETHER,
+                initialUrl = "https://example.com",
+                initialTitle = "Example"
+            )
+            assertTrue(awaitCondition { hostManager.connectionStatus.value == SyncConnectionStatus.SYNCED })
+
+            // Configure short-lived Coturn REST secret on the relay server
+            relayServer.configureShortLivedTurn(
+                turnUrls = listOf(
+                    "turn:turn.nyxora.example.com:3478?transport=udp",
+                    "turns:turn.nyxora.example.com:5349?transport=tcp"
+                ),
+                sharedSecret = "ephemeral-coturn-shared-hmac-secret",
+                ttlSeconds = 600L
+            )
+
+            // Invalid room key must be rejected (HTTP 401 -> failure)
+            val unauthorizedResult = NyxoraWebRtcIceConfigProvider.fetchShortLivedTurnCredentials(
+                endpointUrl = "ws://127.0.0.1:${relayServer.listeningPort}/nyxora",
+                roomId = room.roomId,
+                deviceId = "dev_ice_host",
+                signingKey = "wrong-signing-key"
+            )
+            assertTrue(unauthorizedResult.isFailure)
+
+            // Valid room HMAC signature returns short-lived TURN credentials and caches them in provider
+            val refreshResult = hostManager.refreshShortLivedTurnCredentials()
+            assertTrue(refreshResult.isSuccess)
+            val refreshedTurn = refreshResult.getOrThrow()
+            assertEquals(
+                listOf(
+                    "turn:turn.nyxora.example.com:3478?transport=udp",
+                    "turns:turn.nyxora.example.com:5349?transport=tcp"
+                ),
+                refreshedTurn.turnUrls
+            )
+            assertTrue(refreshedTurn.username.contains(":dev_ice_host"))
+            assertTrue(refreshedTurn.credential.isNotBlank())
+            assertEquals(600L, refreshedTurn.ttlSeconds)
+
+            val activeSnapshotWithShortLived = NyxoraWebRtcIceConfigProvider.resolveIceConfiguration()
+            assertTrue(activeSnapshotWithShortLived.isTurnConfigured)
+            assertTrue(activeSnapshotWithShortLived.isShortLivedTurnActive)
+            assertEquals(refreshedTurn.turnUrls, activeSnapshotWithShortLived.turnUrls)
+            assertEquals(2, activeSnapshotWithShortLived.iceServers.size)
+            assertEquals(refreshedTurn.username, activeSnapshotWithShortLived.iceServers[1].username)
+            assertFalse(
+                activeSnapshotWithShortLived.iceServers[1].toString()
+                    .contains(refreshedTurn.credential)
+            )
+
+            // Expired short-lived credentials automatically fall back to static/default config
+            val expiredAfterTtlSnapshot = NyxoraWebRtcIceConfigProvider.resolveFromValues(
+                rawStunUrls = "stun:stun.l.google.com:19302",
+                rawTurnUrls = "",
+                rawTurnUsername = "",
+                rawTurnCredential = "",
+                shortLivedOverride = refreshedTurn,
+                nowMillis = refreshedTurn.expiresAtMillis + 60_000L
+            )
+            assertFalse(expiredAfterTtlSnapshot.isShortLivedTurnActive)
+            assertFalse(expiredAfterTtlSnapshot.isTurnConfigured)
+        } finally {
+            relayServer.configureShortLivedTurn(
+                turnUrls = emptyList(),
+                sharedSecret = ""
+            )
+            hostManager.leaveOrCloseRoom()
+            NyxoraWebRtcIceConfigProvider.clearCachedShortLivedTurnCredentials()
+        }
+    }
 }
-
-

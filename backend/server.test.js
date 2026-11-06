@@ -992,6 +992,334 @@ test('NYXORA Backend: Granular Host Permissions (URL input, Seek vs Play/Pause, 
   }
 });
 
+test('NYXORA Connect Backend: Live Mirror session state, WebRTC offer/answer/ICE signaling, and Host-routed MIRROR_REMOTE_CONTROL', async () => {
+  const server = createNyxoraConnectServer();
+  const { httpServer } = server;
+  await new Promise((r) => httpServer.listen(0, '127.0.0.1', r));
+  const port = httpServer.address().port;
 
+  const roomId = 'NYX-M7R2-9K4W';
+  const roomKey = deriveRoomCodeHandshakeKey(roomId);
+  const hostDeviceId = 'device-mirror-host';
+  const viewerDeviceId = 'device-mirror-viewer';
 
+  const hostWs = await openRawWebSocket(port, roomId, hostDeviceId);
+  const viewerWs = await openRawWebSocket(port, roomId, viewerDeviceId);
 
+  try {
+    hostWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'JOIN_REQUEST',
+      senderDeviceId: hostDeviceId,
+      senderRole: 'HOST',
+      sequenceNumber: 1,
+      signingSecret: roomKey,
+      payloadObj: {
+        deviceName: 'Mirror Host',
+        hostRoomSnapshot: {
+          roomId,
+          roomName: 'Live Mirror Room',
+          accessKey: roomKey,
+          hostDeviceId,
+          mode: 'BROWSE_TOGETHER',
+          isSyncActive: true,
+          currentSyncedUrl: 'https://example.com/stream',
+          permissions: {
+            allowParticipantControls: false,
+            allowParticipantPlaybackControl: true,
+            allowParticipantVideoPlayPause: true,
+            allowParticipantVideoSeek: false
+          }
+        }
+      }
+    }));
+    assert.equal((await hostWs.nextMessage()).type, 'JOIN_ACCEPTED');
+    assert.equal((await hostWs.nextMessage()).type, 'ROOM_STATE_SNAPSHOT');
+
+    viewerWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'JOIN_REQUEST',
+      senderDeviceId: viewerDeviceId,
+      senderRole: 'PARTICIPANT',
+      sequenceNumber: 1,
+      signingSecret: roomKey,
+      payloadObj: {
+        deviceName: 'Mirror Viewer'
+      }
+    }));
+    assert.equal((await viewerWs.nextMessage()).type, 'JOIN_ACCEPTED');
+    assert.equal((await viewerWs.nextMessage()).type, 'ROOM_STATE_SNAPSHOT');
+    assert.equal((await hostWs.nextMessage()).type, 'ROOM_STATE_SNAPSHOT');
+
+    // 1. Non-host cannot start Live Mirror
+    viewerWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'MIRROR_SESSION_STATE',
+      senderDeviceId: viewerDeviceId,
+      senderRole: 'PARTICIPANT',
+      sequenceNumber: 2,
+      signingSecret: roomKey,
+      payloadObj: {
+        sessionState: 'MIRROR_LIVE',
+        hostDeviceId,
+        hostDeviceName: 'Mirror Host'
+      }
+    }));
+    const mirrorDenied = await viewerWs.nextMessage();
+    assert.equal(mirrorDenied.type, 'PERMISSION_DENIED');
+    assert.equal(JSON.parse(mirrorDenied.payloadJson).code, 'HOST_ONLY_MIRROR');
+
+    // 2. Host starts Live Mirror (MIRROR_LIVE)
+    hostWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'MIRROR_SESSION_STATE',
+      senderDeviceId: hostDeviceId,
+      senderRole: 'HOST',
+      sequenceNumber: 2,
+      signingSecret: roomKey,
+      payloadObj: {
+        sessionState: 'MIRROR_LIVE',
+        hostDeviceId,
+        hostDeviceName: 'Mirror Host',
+        isAudioShared: true,
+        qualityProfile: 'BALANCED',
+        activeStreamUrl: 'https://example.com/stream',
+        startedAtMillis: Date.now()
+      }
+    }));
+    const hostMirrorMsg = await hostWs.nextMessage();
+    const viewerMirrorMsg = await viewerWs.nextMessage();
+    assert.equal(hostMirrorMsg.type, 'MIRROR_SESSION_STATE');
+    assert.equal(viewerMirrorMsg.type, 'MIRROR_SESSION_STATE');
+    assert.equal(JSON.parse(viewerMirrorMsg.payloadJson).sessionState, 'MIRROR_LIVE');
+    assert.equal((await hostWs.nextMessage()).type, 'ROOM_STATE_SNAPSHOT');
+    assert.equal((await viewerWs.nextMessage()).type, 'ROOM_STATE_SNAPSHOT');
+
+    // 3. Viewer notifies WEBRTC_VIEWER_READY -> routed to Host
+    viewerWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'WEBRTC_VIEWER_READY',
+      senderDeviceId: viewerDeviceId,
+      senderRole: 'PARTICIPANT',
+      sequenceNumber: 3,
+      signingSecret: roomKey,
+      payloadObj: {
+        targetDeviceId: hostDeviceId,
+        senderDeviceId: viewerDeviceId,
+        qualityProfile: 'BALANCED'
+      }
+    }));
+    const readyOnHost = await hostWs.nextMessage();
+    assert.equal(readyOnHost.type, 'WEBRTC_VIEWER_READY');
+    assert.equal(JSON.parse(readyOnHost.payloadJson).senderDeviceId, viewerDeviceId);
+
+    // 4. Host sends WEBRTC_SIGNAL_OFFER -> routed to Viewer
+    hostWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'WEBRTC_SIGNAL_OFFER',
+      senderDeviceId: hostDeviceId,
+      senderRole: 'HOST',
+      sequenceNumber: 3,
+      signingSecret: roomKey,
+      payloadObj: {
+        targetDeviceId: viewerDeviceId,
+        senderDeviceId: hostDeviceId,
+        sdpType: 'offer',
+        sdpDescription: 'v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=NYXORA\r\n'
+      }
+    }));
+    const offerOnViewer = await viewerWs.nextMessage();
+    assert.equal(offerOnViewer.type, 'WEBRTC_SIGNAL_OFFER');
+    assert.equal(JSON.parse(offerOnViewer.payloadJson).sdpType, 'offer');
+
+    // 5. Viewer sends WEBRTC_SIGNAL_ANSWER and WEBRTC_SIGNAL_ICE_CANDIDATE -> routed to Host
+    viewerWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'WEBRTC_SIGNAL_ANSWER',
+      senderDeviceId: viewerDeviceId,
+      senderRole: 'PARTICIPANT',
+      sequenceNumber: 4,
+      signingSecret: roomKey,
+      payloadObj: {
+        targetDeviceId: hostDeviceId,
+        senderDeviceId: viewerDeviceId,
+        sdpType: 'answer',
+        sdpDescription: 'v=0\r\no=- 2 2 IN IP4 127.0.0.1\r\ns=NYXORA-VIEWER\r\n'
+      }
+    }));
+    const answerOnHost = await hostWs.nextMessage();
+    assert.equal(answerOnHost.type, 'WEBRTC_SIGNAL_ANSWER');
+
+    viewerWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'WEBRTC_SIGNAL_ICE_CANDIDATE',
+      senderDeviceId: viewerDeviceId,
+      senderRole: 'PARTICIPANT',
+      sequenceNumber: 5,
+      signingSecret: roomKey,
+      payloadObj: {
+        targetDeviceId: hostDeviceId,
+        senderDeviceId: viewerDeviceId,
+        sdpMid: '0',
+        sdpMLineIndex: 0,
+        candidate: 'candidate:1 1 UDP 2122260223 192.168.1.10 54321 typ host'
+      }
+    }));
+    const iceOnHost = await hostWs.nextMessage();
+    assert.equal(iceOnHost.type, 'WEBRTC_SIGNAL_ICE_CANDIDATE');
+
+    // 6. Viewer attempts MIRROR_REMOTE_CONTROL while allowParticipantControls is false -> rejected
+    viewerWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'MIRROR_REMOTE_CONTROL',
+      senderDeviceId: viewerDeviceId,
+      senderRole: 'PARTICIPANT',
+      sequenceNumber: 6,
+      signingSecret: roomKey,
+      payloadObj: {
+        actionType: 'PLAY'
+      }
+    }));
+    const remoteCtrlDenied = await viewerWs.nextMessage();
+    assert.equal(remoteCtrlDenied.type, 'PERMISSION_DENIED');
+    assert.equal(JSON.parse(remoteCtrlDenied.payloadJson).code, 'PARTICIPANT_CONTROLS_DISABLED');
+
+    // 7. Host enables allowParticipantControls (with Play/Pause allowed, Seek disabled)
+    hostWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'UPDATE_ROOM_CONFIG',
+      senderDeviceId: hostDeviceId,
+      senderRole: 'HOST',
+      sequenceNumber: 4,
+      signingSecret: roomKey,
+      payloadObj: {
+        permissions: {
+          allowParticipantControls: true,
+          allowParticipantPlaybackControl: true,
+          allowParticipantVideoPlayPause: true,
+          allowParticipantVideoSeek: false
+        }
+      }
+    }));
+    await hostWs.nextMessage();
+    await viewerWs.nextMessage();
+
+    // Viewer sends MIRROR_REMOTE_CONTROL PLAY -> routed to Host
+    viewerWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'MIRROR_REMOTE_CONTROL',
+      senderDeviceId: viewerDeviceId,
+      senderRole: 'PARTICIPANT',
+      sequenceNumber: 7,
+      signingSecret: roomKey,
+      payloadObj: {
+        actionType: 'PLAY'
+      }
+    }));
+    const remotePlayOnHost = await hostWs.nextMessage();
+    assert.equal(remotePlayOnHost.type, 'MIRROR_REMOTE_CONTROL');
+    assert.equal(JSON.parse(remotePlayOnHost.payloadJson).actionType, 'PLAY');
+  } finally {
+    viewerWs.close();
+    hostWs.close();
+    await server.close();
+  }
+});
+
+test('GET /api/webrtc/ice-config enforces room HMAC auth and issues short-lived TURN credentials when configured', async () => {
+  const prevTurnUrls = process.env.NYXORA_WEBRTC_TURN_URLS;
+  const prevSharedSecret = process.env.NYXORA_WEBRTC_TURN_SHARED_SECRET;
+  const prevStunUrls = process.env.NYXORA_WEBRTC_STUN_URLS;
+
+  process.env.NYXORA_WEBRTC_STUN_URLS = 'stun:stun.l.google.com:19302, stun:stun1.l.google.com:19302';
+  process.env.NYXORA_WEBRTC_TURN_URLS = 'turn:turn.nyxora.example.com:3478?transport=udp,turns:turn.nyxora.example.com:5349?transport=tcp';
+  process.env.NYXORA_WEBRTC_TURN_SHARED_SECRET = 'test-coturn-rest-shared-secret';
+
+  const server = createNyxoraConnectServer();
+  const { httpServer } = server;
+  await new Promise((r) => httpServer.listen(0, '127.0.0.1', r));
+  const port = httpServer.address().port;
+  const httpBaseUrl = `http://127.0.0.1:${port}`;
+
+  const roomId = 'NYX-ICE9-8K2M';
+  const roomKey = deriveRoomCodeHandshakeKey(roomId);
+  const hostDeviceId = 'dev_ice_host';
+  const hostWs = await openRawWebSocket(port, roomId, hostDeviceId);
+
+  try {
+    hostWs.sendEnvelope(createSignedEnvelope({
+      roomId,
+      type: 'JOIN_REQUEST',
+      senderDeviceId: hostDeviceId,
+      senderRole: 'HOST',
+      sequenceNumber: 1,
+      signingSecret: roomKey,
+      payloadObj: {
+        deviceName: 'ICE Host',
+        hostRoomSnapshot: {
+          roomId,
+          roomName: 'ICE Config Room',
+          accessKey: roomKey,
+          hostDeviceId,
+          mode: 'BROWSE_TOGETHER',
+          isSyncActive: true,
+          currentSyncedUrl: 'https://example.com'
+        }
+      }
+    }));
+    assert.equal((await hostWs.nextMessage()).type, 'JOIN_ACCEPTED');
+    assert.equal((await hostWs.nextMessage()).type, 'ROOM_STATE_SNAPSHOT');
+
+    // 1. Unauthorized request with invalid signature returns 401
+    const unauthRes = await fetch(`${httpBaseUrl}/api/webrtc/ice-config`, {
+      headers: {
+        'X-Nyxora-Room': roomId,
+        'X-Nyxora-Device': hostDeviceId,
+        'X-Nyxora-Timestamp': String(Date.now()),
+        'X-Nyxora-Signature': 'invalid-signature'
+      }
+    });
+    assert.equal(unauthRes.status, 401);
+
+    // 2. Authorized request with valid room HMAC returns short-lived TURN credentials
+    const timestamp = String(Date.now());
+    const signInput = `NYXORA_TURN_CRED_V1|${roomId}|${hostDeviceId}|${timestamp}`;
+    const signature = crypto
+      .createHmac('sha256', Buffer.from(roomKey, 'utf8'))
+      .update(signInput, 'utf8')
+      .digest('hex');
+
+    const authRes = await fetch(`${httpBaseUrl}/api/webrtc/ice-config`, {
+      headers: {
+        'X-Nyxora-Room': roomId,
+        'X-Nyxora-Device': hostDeviceId,
+        'X-Nyxora-Timestamp': timestamp,
+        'X-Nyxora-Signature': signature
+      }
+    });
+    assert.equal(authRes.status, 200);
+    const body = await authRes.json();
+    assert.deepEqual(body.stunUrls, [
+      'stun:stun.l.google.com:19302',
+      'stun:stun1.l.google.com:19302'
+    ]);
+    assert.deepEqual(body.turnUrls, [
+      'turn:turn.nyxora.example.com:3478?transport=udp',
+      'turns:turn.nyxora.example.com:5349?transport=tcp'
+    ]);
+    assert.equal(body.turnConfigured, true);
+    assert.ok(body.turnUsername.endsWith(`:${roomId}:${hostDeviceId}`));
+    assert.ok(typeof body.turnCredential === 'string' && body.turnCredential.length > 10);
+    assert.ok(body.ttlSeconds >= 60);
+    assert.ok(body.expiresAtMillis > Date.now());
+  } finally {
+    hostWs.close();
+    await server.close();
+    if (prevTurnUrls === undefined) delete process.env.NYXORA_WEBRTC_TURN_URLS;
+    else process.env.NYXORA_WEBRTC_TURN_URLS = prevTurnUrls;
+    if (prevSharedSecret === undefined) delete process.env.NYXORA_WEBRTC_TURN_SHARED_SECRET;
+    else process.env.NYXORA_WEBRTC_TURN_SHARED_SECRET = prevSharedSecret;
+    if (prevStunUrls === undefined) delete process.env.NYXORA_WEBRTC_STUN_URLS;
+    else process.env.NYXORA_WEBRTC_STUN_URLS = prevStunUrls;
+  }
+});

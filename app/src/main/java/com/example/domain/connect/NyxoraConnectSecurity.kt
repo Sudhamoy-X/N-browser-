@@ -66,14 +66,15 @@ object NyxoraConnectSecurity {
     private val EMBEDDED_ROOM_ID_REGEX = Regex("NYX-[A-Z2-9]{4}-[A-Z2-9]{4}")
     private val TOKEN_ID_REGEX = Regex("^[A-Z2-9]{8,16}$")
     private val HEX_64_REGEX = Regex("^[0-9a-fA-F]{64}$")
-    private val LOG_QUERY_SECRET_REGEX = Regex("(?i)(inv|key|token|access_key|access_token|id_token|refresh_token|password|passwd|pwd|secret|client_secret|session_id|api_key|apikey|bearer)=([^&\\s\"']+)")
-    private val LOG_JSON_SECRET_REGEX = Regex("(?i)\"(accessKey|inviteToken|hmacSignature|handshakeSecret|password|secret|token)\"\\s*:\\s*\"([^\"]+)\"")
+    private val LOG_QUERY_SECRET_REGEX = Regex("(?i)(inv|key|token|access_key|access_token|id_token|refresh_token|password|passwd|pwd|secret|client_secret|session_id|api_key|apikey|bearer|turn_credential|turncredential)=([^&\\s\"']+)")
+    private val LOG_JSON_SECRET_REGEX = Regex("(?i)\"(accessKey|inviteToken|hmacSignature|handshakeSecret|password|secret|token|turnCredential|turnPassword|iceCredential)\"\\s*:\\s*\"([^\"]+)\"")
     private val LOG_INVITE_TOKEN_INLINE_REGEX = Regex("\\bINV[A-Z2-9]{6,16}\\.\\d{10,16}\\.[01]\\.[0-9a-fA-F]{32,64}\\b")
     private val LOG_HEX64_INLINE_REGEX = Regex("\\b[0-9a-fA-F]{64}\\b")
     private val LOG_ACCESS_KEY_PATTERN = Regex("\\b[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}\\b")
     private val LOG_BEARER_HEADER_REGEX = Regex("(?i)Bearer\\s+[A-Za-z0-9\\-_\\.=]+")
     private val LOG_URL_USERINFO_REGEX = Regex("(?i)(https?://)([^/\\s:@]+:[^/\\s@]+)@")
     const val MAX_CHAT_MESSAGE_LENGTH = 500
+    const val DEFAULT_WEBRTC_STUN_URLS = NyxoraWebRtcIceConfigProvider.DEFAULT_GOOGLE_STUN_URL
 
     /**
      * Resolves the configured HTTPS App Link domain from BuildConfig (populated via .env / AI Studio Secrets)
@@ -109,7 +110,35 @@ object NyxoraConnectSecurity {
     }
 
     /**
-     * Redacts invitation tokens, room access keys, and HMAC signatures from diagnostic log strings
+     * Resolves configured WebRTC STUN and optional TURN ICE servers via the centralized,
+     * validated [NyxoraWebRtcIceConfigProvider]. Never hardcodes TURN credentials in source code.
+     */
+    fun configuredWebRtcIceServers(
+        overrides: Map<String, String?>? = null,
+        nowMillis: Long = System.currentTimeMillis()
+    ): List<WebRtcIceServerConfig> {
+        return NyxoraWebRtcIceConfigProvider.resolveIceConfiguration(
+            overrides = overrides,
+            nowMillis = nowMillis
+        ).iceServers
+    }
+
+    /**
+     * Reports whether an authenticated TURN relay server is configured via short-lived backend credentials
+     * or environment/BuildConfig.
+     */
+    fun hasConfiguredTurnServer(
+        overrides: Map<String, String?>? = null,
+        nowMillis: Long = System.currentTimeMillis()
+    ): Boolean {
+        return NyxoraWebRtcIceConfigProvider.resolveIceConfiguration(
+            overrides = overrides,
+            nowMillis = nowMillis
+        ).isTurnConfigured
+    }
+
+    /**
+     * Redacts invitation tokens, room access keys, TURN credentials, and HMAC signatures from diagnostic log strings
      * so sensitive credentials are never written to logs or crash reports.
      */
     fun redactSecretsForLog(rawMessage: String): String {

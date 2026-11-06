@@ -477,32 +477,52 @@ class ExampleRobolectricTest {
 
     @Test
     fun `opening splash animation displays Crafted by Sudhamoy and transitions cleanly`() {
-        assertEquals(1600L, com.example.ui.components.NYXORA_LAUNCH_ANIMATION_DURATION_MS)
+        assertEquals(5500L, com.example.ui.components.NYXORA_LAUNCH_ANIMATION_DURATION_MS)
         assertEquals("CRAFTED BY SUDHAMOY", com.example.ui.components.CRAFTED_BY_SUDHAMOY_BRAND)
+        assertEquals("BROWSE BEYOND LIMITS", com.example.ui.components.BROWSE_BEYOND_LIMITS_TAGLINE)
         assertEquals("BROWSE BEYOND", com.example.ui.components.BROWSE_BEYOND_SUBTITLE)
 
-        // Pause clock during Phases 1–2 (0–650ms equivalent) to confirm the N monogram forms BEFORE the NYXORA wordmark reveals
+        // Pause clock during Scene 2 (64ms of 260ms test clock ~ 1015ms canonical timeline)
+        // to confirm the N monogram forms FIRST before Y, X, O, R, A emerge
         composeTestRule.mainClock.autoAdvance = false
-        composeTestRule.mainClock.advanceTimeBy(40L)
+        composeTestRule.mainClock.advanceTimeBy(64L)
 
         composeTestRule.onNodeWithTag("splash_official_icon", useUnmergedTree = true).assertIsDisplayed()
         composeTestRule.onNodeWithTag("splash_wordmark_reveal", useUnmergedTree = true).assertExists()
         composeTestRule.onNodeWithTag("splash_brand_underline_track", useUnmergedTree = true).assertExists()
         composeTestRule.onNodeWithTag("nyxora_logo_silhouette_glow", useUnmergedTree = true).assertIsDisplayed()
         composeTestRule.onNodeWithTag("splash_phase_n_only_before_wordmark", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("splash_letter_emerged_N", useUnmergedTree = true).assertIsDisplayed()
+        assertEquals(
+            "Remaining letters Y, X, O, R, A must not appear while N is still forming in Scene 2",
+            0,
+            composeTestRule.onAllNodesWithTag("splash_letter_emerged_Y", useUnmergedTree = true).fetchSemanticsNodes().size
+        )
         assertEquals(
             "NYXORA wordmark must not reveal simultaneously with the initial N monogram formation",
             0,
             composeTestRule.onAllNodesWithTag("splash_phase_wordmark_revealed", useUnmergedTree = true).fetchSemanticsNodes().size
         )
 
-        // Advance into Phases 3–4 (650–1250ms equivalent) where NYXORA reveals left-to-right above the glowing laser underline
-        composeTestRule.mainClock.advanceTimeBy(120L)
+        // Advance into Scene 4 (total 220ms of 260ms test clock ~ 4315ms canonical timeline)
+        // where N -> Y -> X -> O -> R -> A have sequentially emerged and the complete logo + tagline are revealed
+        composeTestRule.mainClock.advanceTimeBy(156L)
 
         composeTestRule.onNodeWithTag("splash_phase_wordmark_revealed", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("splash_letter_emerged_N", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("splash_letter_emerged_Y", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("splash_letter_emerged_X", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("splash_letter_emerged_O", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("splash_letter_emerged_R", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("splash_letter_emerged_A", useUnmergedTree = true).assertIsDisplayed()
         composeTestRule.onNodeWithTag("splash_brand_title_text", useUnmergedTree = true).assertIsDisplayed()
         composeTestRule.onNodeWithTag("splash_laser_underline", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("splash_tagline_browse_beyond_limits", useUnmergedTree = true).assertIsDisplayed()
         composeTestRule.onNodeWithTag("splash_browse_beyond_subtitle", useUnmergedTree = true).assertIsDisplayed()
+        assertTrue(
+            composeTestRule.onAllNodesWithText("BROWSE BEYOND LIMITS", substring = false)
+                .fetchSemanticsNodes().isNotEmpty()
+        )
         assertTrue(
             composeTestRule.onAllNodesWithText("BROWSE BEYOND", substring = false)
                 .fetchSemanticsNodes().isNotEmpty()
@@ -3640,6 +3660,98 @@ class ExampleRobolectricTest {
         composeTestRule.waitForIdle()
     }
 
+    @Test
+    fun `nyxora connect live mirror mode verifies foreground service media projection handling and viewer live stream viewport`() {
+        composeTestRule.mainClock.advanceTimeBy(350L)
+        composeTestRule.waitForIdle()
+
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val vm = checkNotNull(composeTestRule.activity.activeBrowserViewModel)
+
+        fun waitUntilCondition(timeoutMs: Long = 4000L, condition: () -> Boolean) {
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (!condition() && System.currentTimeMillis() < deadline) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                composeTestRule.mainClock.advanceTimeBy(50L)
+                composeTestRule.waitForIdle()
+                Thread.sleep(20L)
+            }
+        }
+
+        // 1. Open NYXORA Connect and create a room as Host
+        vm.switchBrowsingMode(false)
+        vm.setOverlaySheet(com.example.ui.viewmodel.OverlaySheet.NYXORA_CONNECT)
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("connect_create_room_button").performClick()
+        waitUntilCondition { vm.connectManager.connectionStatus.value == com.example.domain.connect.SyncConnectionStatus.SYNCED }
+
+        // 2. Verify Mode A (Browse Together) and Live Mirror card controls are displayed in the Active Room
+        composeTestRule.onNodeWithTag("connect_live_mirror_card").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_operating_mode_badge", useUnmergedTree = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("connect_start_stop_live_mirror_button").performScrollTo().assertIsDisplayed()
+
+        // 3. Test MediaProjection denial handling via ViewModel
+        assertTrue(vm.prepareHostLiveMirrorLaunch(context))
+        assertEquals(
+            com.example.domain.connect.LiveMirrorSessionState.MIRROR_STARTING,
+            vm.connectManager.liveMirrorState.value.mirrorState
+        )
+        assertFalse(vm.onHostMediaProjectionResult(context, android.app.Activity.RESULT_CANCELED, null))
+        assertEquals(
+            com.example.domain.connect.LiveMirrorSessionState.BROWSING,
+            vm.connectManager.liveMirrorState.value.mirrorState
+        )
+
+        // 4. Test MediaProjection approval + NyxoraLiveMirrorForegroundService startup -> transitions to MIRROR_LIVE
+        assertTrue(vm.prepareHostLiveMirrorLaunch(context))
+        assertTrue(
+            vm.onHostMediaProjectionResult(
+                context = context,
+                resultCode = android.app.Activity.RESULT_OK,
+                data = android.content.Intent()
+            )
+        )
+        waitUntilCondition {
+            vm.connectManager.liveMirrorState.value.mirrorState == com.example.domain.connect.LiveMirrorSessionState.MIRROR_LIVE &&
+                com.example.domain.connect.NyxoraLiveMirrorForegroundService.isForegroundServiceActive
+        }
+        assertTrue(com.example.domain.connect.NyxoraLiveMirrorForegroundService.isForegroundServiceActive)
+
+        // 5. Connect a second Viewer session manager to the same room and verify Viewer enters LIVE mirror state
+        val viewerScope = kotlinx.coroutines.CoroutineScope(
+            kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Default
+        )
+        val viewerManager = com.example.domain.connect.NyxoraConnectSessionManager(
+            scope = viewerScope,
+            localDeviceId = "robolectric_viewer_device",
+            initialDeviceName = "Robolectric Viewer"
+        )
+        try {
+            val roomId = checkNotNull(vm.connectManager.roomState.value?.roomId)
+            assertTrue(viewerManager.joinRoom(roomId))
+            waitUntilCondition {
+                viewerManager.connectionStatus.value == com.example.domain.connect.SyncConnectionStatus.SYNCED &&
+                    viewerManager.liveMirrorState.value.isMirrorLive &&
+                    viewerManager.viewerMirrorConnectionState.value == com.example.domain.connect.ViewerMirrorConnectionState.LIVE
+            }
+            assertTrue(viewerManager.isViewerActivelyWatchingMirror)
+
+            // 6. Stop Live Mirror on Host -> ForegroundService stops and room returns to Browse Together mode
+            assertTrue(vm.stopHostLiveMirror(context))
+            waitUntilCondition {
+                vm.connectManager.liveMirrorState.value.mirrorState == com.example.domain.connect.LiveMirrorSessionState.BROWSING &&
+                    !com.example.domain.connect.NyxoraLiveMirrorForegroundService.isForegroundServiceActive &&
+                    viewerManager.liveMirrorState.value.mirrorState == com.example.domain.connect.LiveMirrorSessionState.BROWSING
+            }
+        } finally {
+            viewerManager.leaveOrCloseRoom()
+            vm.connectManager.leaveOrCloseRoom()
+            vm.setOverlaySheet(com.example.ui.viewmodel.OverlaySheet.NONE)
+            composeTestRule.waitForIdle()
+        }
+    }
+
     private fun findFirstWebView(root: View?): WebView? {
         if (root == null) return null
         if (root is WebView) return root
@@ -3652,8 +3764,4 @@ class ExampleRobolectricTest {
         return null
     }
 }
-
-
-
-
 

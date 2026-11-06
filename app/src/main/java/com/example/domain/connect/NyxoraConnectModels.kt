@@ -11,7 +11,184 @@ enum class RoomSyncMode(val label: String, val subtitle: String) {
     WATCH_TOGETHER(
         "Watch Together",
         "Synchronize compatible HTML5 video Play, Pause, and playback position"
+    ),
+    LIVE_MIRROR(
+        "Live Mirror",
+        "Stream Host's actual rendered screen and supported audio via WebRTC"
     )
+}
+
+/**
+ * Automatic state machine for Host-driven Live Mirror Mode:
+ * BROWSING -> MIRROR_STARTING -> MIRROR_LIVE -> MIRROR_STOPPING -> BROWSING
+ */
+enum class LiveMirrorSessionState(val label: String) {
+    BROWSING("Browse Together"),
+    MIRROR_STARTING("Starting Live Mirror…"),
+    MIRROR_LIVE("Live Mirror Active"),
+    MIRROR_STOPPING("Stopping Live Mirror…");
+
+    val isMirrorActiveOrTransitioning: Boolean
+        get() = this == MIRROR_STARTING || this == MIRROR_LIVE || this == MIRROR_STOPPING
+}
+
+/**
+ * Viewer-side WebRTC stream connection state while Host is in Live Mirror Mode.
+ */
+enum class ViewerMirrorConnectionState(val label: String) {
+    IDLE("Browse Together"),
+    CONNECTING("Connecting"),
+    LIVE("Live"),
+    RECONNECTING("Reconnecting"),
+    DISCONNECTED("Disconnected")
+}
+
+/**
+ * Adaptive resolution, frame-rate, and bitrate profiles for mobile screen mirroring.
+ */
+enum class LiveMirrorQualityProfile(
+    val label: String,
+    val width: Int,
+    val height: Int,
+    val fps: Int,
+    val maxBitrateKbps: Int
+) {
+    HIGH_SMOOTH("720p Smooth", 1280, 720, 30, 1800),
+    BALANCED("540p Balanced", 960, 540, 24, 1100),
+    BATTERY_SAVER("480p Battery Saver", 854, 480, 20, 750),
+    LOW_BANDWIDTH("360p Low Data", 640, 360, 15, 550);
+
+    val heightPx: Int
+        get() = height
+}
+
+data class WebRtcIceServerConfig(
+    val urls: List<String>,
+    val username: String = "",
+    val credential: String = "",
+    val isTurnRelay: Boolean = false,
+    val expiresAtMillis: Long = 0L
+) {
+    override fun toString(): String {
+        val maskedCredential = if (credential.isNotEmpty()) "[REDACTED]" else ""
+        return "WebRtcIceServerConfig(urls=$urls, username=$username, credential=$maskedCredential, isTurnRelay=$isTurnRelay, expiresAtMillis=$expiresAtMillis)"
+    }
+}
+
+data class LiveMirrorSessionMetadata(
+    val mirrorState: LiveMirrorSessionState = LiveMirrorSessionState.BROWSING,
+    val hostDeviceId: String = "",
+    val hostDeviceName: String = "Host",
+    val mirrorSessionId: String = "",
+    val isAudioShared: Boolean = true,
+    val qualityProfile: LiveMirrorQualityProfile = LiveMirrorQualityProfile.HIGH_SMOOTH,
+    val streamWidth: Int = LiveMirrorQualityProfile.HIGH_SMOOTH.width,
+    val streamHeight: Int = LiveMirrorQualityProfile.HIGH_SMOOTH.height,
+    val targetFps: Int = LiveMirrorQualityProfile.HIGH_SMOOTH.fps,
+    val maxBitrateKbps: Int = LiveMirrorQualityProfile.HIGH_SMOOTH.maxBitrateKbps,
+    val isProtectedContentWarning: Boolean = false,
+    val protectedContentMessage: String = "",
+    val updatedAtMillis: Long = 0L,
+    val sequenceNumber: Long = 0L
+) {
+    val sessionState: LiveMirrorSessionState
+        get() = mirrorState
+
+    val isMirrorLive: Boolean
+        get() = mirrorState == LiveMirrorSessionState.MIRROR_LIVE
+
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("mirrorState", mirrorState.name)
+        put("sessionState", mirrorState.name)
+        put("hostDeviceId", hostDeviceId)
+        put("hostDeviceName", hostDeviceName)
+        put("mirrorSessionId", mirrorSessionId)
+        put("isAudioShared", isAudioShared)
+        put("qualityProfile", qualityProfile.name)
+        put("streamWidth", streamWidth)
+        put("streamHeight", streamHeight)
+        put("targetFps", targetFps)
+        put("maxBitrateKbps", maxBitrateKbps)
+        put("isProtectedContentWarning", isProtectedContentWarning)
+        if (protectedContentMessage.isNotBlank()) {
+            put("protectedContentMessage", protectedContentMessage)
+        }
+        put("updatedAtMillis", updatedAtMillis)
+        put("sequenceNumber", sequenceNumber)
+    }
+
+    companion object {
+        fun fromJson(obj: JSONObject?): LiveMirrorSessionMetadata {
+            if (obj == null) return LiveMirrorSessionMetadata()
+            val rawState = obj.optString("mirrorState", "").ifBlank {
+                obj.optString("sessionState", LiveMirrorSessionState.BROWSING.name)
+            }
+            val state = runCatching {
+                LiveMirrorSessionState.valueOf(rawState)
+            }.getOrDefault(LiveMirrorSessionState.BROWSING)
+            val profile = runCatching {
+                LiveMirrorQualityProfile.valueOf(obj.optString("qualityProfile", LiveMirrorQualityProfile.HIGH_SMOOTH.name))
+            }.getOrDefault(LiveMirrorQualityProfile.HIGH_SMOOTH)
+            return LiveMirrorSessionMetadata(
+                mirrorState = state,
+                hostDeviceId = obj.optString("hostDeviceId", ""),
+                hostDeviceName = obj.optString("hostDeviceName", "Host").ifBlank { "Host" },
+                mirrorSessionId = obj.optString("mirrorSessionId", ""),
+                isAudioShared = obj.optBoolean("isAudioShared", true),
+                qualityProfile = profile,
+                streamWidth = obj.optInt("streamWidth", profile.width).coerceIn(320, 1920),
+                streamHeight = obj.optInt("streamHeight", profile.height).coerceIn(240, 1920),
+                targetFps = obj.optInt("targetFps", profile.fps).coerceIn(10, 60),
+                maxBitrateKbps = obj.optInt("maxBitrateKbps", profile.maxBitrateKbps).coerceIn(250, 4000),
+                isProtectedContentWarning = obj.optBoolean("isProtectedContentWarning", false),
+                protectedContentMessage = obj.optString("protectedContentMessage", ""),
+                updatedAtMillis = obj.optLong("updatedAtMillis", 0L),
+                sequenceNumber = obj.optLong("sequenceNumber", 0L)
+            )
+        }
+    }
+}
+
+data class WebRtcSignalPayload(
+    val mirrorSessionId: String,
+    val senderDeviceId: String,
+    val targetDeviceId: String,
+    val sdpType: String = "",
+    val sdp: String = "",
+    val sdpMid: String = "",
+    val sdpMLineIndex: Int = 0,
+    val candidate: String = ""
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("mirrorSessionId", mirrorSessionId)
+        put("senderDeviceId", senderDeviceId)
+        put("targetDeviceId", targetDeviceId)
+        if (sdpType.isNotBlank()) put("sdpType", sdpType)
+        if (sdp.isNotBlank()) put("sdp", sdp)
+        if (sdpMid.isNotBlank()) put("sdpMid", sdpMid)
+        put("sdpMLineIndex", sdpMLineIndex)
+        if (candidate.isNotBlank()) put("candidate", candidate)
+    }
+
+    companion object {
+        fun fromJson(obj: JSONObject?): WebRtcSignalPayload? {
+            if (obj == null) return null
+            val mirrorSessionId = obj.optString("mirrorSessionId", "").trim()
+            val senderDeviceId = obj.optString("senderDeviceId", "").trim()
+            val targetDeviceId = obj.optString("targetDeviceId", "").trim()
+            if (senderDeviceId.isEmpty()) return null
+            return WebRtcSignalPayload(
+                mirrorSessionId = mirrorSessionId,
+                senderDeviceId = senderDeviceId,
+                targetDeviceId = targetDeviceId,
+                sdpType = obj.optString("sdpType", "").trim(),
+                sdp = obj.optString("sdp", ""),
+                sdpMid = obj.optString("sdpMid", ""),
+                sdpMLineIndex = obj.optInt("sdpMLineIndex", 0),
+                candidate = obj.optString("candidate", "")
+            )
+        }
+    }
 }
 
 enum class RoomRole(val label: String) {
@@ -296,6 +473,7 @@ data class NyxoraConnectRoomState(
     val currentSyncedUrl: String = "",
     val currentSyncedTitle: String = "",
     val playbackState: WatchTogetherPlaybackState? = null,
+    val liveMirrorState: LiveMirrorSessionMetadata = LiveMirrorSessionMetadata(),
     val chatMessages: List<RoomChatMessage> = emptyList(),
     val createdAtMillis: Long = System.currentTimeMillis(),
     val expiresAtMillis: Long = System.currentTimeMillis() + DEFAULT_ROOM_TTL_MS,
@@ -323,6 +501,7 @@ data class NyxoraConnectRoomState(
         if (playbackState != null) {
             put("playbackState", playbackState.toJson())
         }
+        put("liveMirrorState", liveMirrorState.toJson())
         val chatArr = JSONArray()
         for (msg in chatMessages.takeLast(RoomChatMessage.MAX_CHAT_HISTORY)) {
             chatArr.put(msg.toJson())
@@ -372,6 +551,7 @@ data class NyxoraConnectRoomState(
                 currentSyncedUrl = obj.optString("currentSyncedUrl", ""),
                 currentSyncedTitle = obj.optString("currentSyncedTitle", ""),
                 playbackState = WatchTogetherPlaybackState.fromJson(obj.optJSONObject("playbackState")),
+                liveMirrorState = LiveMirrorSessionMetadata.fromJson(obj.optJSONObject("liveMirrorState")),
                 chatMessages = chatList.takeLast(RoomChatMessage.MAX_CHAT_HISTORY),
                 createdAtMillis = obj.optLong("createdAtMillis", 0L),
                 expiresAtMillis = obj.optLong("expiresAtMillis", 0L),
@@ -403,6 +583,12 @@ enum class RealtimeEventType {
     PLAYBACK_BEACON,
     REQUEST_RESYNC,
     CHAT_MESSAGE,
+    MIRROR_SESSION_STATE,
+    WEBRTC_VIEWER_READY,
+    WEBRTC_SIGNAL_OFFER,
+    WEBRTC_SIGNAL_ANSWER,
+    WEBRTC_SIGNAL_ICE_CANDIDATE,
+    MIRROR_REMOTE_CONTROL,
     PERMISSION_DENIED,
     ERROR_EVENT
 }
